@@ -85,7 +85,11 @@ fn next_seq(dir: &Path) -> i64 {
 
 fn request_text(name: &str, method: &str, url: &str, seq: i64) -> String {
     let verb = method.trim().to_lowercase();
-    let verb = if verb.is_empty() { "get".to_string() } else { verb };
+    let verb = if verb.is_empty() {
+        "get".to_string()
+    } else {
+        verb
+    };
     format!(
         "meta {{\n  name: {name}\n  type: http\n  seq: {seq}\n}}\n\n{verb} {{\n  url: {url}\n  body: none\n  auth: none\n}}\n"
     )
@@ -123,14 +127,22 @@ pub fn new_folder(parent: &Path, name: &str, at_root: bool) -> Result<PathBuf, S
         return Err(format!("\"{}\" already exists", dir.display()));
     }
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("folder.bru"), folder_text(name.trim(), next_seq(parent)))
-        .map_err(|e| e.to_string())?;
+    std::fs::write(
+        dir.join("folder.bru"),
+        folder_text(name.trim(), next_seq(parent)),
+    )
+    .map_err(|e| e.to_string())?;
     Ok(dir)
 }
 
 /// Rename a request file or folder, updating its `meta.name` too. Returns the
 /// new path.
-pub fn rename(path: &Path, is_folder: bool, new_name: &str, at_root: bool) -> Result<PathBuf, String> {
+pub fn rename(
+    path: &Path,
+    is_folder: bool,
+    new_name: &str,
+    at_root: bool,
+) -> Result<PathBuf, String> {
     validate(new_name, at_root)?;
     let parent = path.parent().ok_or("item has no parent directory")?;
     let stem = sanitize(new_name);
@@ -215,7 +227,9 @@ pub fn clone_to(src: &Path, dest_dir: &Path, is_folder: bool) -> Result<PathBuf,
     // Never copy a folder into itself or a descendant — that recurses forever.
     if is_folder {
         let s = src.canonicalize().unwrap_or_else(|_| src.to_path_buf());
-        let d = dest_dir.canonicalize().unwrap_or_else(|_| dest_dir.to_path_buf());
+        let d = dest_dir
+            .canonicalize()
+            .unwrap_or_else(|_| dest_dir.to_path_buf());
         if d == s || d.starts_with(&s) {
             return Err("Cannot paste a folder into itself or a subfolder".to_string());
         }
@@ -246,7 +260,11 @@ pub fn clone_to(src: &Path, dest_dir: &Path, is_folder: bool) -> Result<PathBuf,
     }
     let stem = {
         let s = sanitize(&candidate);
-        if s.is_empty() { fallback.to_string() } else { s }
+        if s.is_empty() {
+            fallback.to_string()
+        } else {
+            s
+        }
     };
     if is_folder {
         let dest = dest_dir.join(&stem);
@@ -499,9 +517,24 @@ mod tests {
     #[test]
     fn env_secret_names_roundtrip() {
         let rows = vec![
-            EnvRow { name: "BASE".into(), value: "http://x".into(), enabled: true, secret: false },
-            EnvRow { name: "TOKEN".into(), value: String::new(), enabled: true, secret: true },
-            EnvRow { name: "OTHER".into(), value: String::new(), enabled: true, secret: true },
+            EnvRow {
+                name: "BASE".into(),
+                value: "http://x".into(),
+                enabled: true,
+                secret: false,
+            },
+            EnvRow {
+                name: "TOKEN".into(),
+                value: String::new(),
+                enabled: true,
+                secret: true,
+            },
+            EnvRow {
+                name: "OTHER".into(),
+                value: String::new(),
+                enabled: true,
+                secret: true,
+            },
         ];
         let parsed = bru_lang::parse_env(&serialize_env(&rows));
         let secrets: Vec<&str> = parsed
@@ -512,7 +545,10 @@ mod tests {
         // No stray trailing commas baked into names.
         assert_eq!(secrets, vec!["TOKEN", "OTHER"]);
         assert_eq!(
-            parsed.iter().find(|v| v.name == "BASE").map(|v| v.value.as_str()),
+            parsed
+                .iter()
+                .find(|v| v.name == "BASE")
+                .map(|v| v.value.as_str()),
             Some("http://x")
         );
     }
@@ -535,5 +571,282 @@ mod tests {
         assert!(c.join("Inner.bru").exists());
         delete(&f, true).unwrap();
         assert!(!f.exists());
+    }
+
+    // ── sanitize edge cases ─────────────────────────────────────────────────
+    #[test]
+    fn sanitize_drops_control_chars() {
+        // Control chars (< 0x20) are dropped entirely.
+        let s = sanitize("a\u{0001}b\u{0009}c");
+        assert_eq!(s, "abc");
+    }
+
+    #[test]
+    fn sanitize_all_illegal_is_empty() {
+        // After replacing illegal with '-' and trimming '.'/' ', all-illegal that
+        // collapses to only trimmable chars yields empty.
+        assert_eq!(sanitize("..."), "");
+        assert_eq!(sanitize("   "), "");
+        assert_eq!(sanitize("\u{0001}\u{0002}"), "");
+    }
+
+    #[test]
+    fn sanitize_truncates_to_255() {
+        let long = "a".repeat(300);
+        assert_eq!(sanitize(&long).chars().count(), 255);
+    }
+
+    // ── validate: too-long name ────────────────────────────────────────────
+    #[test]
+    fn validate_rejects_too_long() {
+        let long = "a".repeat(256);
+        assert!(validate(&long, false).is_err());
+        // Exactly 255 is fine.
+        assert!(validate(&"a".repeat(255), false).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_no_usable_chars() {
+        // Non-empty trimmed, but sanitizes to empty.
+        assert!(validate("...", false).is_err());
+        assert!(validate("folder", false).is_err());
+    }
+
+    // ── display_name variants ──────────────────────────────────────────────
+    #[test]
+    fn display_name_request_meta() {
+        let d = TempDir::new("dn-req");
+        let p = new_request(&d.0, "Pretty Name", "GET", "x").unwrap();
+        assert_eq!(display_name(&p), "Pretty Name");
+    }
+
+    #[test]
+    fn display_name_folder_via_folder_bru() {
+        let d = TempDir::new("dn-fold");
+        let f = new_folder(&d.0, "My Folder", false).unwrap();
+        assert_eq!(display_name(&f), "My Folder");
+    }
+
+    #[test]
+    fn display_name_falls_back_to_stem() {
+        let d = TempDir::new("dn-fb");
+        // A .bru with no parseable meta.name -> falls back to file stem.
+        let p = d.0.join("Lonely.bru");
+        std::fs::write(&p, "not valid bru at all <<<").unwrap();
+        let name = display_name(&p);
+        // Either parse fails (-> stem) or name empty (-> stem).
+        assert_eq!(name, "Lonely");
+    }
+
+    #[test]
+    fn display_name_unreadable_uses_stem() {
+        // A path that doesn't exist -> read fails -> stem fallback.
+        let name = display_name(Path::new("/nonexistent/Ghost.bru"));
+        assert_eq!(name, "Ghost");
+    }
+
+    // ── clone_to auto-dedup ────────────────────────────────────────────────
+    #[test]
+    fn clone_to_dedups_copy_and_copy_2() {
+        let d = TempDir::new("cto");
+        let src = new_request(&d.0, "Item", "GET", "x").unwrap();
+        // First paste into same dir -> "Item copy".
+        let c1 = clone_to(&src, &d.0, false).unwrap();
+        assert!(c1
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("Item copy"));
+        // Second paste -> "Item copy 2".
+        let c2 = clone_to(&src, &d.0, false).unwrap();
+        let stem2 = c2.file_stem().unwrap().to_str().unwrap();
+        assert!(stem2.contains("copy 2") || stem2.contains("copy 3"));
+        assert!(c1.exists() && c2.exists());
+    }
+
+    #[test]
+    fn clone_to_folder_recursive() {
+        let d = TempDir::new("cto-fold");
+        let f = new_folder(&d.0, "Box", false).unwrap();
+        new_request(&f, "Inner", "GET", "x").unwrap();
+        let dest_dir = TempDir::new("cto-dest");
+        let pasted = clone_to(&f, &dest_dir.0, true).unwrap();
+        assert!(pasted.join("Inner.bru").exists());
+        assert!(pasted.join("folder.bru").exists());
+    }
+
+    // ── save_env preserves leading color line ──────────────────────────────
+    #[test]
+    fn save_env_preserves_color_line() {
+        let d = TempDir::new("env-color");
+        let dir = d.0.join("environments");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dev.bru");
+        std::fs::write(&path, "color: #ff0000\n\nvars {\n}\n").unwrap();
+        let rows = vec![EnvRow {
+            name: "A".into(),
+            value: "1".into(),
+            enabled: true,
+            secret: false,
+        }];
+        save_env(&d.0, "dev", &rows).unwrap();
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert!(out.contains("color: #ff0000"));
+        assert!(out.contains("A: 1"));
+    }
+
+    #[test]
+    fn save_env_disabled_and_secret_rows() {
+        let d = TempDir::new("env-ser");
+        let rows = vec![
+            EnvRow {
+                name: "ON".into(),
+                value: "1".into(),
+                enabled: true,
+                secret: false,
+            },
+            EnvRow {
+                name: "OFF".into(),
+                value: "2".into(),
+                enabled: false,
+                secret: false,
+            },
+            EnvRow {
+                name: "SEC".into(),
+                value: "x".into(),
+                enabled: true,
+                secret: true,
+            },
+        ];
+        save_env(&d.0, "prod", &rows).unwrap();
+        let path = d.0.join("environments").join("prod.bru");
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert!(out.contains("ON: 1"));
+        assert!(out.contains("~OFF: 2")); // disabled prefix
+        assert!(out.contains("vars:secret"));
+        assert!(out.contains("SEC"));
+        assert!(!out.contains("SEC: x")); // secret value never written
+    }
+
+    // ── create_env / delete_env ────────────────────────────────────────────
+    #[test]
+    fn create_env_and_duplicate_error() {
+        let d = TempDir::new("env-create");
+        create_env(&d.0, "stage").unwrap();
+        assert!(env_path(&d.0, "stage").exists());
+        // Duplicate -> error.
+        assert!(create_env(&d.0, "stage").is_err());
+        // Invalid name -> error.
+        assert!(create_env(&d.0, "").is_err());
+    }
+
+    #[test]
+    fn delete_env_removes_file() {
+        let d = TempDir::new("env-del");
+        create_env(&d.0, "temp").unwrap();
+        assert!(env_path(&d.0, "temp").exists());
+        delete_env(&d.0, "temp").unwrap();
+        assert!(!env_path(&d.0, "temp").exists());
+        // Deleting a missing env -> error.
+        assert!(delete_env(&d.0, "ghost").is_err());
+    }
+
+    // ── rename_env ─────────────────────────────────────────────────────────
+    #[test]
+    fn rename_env_collision_errors() {
+        let d = TempDir::new("env-ren");
+        create_env(&d.0, "a").unwrap();
+        create_env(&d.0, "b").unwrap();
+        // Rename a -> b collides.
+        assert!(rename_env(&d.0, "a", "b").is_err());
+        // Rename a -> c works.
+        rename_env(&d.0, "a", "c").unwrap();
+        assert!(env_path(&d.0, "c").exists());
+        assert!(!env_path(&d.0, "a").exists());
+    }
+
+    // ── duplicate_env ──────────────────────────────────────────────────────
+    #[test]
+    fn duplicate_env_dedups() {
+        let d = TempDir::new("env-dup");
+        create_env(&d.0, "src").unwrap();
+        duplicate_env(&d.0, "src").unwrap();
+        assert!(env_path(&d.0, "src copy").exists());
+        // Second duplicate -> "src copy 2".
+        duplicate_env(&d.0, "src").unwrap();
+        assert!(env_path(&d.0, "src copy 2").exists());
+        // Duplicating a missing env -> error.
+        assert!(duplicate_env(&d.0, "ghost").is_err());
+    }
+
+    // ── set_seq ────────────────────────────────────────────────────────────
+    #[test]
+    fn set_seq_writes_meta() {
+        let d = TempDir::new("seq");
+        let p = new_request(&d.0, "Req", "GET", "x").unwrap();
+        set_seq(&p, 42).unwrap();
+        let f = bru_lang::parse(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(f.dict_value("meta", "seq"), Some("42"));
+        // Missing file -> error.
+        assert!(set_seq(Path::new("/nonexistent/x.bru"), 1).is_err());
+    }
+
+    // ── new_folder reserved-at-root ────────────────────────────────────────
+    #[test]
+    fn new_folder_reserved_at_root_errors() {
+        let d = TempDir::new("fold-res");
+        // "environments" is reserved at the collection root.
+        assert!(new_folder(&d.0, "environments", true).is_err());
+        // But allowed when not at root.
+        assert!(new_folder(&d.0, "environments", false).is_ok());
+        // Duplicate folder -> error.
+        new_folder(&d.0, "Dup", false).unwrap();
+        assert!(new_folder(&d.0, "Dup", false).is_err());
+    }
+
+    // ── clone request name dedup error path ────────────────────────────────
+    #[test]
+    fn clone_request_duplicate_errors() {
+        let d = TempDir::new("clone-dup");
+        let p = new_request(&d.0, "Orig", "GET", "x").unwrap();
+        clone(&p, false, "Copy A").unwrap();
+        // Cloning to an existing name -> error.
+        assert!(clone(&p, false, "Copy A").is_err());
+    }
+
+    // ── clone_suggested_name ───────────────────────────────────────────────
+    #[test]
+    fn clone_suggested_name_appends_copy() {
+        let d = TempDir::new("sugg");
+        let p = new_request(&d.0, "Thing", "GET", "x").unwrap();
+        assert_eq!(clone_suggested_name(&p), "Thing copy");
+    }
+
+    // ── clone folder onto existing dest -> error ───────────────────────────
+    #[test]
+    fn clone_folder_existing_dest_errors() {
+        let d = TempDir::new("clone-fold-dup");
+        let f = new_folder(&d.0, "Src", false).unwrap();
+        new_folder(&d.0, "Dest", false).unwrap();
+        // Cloning Src to the name "Dest" (already exists) -> error.
+        assert!(clone(&f, true, "Dest").is_err());
+    }
+
+    // ── rename missing source -> IO error ──────────────────────────────────
+    #[test]
+    fn rename_missing_source_errors() {
+        let d = TempDir::new("ren-missing");
+        let ghost = d.0.join("ghost.bru");
+        // The on-disk rename fails because the source doesn't exist.
+        assert!(rename(&ghost, false, "New", false).is_err());
+    }
+
+    // ── clone request from a missing source -> read error ──────────────────
+    #[test]
+    fn clone_missing_source_errors() {
+        let d = TempDir::new("clone-missing");
+        let ghost = d.0.join("ghost.bru");
+        assert!(clone(&ghost, false, "Copy").is_err());
     }
 }

@@ -106,7 +106,13 @@ pub async fn run_request(file: &BruFile, ctx: &mut RunContext) -> RunOutcome {
     if let Some(src) = file.script_pre() {
         let out = run_script(
             &src,
-            &script_input(&ctx.vars, &req, None, ctx.script_dir.clone(), ctx.developer_mode),
+            &script_input(
+                &ctx.vars,
+                &req,
+                None,
+                ctx.script_dir.clone(),
+                ctx.developer_mode,
+            ),
         );
         ctx.vars = out.vars;
         console.extend(out.console);
@@ -187,20 +193,19 @@ pub async fn run_request(file: &BruFile, ctx: &mut RunContext) -> RunOutcome {
     // per-send on the shared client. Timeout overrides, by contrast, are applied
     // per-send inside bru-http and need no separate client. On build failure we
     // fall back to the shared client rather than aborting the request.
-    let req_client = if req.settings.follow_redirects.is_some()
-        || req.settings.max_redirects.is_some()
-    {
-        let mut o = ctx.send_options.clone();
-        if let Some(f) = req.settings.follow_redirects {
-            o.follow_redirects = f;
-        }
-        if let Some(m) = req.settings.max_redirects {
-            o.max_redirects = m as usize;
-        }
-        HttpClient::new(&o).ok()
-    } else {
-        None
-    };
+    let req_client =
+        if req.settings.follow_redirects.is_some() || req.settings.max_redirects.is_some() {
+            let mut o = ctx.send_options.clone();
+            if let Some(f) = req.settings.follow_redirects {
+                o.follow_redirects = f;
+            }
+            if let Some(m) = req.settings.max_redirects {
+                o.max_redirects = m as usize;
+            }
+            HttpClient::new(&o).ok()
+        } else {
+            None
+        };
     let client = req_client.as_ref().unwrap_or(&ctx.client);
 
     // Digest auth is a challenge/response: stash the credentials, then clear the

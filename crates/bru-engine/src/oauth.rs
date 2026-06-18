@@ -102,3 +102,99 @@ pub fn apply_token(req: &mut Request, cfg: &OAuth2, token: &str) {
     }
     req.auth = Auth::None;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> OAuth2 {
+        OAuth2 {
+            grant_type: "client_credentials".to_string(),
+            access_token_url: "https://auth.example/token".to_string(),
+            client_id: "id".to_string(),
+            client_secret: "sec".to_string(),
+            scope: "read".to_string(),
+            username: String::new(),
+            password: String::new(),
+            credentials_placement: "body".to_string(),
+            token_placement: "header".to_string(),
+            token_header_prefix: String::new(),
+            token_query_key: String::new(),
+        }
+    }
+
+    #[test]
+    fn cache_key_includes_distinguishing_fields() {
+        let a = cfg();
+        let mut b = cfg();
+        b.scope = "write".to_string();
+        // Different scope → different cache key (independent tokens).
+        assert_ne!(cache_key(&a), cache_key(&b));
+        // Same config → identical key (cache hit).
+        assert_eq!(cache_key(&a), cache_key(&cfg()));
+        // The key embeds the five identity fields.
+        let k = cache_key(&a);
+        assert!(k.contains("client_credentials"));
+        assert!(k.contains("https://auth.example/token"));
+        assert!(k.contains("|id|"));
+        assert!(k.contains("|read|"));
+    }
+
+    #[test]
+    fn apply_token_header_default_bearer_prefix() {
+        let mut req = Request::default();
+        apply_token(&mut req, &cfg(), "tok");
+        let auth = req
+            .headers
+            .iter()
+            .find(|h| h.name == "Authorization")
+            .unwrap();
+        assert_eq!(auth.value, "Bearer tok");
+        // Auth is cleared after the token is baked in.
+        assert!(matches!(req.auth, Auth::None));
+        assert!(req.query.is_empty());
+    }
+
+    #[test]
+    fn apply_token_header_custom_prefix() {
+        let mut c = cfg();
+        c.token_header_prefix = "Token".to_string();
+        let mut req = Request::default();
+        apply_token(&mut req, &c, "tok");
+        assert_eq!(req.headers[0].value, "Token tok");
+    }
+
+    #[test]
+    fn apply_token_header_empty_prefix_uses_bare_token() {
+        // An explicitly-empty prefix is not the same as the default: the header
+        // carries the raw token with no scheme word.
+        let mut c = cfg();
+        c.token_header_prefix = " ".to_string(); // non-empty so default skipped
+        let mut req = Request::default();
+        apply_token(&mut req, &c, "tok");
+        assert_eq!(req.headers[0].value, "  tok");
+    }
+
+    #[test]
+    fn apply_token_query_default_key() {
+        let mut c = cfg();
+        c.token_placement = "query".to_string();
+        c.token_query_key = String::new(); // → defaults to access_token
+        let mut req = Request::default();
+        apply_token(&mut req, &c, "tok");
+        assert_eq!(req.query[0].name, "access_token");
+        assert_eq!(req.query[0].value, "tok");
+        assert!(req.headers.is_empty());
+    }
+
+    #[test]
+    fn apply_token_query_custom_key() {
+        let mut c = cfg();
+        c.token_placement = "query".to_string();
+        c.token_query_key = "at".to_string();
+        let mut req = Request::default();
+        apply_token(&mut req, &c, "tok");
+        assert_eq!(req.query[0].name, "at");
+        assert_eq!(req.query[0].value, "tok");
+    }
+}

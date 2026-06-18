@@ -191,7 +191,10 @@ impl<'a> Parser<'a> {
 
     fn parse_list_block(&mut self, name: String) -> Result<Block, ParseError> {
         let items = self.read_list_items(&name)?;
-        Ok(Block { name, content: BlockContent::List(items) })
+        Ok(Block {
+            name,
+            content: BlockContent::List(items),
+        })
     }
 
     fn parse_dict_block(&mut self, name: String) -> Result<Block, ParseError> {

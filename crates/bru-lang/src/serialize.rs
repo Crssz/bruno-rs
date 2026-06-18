@@ -20,11 +20,7 @@ fn serialize_block(block: &Block) -> String {
                 format!("{} {{\n}}", block.name)
             } else {
                 let body: Vec<String> = entries.iter().map(serialize_entry).collect();
-                format!(
-                    "{} {{\n{}\n}}",
-                    block.name,
-                    indent_string(&body.join("\n"))
-                )
+                format!("{} {{\n{}\n}}", block.name, indent_string(&body.join("\n")))
             }
         }
         BlockContent::Text(text) => {
@@ -126,4 +122,35 @@ fn strip_last_line(mut s: String) -> String {
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indent_string_empty_returns_empty() {
+        // The early-return branch for an empty input.
+        assert_eq!(indent_string(""), "");
+    }
+
+    #[test]
+    fn indent_string_prefixes_each_line_and_normalizes_crlf() {
+        // Multi-line input: split_lines strips `\r`, each line gets 2 spaces.
+        assert_eq!(indent_string("a\r\nb\nc"), "  a\n  b\n  c");
+        // Single line, no trailing newline.
+        assert_eq!(indent_string("solo"), "  solo");
+    }
+
+    #[test]
+    fn strip_last_line_handles_lf_crlf_and_none() {
+        // Plain `\n` → dropped (the inner `\r` check is false).
+        assert_eq!(strip_last_line("x\n".to_string()), "x");
+        // `\r\n` → both popped (covers the inner `\r` pop).
+        assert_eq!(strip_last_line("x\r\n".to_string()), "x");
+        // No trailing newline → unchanged.
+        assert_eq!(strip_last_line("x".to_string()), "x");
+        // Lone `\r` (no `\n`) → unchanged (outer `if` false).
+        assert_eq!(strip_last_line("x\r".to_string()), "x\r");
+    }
 }

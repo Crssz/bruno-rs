@@ -264,10 +264,13 @@ pub fn resolve(req: &mut Request, now_unix: u64) -> Result<(), String> {
         &region,
     );
 
-    req.headers.push(KeyVal::new("x-amz-date", &signed.amz_date));
-    req.headers.push(KeyVal::new("Authorization", &signed.authorization));
+    req.headers
+        .push(KeyVal::new("x-amz-date", &signed.amz_date));
+    req.headers
+        .push(KeyVal::new("Authorization", &signed.authorization));
     if let Some(token) = signed.security_token {
-        req.headers.push(KeyVal::new("x-amz-security-token", &token));
+        req.headers
+            .push(KeyVal::new("x-amz-security-token", &token));
     }
     req.auth = Auth::None;
     Ok(())
@@ -388,5 +391,260 @@ mod tests {
     #[test]
     fn url_parse_keeps_non_default_port() {
         assert_eq!(url_parse("http://h:8080/").unwrap().host, "h:8080");
+    }
+
+    #[test]
+    fn sign_with_session_token_includes_security_token_and_signed_header() {
+        let signed = sign(
+            "GET",
+            "/",
+            "",
+            "example.amazonaws.com",
+            b"",
+            "20150830T123600Z",
+            "AKIDEXAMPLE",
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            "SESSIONTOKEN",
+            "service",
+            "us-east-1",
+        );
+        assert_eq!(signed.security_token.as_deref(), Some("SESSIONTOKEN"));
+        // x-amz-security-token participates in the signed-headers list.
+        assert!(
+            signed.authorization.contains("x-amz-security-token"),
+            "auth: {}",
+            signed.authorization
+        );
+    }
+
+    #[test]
+    fn amz_date_handles_epoch_and_pre_epoch_fallback() {
+        // The Unix epoch itself.
+        assert_eq!(amz_date_from_unix(0), "19700101T000000Z");
+        // A leap-year boundary (2000-03-01) exercises the civil-from-days branch
+        // where month/day roll into March (mp >= 10 path) and Feb-29 handling.
+        // 2000-02-29T00:00:00Z == 951782400.
+        assert_eq!(amz_date_from_unix(951_782_400), "20000229T000000Z");
+        // A time with non-zero hour/min/sec.
+        assert_eq!(amz_date_from_unix(1), "19700101T000001Z");
+    }
+
+    #[test]
+    fn uri_encode_passes_unreserved_through() {
+        // All unreserved characters survive verbatim.
+        assert_eq!(uri_encode("Az0-._~"), "Az0-._~");
+        // A reserved byte (e.g. `+`) is percent-encoded.
+        assert_eq!(uri_encode("a+b"), "a%2Bb");
+    }
+
+    // ── payload_bytes coverage for every Body variant ───────────────────────
+
+    #[test]
+    fn payload_bytes_none_is_empty() {
+        assert!(payload_bytes(&Body::None).is_empty());
+    }
+
+    #[test]
+    fn payload_bytes_text_like_variants() {
+        assert_eq!(payload_bytes(&Body::Json("{}".into())), b"{}");
+        assert_eq!(payload_bytes(&Body::Text("hi".into())), b"hi");
+        assert_eq!(payload_bytes(&Body::Xml("<a/>".into())), b"<a/>");
+        assert_eq!(payload_bytes(&Body::Sparql("SELECT".into())), b"SELECT");
+    }
+
+    #[test]
+    fn payload_bytes_form_urlencoded_filters_disabled() {
+        let body = Body::FormUrlEncoded(vec![
+            KeyVal::new("a", "1"),
+            KeyVal {
+                name: "skip".into(),
+                value: "x".into(),
+                enabled: false,
+            },
+            KeyVal::new("b", "2"),
+        ]);
+        let bytes = payload_bytes(&body);
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(s.contains("a=1") && s.contains("b=2"), "got: {s}");
+        assert!(!s.contains("skip"), "disabled field leaked: {s}");
+    }
+
+    #[test]
+    fn payload_bytes_graphql_empty_and_present_variables() {
+        // Empty variables → `{}`.
+        let empty = payload_bytes(&Body::GraphQl {
+            query: "Q".into(),
+            variables: "   ".into(),
+        });
+        let v: serde_json::Value = serde_json::from_slice(&empty).unwrap();
+        assert_eq!(v["variables"], serde_json::json!({}));
+        assert_eq!(v["query"], "Q");
+
+        // Valid JSON variables are embedded.
+        let with = payload_bytes(&Body::GraphQl {
+            query: "Q".into(),
+            variables: r#"{"id":5}"#.into(),
+        });
+        let v2: serde_json::Value = serde_json::from_slice(&with).unwrap();
+        assert_eq!(v2["variables"]["id"], 5);
+
+        // Invalid JSON variables fall back to `{}` rather than failing.
+        let bad = payload_bytes(&Body::GraphQl {
+            query: "Q".into(),
+            variables: "not json".into(),
+        });
+        let v3: serde_json::Value = serde_json::from_slice(&bad).unwrap();
+        assert_eq!(v3["variables"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn payload_bytes_multipart_is_empty() {
+        assert!(payload_bytes(&Body::MultipartForm(vec![])).is_empty());
+    }
+
+    #[test]
+    fn payload_bytes_file_reads_selected_then_first() {
+        use bru_core::FileBodyItem;
+        // No usable path → empty.
+        assert!(payload_bytes(&Body::File(vec![])).is_empty());
+        assert!(payload_bytes(&Body::File(vec![FileBodyItem {
+            path: "   ".into(),
+            content_type: None,
+            selected: true,
+        }]))
+        .is_empty());
+
+        // A missing file path reads as empty (read fails → unwrap_or_default).
+        let bytes = payload_bytes(&Body::File(vec![FileBodyItem {
+            path: "C:/definitely/not/here-xyzzy.bin".into(),
+            content_type: None,
+            selected: true,
+        }]));
+        assert!(bytes.is_empty());
+
+        // A real file: write to temp, prefer the selected one.
+        let dir = std::env::temp_dir();
+        let p_sel = dir.join(format!("bru-sigv4-sel-{}.bin", std::process::id()));
+        let p_first = dir.join(format!("bru-sigv4-first-{}.bin", std::process::id()));
+        std::fs::write(&p_sel, b"selected-bytes").unwrap();
+        std::fs::write(&p_first, b"first-bytes").unwrap();
+        let body = Body::File(vec![
+            FileBodyItem {
+                path: p_first.to_string_lossy().to_string(),
+                content_type: None,
+                selected: false,
+            },
+            FileBodyItem {
+                path: p_sel.to_string_lossy().to_string(),
+                content_type: None,
+                selected: true,
+            },
+        ]);
+        assert_eq!(payload_bytes(&body), b"selected-bytes");
+
+        // None selected → falls back to first.
+        let body2 = Body::File(vec![FileBodyItem {
+            path: p_first.to_string_lossy().to_string(),
+            content_type: None,
+            selected: false,
+        }]);
+        assert_eq!(payload_bytes(&body2), b"first-bytes");
+
+        let _ = std::fs::remove_file(&p_sel);
+        let _ = std::fs::remove_file(&p_first);
+    }
+
+    // ── resolve() coverage ──────────────────────────────────────────────────
+
+    fn awsv4_req(url: &str) -> Request {
+        Request {
+            method: "GET".to_string(),
+            url: url.to_string(),
+            auth: Auth::AwsV4 {
+                access_key_id: "AKIDEXAMPLE".to_string(),
+                secret_access_key: "secret".to_string(),
+                session_token: String::new(),
+                service: String::new(),
+                region: String::new(),
+                profile_name: String::new(),
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_noop_for_non_awsv4_auth() {
+        let mut req = Request {
+            url: "https://x.example/".to_string(),
+            auth: Auth::None,
+            ..Default::default()
+        };
+        assert!(resolve(&mut req, 0).is_ok());
+        // Untouched: no headers pushed, auth unchanged.
+        assert!(req.headers.is_empty());
+        assert!(matches!(req.auth, Auth::None));
+    }
+
+    #[test]
+    fn resolve_defaults_service_and_region_when_blank() {
+        let mut req = awsv4_req("https://api.example.com/path");
+        resolve(&mut req, 1_440_938_160).unwrap();
+        // Defaults: execute-api / us-east-1.
+        let auth = req
+            .headers
+            .iter()
+            .find(|h| h.name == "Authorization")
+            .unwrap();
+        assert!(
+            auth.value.contains("/us-east-1/execute-api/aws4_request"),
+            "credential scope: {}",
+            auth.value
+        );
+        // x-amz-date pushed; auth cleared.
+        assert!(req.headers.iter().any(|h| h.name == "x-amz-date"));
+        assert!(matches!(req.auth, Auth::None));
+        // No session token → no security-token header.
+        assert!(!req.headers.iter().any(|h| h.name == "x-amz-security-token"));
+    }
+
+    #[test]
+    fn resolve_signs_canonical_query_from_url_and_request() {
+        let mut req = awsv4_req("https://api.example.com/p?b=2&a=1");
+        req.query.push(KeyVal::new("c", "3"));
+        resolve(&mut req, 1_440_938_160).unwrap();
+        // It produced a signature without error; root path empty → canonical "/".
+        assert!(req
+            .headers
+            .iter()
+            .any(|h| h.name == "Authorization" && h.value.contains("Signature=")));
+    }
+
+    #[test]
+    fn resolve_empty_path_becomes_root() {
+        // No path component → canonical_uri defaults to "/".
+        let mut req = awsv4_req("https://api.example.com");
+        assert!(resolve(&mut req, 0).is_ok());
+        assert!(req.headers.iter().any(|h| h.name == "Authorization"));
+    }
+
+    #[test]
+    fn resolve_multipart_body_is_rejected() {
+        let mut req = awsv4_req("https://api.example.com/");
+        req.body = Body::MultipartForm(vec![]);
+        let err = resolve(&mut req, 0).unwrap_err();
+        assert_eq!(err, "awsv4: signing multipart bodies is not supported");
+    }
+
+    #[test]
+    fn resolve_bad_url_errors() {
+        let mut req = awsv4_req("http://");
+        assert!(resolve(&mut req, 0).is_err());
+    }
+
+    #[test]
+    fn url_parse_rejects_missing_host() {
+        // A non-http scheme with no authority → no host_str.
+        assert!(url_parse("mailto:nobody@example.com").is_err());
+        assert!(url_parse("not a url at all").is_err());
     }
 }

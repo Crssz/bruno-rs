@@ -506,6 +506,7 @@ dependencies = [
  "iced",
  "rfd",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

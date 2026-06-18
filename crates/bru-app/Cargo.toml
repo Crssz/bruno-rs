@@ -17,3 +17,6 @@ bru-http.workspace = true
 serde_json.workspace = true
 iced = { version = "0.14", features = ["tokio", "highlighter"] }
 rfd = "0.15"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util"] }

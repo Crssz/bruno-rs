@@ -15,7 +15,11 @@ pub struct KeyVal {
 impl KeyVal {
     /// An enabled row from name/value.
     pub fn new(name: &str, value: &str) -> Self {
-        KeyVal { name: name.to_string(), value: value.to_string(), enabled: true }
+        KeyVal {
+            name: name.to_string(),
+            value: value.to_string(),
+            enabled: true,
+        }
     }
 }
 
@@ -477,7 +481,11 @@ fn parse_file_ref(raw: &str) -> (String, Option<String>) {
     };
     // `file_part` ends with the `@file(` closing paren (plus optional whitespace).
     let trimmed = file_part.trim_end();
-    let path = trimmed.strip_suffix(')').unwrap_or(trimmed).trim().to_string();
+    let path = trimmed
+        .strip_suffix(')')
+        .unwrap_or(trimmed)
+        .trim()
+        .to_string();
     (path, content_type)
 }
 
@@ -498,7 +506,18 @@ fn outdent(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_file_ref;
+    use super::*;
+    use crate::model::{Entry, Key, Value};
+
+    fn entry(key: &str, value: &str, disabled: bool) -> Entry {
+        Entry {
+            annotations: vec![],
+            disabled,
+            local: false,
+            key: Key::Bare(key.to_string()),
+            value: Value::Inline(value.to_string()),
+        }
+    }
 
     #[test]
     fn file_ref_keeps_parens_in_path() {
@@ -518,5 +537,128 @@ mod tests {
             parse_file_ref("@file(/tmp/plain.txt)"),
             ("/tmp/plain.txt".to_string(), None)
         );
+    }
+
+    #[test]
+    fn file_ref_without_prefix_returns_raw() {
+        // No `@file(` prefix -> early return of (raw, None).
+        assert_eq!(
+            parse_file_ref("just/a/path.txt"),
+            ("just/a/path.txt".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn file_ref_unterminated_paren_falls_back_to_trimmed() {
+        // No closing `)` to strip -> strip_suffix fails, the whole rest is the path.
+        assert_eq!(
+            parse_file_ref("@file(/tmp/x.bin"),
+            ("/tmp/x.bin".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn file_ref_content_type_with_trailing_whitespace_trimmed() {
+        assert_eq!(
+            parse_file_ref("@file(/tmp/a.bin) @contentType(  text/plain  )"),
+            ("/tmp/a.bin".to_string(), Some("text/plain".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_multipart_field_text_and_file() {
+        // plain text value
+        let text = parse_multipart_field(&entry("name", "  hello  ", false));
+        assert_eq!(text.name, "name");
+        assert_eq!(text.value, MultipartValue::Text("hello".to_string()));
+        assert_eq!(text.content_type, None);
+        assert!(text.enabled);
+
+        // @file(...) value -> File variant, disabled propagates to enabled=false
+        let file = parse_multipart_field(&entry(
+            "doc",
+            "@file(/tmp/a.pdf) @contentType(application/pdf)",
+            true,
+        ));
+        assert_eq!(file.value, MultipartValue::File("/tmp/a.pdf".to_string()));
+        assert_eq!(file.content_type, Some("application/pdf".to_string()));
+        assert!(!file.enabled);
+    }
+
+    #[test]
+    fn parse_file_body_item_selected_flag() {
+        let sel = parse_file_body_item(&entry("file", "@file(/tmp/a.bin)", false));
+        assert_eq!(sel.path, "/tmp/a.bin");
+        assert_eq!(sel.content_type, None);
+        assert!(sel.selected);
+
+        let unsel = parse_file_body_item(&entry(
+            "file",
+            "@file(/tmp/b.bin) @contentType(application/octet-stream)",
+            true,
+        ));
+        assert!(!unsel.selected);
+        assert_eq!(
+            unsel.content_type,
+            Some("application/octet-stream".to_string())
+        );
+    }
+
+    #[test]
+    fn text_block_on_dict_returns_none() {
+        // `text_block` over a non-Text block hits its `_ => None` arm: a `tests`
+        // block that is a Dict (not verbatim text) yields no script.
+        let f = BruFile {
+            blocks: vec![crate::model::Block {
+                name: "tests".to_string(),
+                content: crate::model::BlockContent::Dict(vec![entry("a", "1", false)]),
+            }],
+        };
+        assert!(matches!(
+            f.block("tests").unwrap().content,
+            crate::model::BlockContent::Dict(_)
+        ));
+        assert_eq!(f.tests_script(), None);
+    }
+
+    #[test]
+    fn method_dict_value_non_inline_value_is_empty() {
+        // A method-block key whose value is a List (not Inline) -> `_ => ""`.
+        let block = crate::model::Block {
+            name: "get".to_string(),
+            content: crate::model::BlockContent::Dict(vec![Entry {
+                annotations: vec![],
+                disabled: false,
+                local: false,
+                key: Key::Bare("url".to_string()),
+                value: Value::List(vec!["x".to_string()]),
+            }]),
+        };
+        assert_eq!(method_dict_value(&block, "url"), Some(""));
+        // a missing key -> None
+        assert_eq!(method_dict_value(&block, "missing"), None);
+    }
+
+    #[test]
+    fn method_dict_value_on_non_dict_block_returns_none() {
+        // A method block whose content is Text (not Dict) -> `_ => None`.
+        let block = crate::model::Block {
+            name: "get".to_string(),
+            content: crate::model::BlockContent::Text("raw".to_string()),
+        };
+        assert_eq!(method_dict_value(&block, "url"), None);
+    }
+
+    #[test]
+    fn outdent_strips_two_spaces_and_crlf() {
+        // exactly two leading spaces stripped per line
+        assert_eq!(outdent("  a\n  b"), "a\nb");
+        // fewer than two leading spaces -> line unchanged
+        assert_eq!(outdent(" x"), " x");
+        assert_eq!(outdent("y"), "y");
+        // CRLF: the trailing '\r' is dropped before stripping the indent
+        assert_eq!(outdent("  a\r\n  b\r"), "a\nb");
+        // empty input
+        assert_eq!(outdent(""), "");
     }
 }

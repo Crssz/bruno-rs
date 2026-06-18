@@ -227,4 +227,138 @@ mod tests {
             "header was: {header}"
         );
     }
+
+    #[test]
+    fn parses_lowercase_scheme_and_bare_values() {
+        // Lowercase `digest` prefix + a bare (unquoted) value for `qop`.
+        let ch = parse_challenge("digest realm=\"r\", nonce=abc123, qop=auth").unwrap();
+        assert_eq!(ch.realm, "r");
+        assert_eq!(ch.nonce, "abc123");
+        assert_eq!(ch.qop.as_deref(), Some("auth"));
+        assert!(ch.opaque.is_none());
+        assert!(ch.algorithm.is_none());
+    }
+
+    #[test]
+    fn empty_nonce_rejected() {
+        // A Digest challenge with no usable nonce is not a valid challenge.
+        assert!(parse_challenge("Digest realm=\"r\"").is_none());
+    }
+
+    #[test]
+    fn ignores_unknown_params() {
+        // Unknown keys are dropped; known ones still parse.
+        let ch = parse_challenge("Digest nonce=\"n\", stale=true, domain=\"/d\"").unwrap();
+        assert_eq!(ch.nonce, "n");
+    }
+
+    #[test]
+    fn authorization_no_qop_uses_legacy_form() {
+        // No qop → the RFC 2069 response form, and no qop/nc/cnonce in the header.
+        let ch = Challenge {
+            realm: "r".to_string(),
+            nonce: "n".to_string(),
+            qop: None,
+            opaque: None,
+            algorithm: None,
+        };
+        let header = authorization_header(&ch, "u", "p", "GET", "/x", "cn");
+        assert!(!header.contains("qop="), "should not emit qop: {header}");
+        assert!(!header.contains("cnonce="), "no cnonce in legacy: {header}");
+        // Legacy response = MD5(HA1:nonce:HA2).
+        let ha1 = md5_hex("u:r:p");
+        let ha2 = md5_hex("GET:/x");
+        let expect = md5_hex(&format!("{ha1}:n:{ha2}"));
+        assert!(
+            header.contains(&format!("response=\"{expect}\"")),
+            "{header}"
+        );
+    }
+
+    #[test]
+    fn authorization_md5_sess_derives_session_ha1() {
+        // algorithm=MD5-sess changes HA1 derivation and emits algorithm + opaque.
+        let ch = Challenge {
+            realm: "r".to_string(),
+            nonce: "n".to_string(),
+            qop: Some("auth".to_string()),
+            opaque: Some("op".to_string()),
+            algorithm: Some("MD5-sess".to_string()),
+        };
+        let header = authorization_header(&ch, "u", "p", "POST", "/y", "cn");
+        let base_ha1 = md5_hex("u:r:p");
+        let ha1 = md5_hex(&format!("{base_ha1}:n:cn"));
+        let ha2 = md5_hex("POST:/y");
+        let expect = md5_hex(&format!("{ha1}:n:00000001:cn:auth:{ha2}"));
+        assert!(
+            header.contains(&format!("response=\"{expect}\"")),
+            "{header}"
+        );
+        assert!(header.contains("algorithm=MD5-sess"), "{header}");
+        assert!(header.contains("opaque=\"op\""), "{header}");
+        assert!(header.contains("qop=auth"), "{header}");
+        assert!(header.contains("nc=00000001"), "{header}");
+    }
+
+    #[test]
+    fn authorization_qop_list_selects_auth() {
+        // A comma-separated qop list containing `auth` activates qop=auth.
+        let ch = Challenge {
+            realm: "r".to_string(),
+            nonce: "n".to_string(),
+            qop: Some("auth-int, auth".to_string()),
+            opaque: None,
+            algorithm: None,
+        };
+        let header = authorization_header(&ch, "u", "p", "GET", "/z", "cn");
+        assert!(header.contains("qop=auth"), "{header}");
+    }
+
+    #[test]
+    fn authorization_qop_without_auth_token_falls_back_to_legacy() {
+        // A qop value that does not contain `auth` → legacy no-qop response.
+        let ch = Challenge {
+            realm: "r".to_string(),
+            nonce: "n".to_string(),
+            qop: Some("auth-int".to_string()),
+            opaque: None,
+            algorithm: None,
+        };
+        let header = authorization_header(&ch, "u", "p", "GET", "/z", "cn");
+        assert!(!header.contains("qop="), "{header}");
+    }
+
+    #[test]
+    fn authorization_escapes_quoted_string_values() {
+        // A hostile realm/opaque carrying quotes/backslashes/newlines is escaped
+        // so it cannot break out of or inject into the header line.
+        let ch = Challenge {
+            realm: "a\"b\\c".to_string(),
+            nonce: "n".to_string(),
+            qop: None,
+            opaque: Some("o\r\np".to_string()),
+            algorithm: None,
+        };
+        let header = authorization_header(&ch, "us\"er", "p", "GET", "/x", "cn");
+        assert!(header.contains("realm=\"a\\\"b\\\\c\""), "{header}");
+        assert!(header.contains("username=\"us\\\"er\""), "{header}");
+        // CR/LF stripped from opaque.
+        assert!(header.contains("opaque=\"op\""), "{header}");
+        assert!(!header.contains('\r') && !header.contains('\n'), "{header}");
+    }
+
+    #[test]
+    fn derive_cnonce_is_fixed_width_hex() {
+        let c = derive_cnonce();
+        // MD5 hex is 32 chars, all lowercase hex.
+        assert_eq!(c.len(), 32);
+        assert!(c.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn parse_params_handles_trailing_unterminated_quote() {
+        // A value opened with `"` but never closed reads to end-of-input.
+        let ch = parse_challenge("Digest nonce=\"unterminated").unwrap();
+        assert_eq!(ch.nonce, "unterminated");
+    }
 }

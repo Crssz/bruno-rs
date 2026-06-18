@@ -145,3 +145,22 @@ pub struct Annotation {
     /// `None` for a bare flag annotation (`@name`); `Some` for `@name(value)`.
     pub value: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_method_http_block_non_dict_falls_back_to_http() {
+        // An `http` block whose content is NOT a Dict must still resolve to
+        // "HTTP": the inner `if let BlockContent::Dict` fails, so control falls
+        // through to the `return Some("HTTP")` line.
+        let f = BruFile {
+            blocks: vec![Block {
+                name: "http".to_string(),
+                content: BlockContent::Text("anything".to_string()),
+            }],
+        };
+        assert_eq!(f.request_method(), Some("HTTP".to_string()));
+    }
+}

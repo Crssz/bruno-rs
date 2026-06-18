@@ -423,4 +423,385 @@ mod tests {
         assert!(!f.to_request().unwrap().headers[0].enabled);
     }
 
+    // ── set_method ─────────────────────────────────────────────────────────
+    #[test]
+    fn set_method_no_method_block_is_noop() {
+        // A file with only meta (no method block) -> early return.
+        let mut f = parse("meta {\n  name: X\n  type: http\n}\n");
+        set_method(&mut f, "POST"); // must not panic
+        assert!(f.to_request().is_none());
+    }
+
+    #[test]
+    fn set_method_standard_verb_drops_method_key() {
+        // Start from a custom http verb, switch to a standard verb: the `method`
+        // entry must be removed from the dict.
+        let src = "meta {\n  name: X\n  type: http\n}\n\nhttp {\n  url: https://a.test\n  body: none\n  auth: none\n  method: purge\n}\n";
+        let mut f = parse(src);
+        set_method(&mut f, "GET");
+        let block = f.block("get").unwrap();
+        if let BlockContent::Dict(entries) = &block.content {
+            assert!(entries.iter().all(|e| e.key.name() != "method"));
+        } else {
+            panic!("expected dict");
+        }
+        assert_eq!(f.to_request().unwrap().method, "GET");
+    }
+
+    #[test]
+    fn set_method_custom_verb_uses_http_block() {
+        let mut f = parse(SRC);
+        set_method(&mut f, "PURGE");
+        // Method block renamed to `http` with a method entry.
+        assert!(f.block("http").is_some());
+        assert_eq!(f.to_request().unwrap().method, "PURGE");
+    }
+
+    // ── set_file_body ──────────────────────────────────────────────────────
+    #[test]
+    fn set_file_body_creates_with_content_type() {
+        let mut f = parse(SRC);
+        set_file_body(&mut f, "/tmp/x.bin", Some("application/octet-stream"));
+        let block = f.block("body:file").unwrap();
+        if let BlockContent::Dict(entries) = &block.content {
+            assert_eq!(entries.len(), 1);
+            if let Value::Inline(v) = &entries[0].value {
+                assert!(v.contains("@file(/tmp/x.bin)"));
+                assert!(v.contains("@contentType(application/octet-stream)"));
+            } else {
+                panic!("expected inline");
+            }
+        }
+    }
+
+    #[test]
+    fn set_file_body_no_content_type() {
+        let mut f = parse(SRC);
+        set_file_body(&mut f, "/tmp/y.bin", None);
+        let block = f.block("body:file").unwrap();
+        if let BlockContent::Dict(entries) = &block.content {
+            if let Value::Inline(v) = &entries[0].value {
+                assert!(v.contains("@file(/tmp/y.bin)"));
+                assert!(!v.contains("@contentType"));
+            }
+        }
+        // Empty content_type also yields no @contentType.
+        let mut f2 = parse(SRC);
+        set_file_body(&mut f2, "/tmp/z.bin", Some(""));
+        if let Some(BlockContent::Dict(entries)) = f2.block("body:file").map(|b| &b.content) {
+            if let Value::Inline(v) = &entries[0].value {
+                assert!(!v.contains("@contentType"));
+            }
+        }
+    }
+
+    #[test]
+    fn set_file_body_updates_selected_entry() {
+        // First enabled (non-disabled) entry is updated, others preserved.
+        let src = "meta {\n  name: X\n  type: http\n}\n\nget {\n  url: x\n  body: file\n  auth: none\n}\n\nbody:file {\n  ~old: @file(/old)\n  cur: @file(/cur)\n}\n";
+        let mut f = parse(src);
+        set_file_body(&mut f, "/new", None);
+        if let Some(BlockContent::Dict(entries)) = f.block("body:file").map(|b| &b.content) {
+            // The disabled entry is at index 0; first non-disabled (index 1) updated.
+            let updated = entries.iter().find(|e| !e.disabled).unwrap();
+            if let Value::Inline(v) = &updated.value {
+                assert!(v.contains("/new"));
+            }
+        }
+    }
+
+    #[test]
+    fn set_file_body_all_disabled_updates_first() {
+        // No non-disabled entry, but block non-empty -> updates index 0.
+        let src = "meta {\n  name: X\n  type: http\n}\n\nget {\n  url: x\n  body: file\n  auth: none\n}\n\nbody:file {\n  ~a: @file(/a)\n}\n";
+        let mut f = parse(src);
+        set_file_body(&mut f, "/b", None);
+        if let Some(BlockContent::Dict(entries)) = f.block("body:file").map(|b| &b.content) {
+            if let Value::Inline(v) = &entries[0].value {
+                assert!(v.contains("/b"));
+            }
+        }
+    }
+
+    // ── meta_tags / set_meta_tags ──────────────────────────────────────────
+    #[test]
+    fn meta_tags_empty_and_present() {
+        let f = parse(SRC);
+        assert!(meta_tags(&f).is_empty());
+        // Build a tags list via set_meta_tags, serialize, reparse, then read back
+        // (the list serializes to a multiline `[ ... ]` form the parser accepts).
+        let mut writer = parse(SRC);
+        set_meta_tags(&mut writer, vec!["a".into(), "b".into()]);
+        let f2 = parse(&bru_lang::serialize(&writer));
+        assert_eq!(meta_tags(&f2), vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn meta_tags_non_list_value_is_empty() {
+        // A `tags` entry that is not a list -> Vec::new().
+        let f = parse("meta {\n  name: X\n  type: http\n  tags: scalar\n}\n");
+        assert!(meta_tags(&f).is_empty());
+    }
+
+    #[test]
+    fn set_meta_tags_add_replace_remove() {
+        let mut f = parse(SRC);
+        // Add.
+        set_meta_tags(&mut f, vec!["one".into(), "two".into()]);
+        assert_eq!(meta_tags(&f), vec!["one".to_string(), "two".to_string()]);
+        // Replace existing.
+        set_meta_tags(&mut f, vec!["three".into()]);
+        assert_eq!(meta_tags(&f), vec!["three".to_string()]);
+        // Remove when empty.
+        set_meta_tags(&mut f, vec![]);
+        assert!(meta_tags(&f).is_empty());
+    }
+
+    // ── sync_path_params ───────────────────────────────────────────────────
+    #[test]
+    fn sync_path_params_no_tokens_no_block_is_noop() {
+        let mut f = parse(SRC);
+        sync_path_params(&mut f, "https://a.test/plain");
+        assert!(f.block("params:path").is_none());
+    }
+
+    #[test]
+    fn sync_path_params_adds_drops_and_skips_port() {
+        let mut f = parse(SRC);
+        // :8080 is a port (numeric) -> skipped; :id and :sub added.
+        sync_path_params(&mut f, "https://a.test:8080/u/:id/x/:sub");
+        let tags: Vec<String> = block_names(&f, "params:path");
+        assert!(tags.contains(&"id".to_string()));
+        assert!(tags.contains(&"sub".to_string()));
+        assert!(!tags.contains(&"8080".to_string()));
+
+        // Dropping :sub from the URL removes it; :id survives.
+        sync_path_params(&mut f, "https://a.test/u/:id");
+        let tags2 = block_names(&f, "params:path");
+        assert!(tags2.contains(&"id".to_string()));
+        assert!(!tags2.contains(&"sub".to_string()));
+    }
+
+    #[test]
+    fn sync_path_params_drops_now_empty_block() {
+        let mut f = parse(SRC);
+        sync_path_params(&mut f, "https://a.test/:id");
+        assert!(f.block("params:path").is_some());
+        // Remove the last param -> the block itself is dropped.
+        sync_path_params(&mut f, "https://a.test/plain");
+        assert!(f.block("params:path").is_none());
+    }
+
+    // Helper: collect the key names of a dict block.
+    fn block_names(f: &BruFile, block: &str) -> Vec<String> {
+        match f.block(block).map(|b| &b.content) {
+            Some(BlockContent::Dict(entries)) => {
+                entries.iter().map(|e| e.key.name().to_string()).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    // ── remove_row ─────────────────────────────────────────────────────────
+    #[test]
+    fn remove_row_in_and_out_of_range() {
+        let mut f = parse(SRC);
+        add_row(&mut f, "headers");
+        add_row(&mut f, "headers");
+        set_entry_key(&mut f, "headers", 0, "a");
+        set_entry_key(&mut f, "headers", 1, "b");
+        // Out of range -> no-op.
+        remove_row(&mut f, "headers", 99);
+        assert_eq!(block_names(&f, "headers").len(), 2);
+        // In range.
+        remove_row(&mut f, "headers", 0);
+        assert_eq!(block_names(&f, "headers"), vec!["b".to_string()]);
+    }
+
+    // ── set_entry_local ────────────────────────────────────────────────────
+    #[test]
+    fn set_entry_local_toggles_flag() {
+        let mut f = parse("vars:pre-request {\n  k: v\n}\n");
+        set_entry_local(&mut f, "vars:pre-request", 0, true);
+        if let Some(BlockContent::Dict(entries)) = f.block("vars:pre-request").map(|b| &b.content) {
+            assert!(entries[0].local);
+        }
+        // Out of range -> no-op.
+        set_entry_local(&mut f, "vars:pre-request", 99, true);
+    }
+
+    // ── push_text_block ────────────────────────────────────────────────────
+    #[test]
+    fn push_text_block_appends_verbatim() {
+        let mut f = parse(SRC);
+        push_text_block(&mut f, "example", "  name: e\n".to_string());
+        let blocks: Vec<&str> = f
+            .blocks
+            .iter()
+            .filter(|b| b.name == "example")
+            .map(|b| b.name.as_str())
+            .collect();
+        assert_eq!(blocks.len(), 1);
+        // Pushing again adds a second one (never replaces).
+        push_text_block(&mut f, "example", "  name: e2\n".to_string());
+        assert_eq!(f.blocks.iter().filter(|b| b.name == "example").count(), 2);
+    }
+
+    // ── set_text_block ─────────────────────────────────────────────────────
+    #[test]
+    fn set_text_block_create_replace_empty() {
+        let mut f = parse(SRC);
+        // Create absent.
+        set_text_block(&mut f, "body:json", "{\n  \"a\": 1\n}");
+        if let Some(BlockContent::Text(t)) = f.block("body:json").map(|b| &b.content) {
+            // Re-indented 2 spaces per line.
+            assert!(t.starts_with("  {"));
+        } else {
+            panic!("expected text block");
+        }
+        // Replace existing.
+        set_text_block(&mut f, "body:json", "replaced");
+        if let Some(BlockContent::Text(t)) = f.block("body:json").map(|b| &b.content) {
+            assert_eq!(t, "  replaced");
+        }
+        // Empty payload empties the block.
+        set_text_block(&mut f, "body:json", "");
+        if let Some(BlockContent::Text(t)) = f.block("body:json").map(|b| &b.content) {
+            assert!(t.is_empty());
+        }
+    }
+
+    // ── dict_block_mut: coerce Text/List to Dict ───────────────────────────
+    #[test]
+    fn dict_block_mut_coerces_text_block() {
+        // A docs block parses as Text; dict_block_mut must coerce it to Dict.
+        let mut f = parse("docs {\n  some text\n}\n");
+        let entries = dict_block_mut(&mut f, "docs");
+        entries.push(new_entry("k", "v"));
+        assert!(matches!(
+            f.block("docs").unwrap().content,
+            BlockContent::Dict(_)
+        ));
+    }
+
+    #[test]
+    fn dict_block_mut_creates_absent() {
+        let mut f = parse(SRC);
+        let _ = dict_block_mut(&mut f, "brand-new");
+        assert!(matches!(
+            f.block("brand-new").unwrap().content,
+            BlockContent::Dict(_)
+        ));
+    }
+
+    // ── replace_block_entries ──────────────────────────────────────────────
+    #[test]
+    fn replace_block_entries_empty_removes_block() {
+        let mut f = parse("headers {\n  A: 1\n}\n");
+        replace_block_entries(&mut f, "headers", vec![]);
+        assert!(f.block("headers").is_none());
+    }
+
+    #[test]
+    fn replace_block_entries_duplicate_keys_fifo() {
+        // Two same-named headers, one disabled, keep their own identities.
+        let src = "headers {\n  Set-Cookie: a\n  ~Set-Cookie: b\n}\n";
+        let mut f = parse(src);
+        replace_block_entries(
+            &mut f,
+            "headers",
+            vec![
+                ("Set-Cookie".into(), "a".into(), true, false),
+                ("Set-Cookie".into(), "b".into(), false, false),
+            ],
+        );
+        if let Some(BlockContent::Dict(entries)) = f.block("headers").map(|b| &b.content) {
+            assert_eq!(entries.len(), 2);
+            assert!(!entries[0].disabled);
+            assert!(entries[1].disabled);
+        }
+    }
+
+    #[test]
+    fn replace_block_entries_preserves_non_inline_on_empty_cell() {
+        // A multiline value survives when the bulk cell is left empty.
+        let src = "vars:pre-request {\n  big: '''\n  line1\n  line2\n  '''\n}\n";
+        let mut f = parse(src);
+        // Confirm it parsed as a non-Inline value first.
+        replace_block_entries(
+            &mut f,
+            "vars:pre-request",
+            vec![("big".into(), String::new(), true, false)],
+        );
+        let out = bru_lang::serialize(&f);
+        // The original multiline content survives (empty cell -> keep prev value).
+        assert!(out.contains("line1"), "multiline value dropped:\n{out}");
+    }
+
+    #[test]
+    fn replace_block_entries_new_key_when_absent() {
+        let mut f = parse(SRC);
+        replace_block_entries(
+            &mut f,
+            "headers",
+            vec![("X-New".into(), "1".into(), true, false)],
+        );
+        assert_eq!(f.to_request().unwrap().headers[0].name, "X-New");
+    }
+
+    // ── add_row ────────────────────────────────────────────────────────────
+    #[test]
+    fn add_row_appends_blank() {
+        let mut f = parse(SRC);
+        add_row(&mut f, "params:query");
+        if let Some(BlockContent::Dict(entries)) = f.block("params:query").map(|b| &b.content) {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].key.name(), "");
+        }
+    }
+
+    // ── set_entry_value: non-Inline untouched ──────────────────────────────
+    #[test]
+    fn set_entry_value_leaves_non_inline_untouched() {
+        let src = "vars:pre-request {\n  big: '''\n  multiline\n  '''\n}\n";
+        let mut f = parse(src);
+        set_entry_value(&mut f, "vars:pre-request", 0, "single");
+        let out = bru_lang::serialize(&f);
+        // Non-Inline value not overwritten by the single-line cell.
+        assert!(
+            out.contains("multiline"),
+            "non-inline value clobbered:\n{out}"
+        );
+    }
+
+    #[test]
+    fn set_entry_value_updates_inline() {
+        let mut f = parse(SRC);
+        add_row(&mut f, "headers");
+        set_entry_key(&mut f, "headers", 0, "k");
+        set_entry_value(&mut f, "headers", 0, "  trimmed  ");
+        assert_eq!(f.to_request().unwrap().headers[0].value, "trimmed");
+        // Out of range -> no-op.
+        set_entry_value(&mut f, "headers", 99, "x");
+    }
+
+    // ── set_entry_key: preserves quoting ───────────────────────────────────
+    #[test]
+    fn set_entry_key_preserves_quoting() {
+        // Bare key stays bare.
+        let mut f = parse("headers {\n  bare: 1\n}\n");
+        set_entry_key(&mut f, "headers", 0, "renamed");
+        if let Some(BlockContent::Dict(entries)) = f.block("headers").map(|b| &b.content) {
+            assert!(matches!(entries[0].key, Key::Bare(_)));
+            assert_eq!(entries[0].key.name(), "renamed");
+        }
+        // Quoted key stays quoted.
+        let mut f2 = parse("headers {\n  \"X Spaced\": 1\n}\n");
+        set_entry_key(&mut f2, "headers", 0, "Y Spaced");
+        if let Some(BlockContent::Dict(entries)) = f2.block("headers").map(|b| &b.content) {
+            assert!(matches!(entries[0].key, Key::Quoted(_)));
+        }
+        // Out of range -> no-op.
+        set_entry_key(&mut f2, "headers", 99, "z");
+    }
 }

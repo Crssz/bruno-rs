@@ -185,3 +185,16 @@ fn compare(actual: Option<&str>, operator: &str, expected: &str) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compare_unknown_binary_operator_is_false() {
+        // The public API never routes an unknown *binary* operator into
+        // `compare` (parse_operator maps anything unrecognized to "eq"), so the
+        // final `_ => false` arm is only reachable by calling `compare` directly.
+        assert!(!compare(Some("x"), "weirdOp", "x"));
+    }
+}

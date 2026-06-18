@@ -507,3 +507,225 @@ pub fn status_color(status: u16) -> Color {
         _ => TEXT(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Theme state is process-global; restore dark mode after each toggling test
+    // so other tests in the binary are unaffected.
+    struct DarkGuard;
+    impl Drop for DarkGuard {
+        fn drop(&mut self) {
+            set_light(false);
+        }
+    }
+
+    #[test]
+    fn set_light_toggles_palette_and_themes() {
+        let _g = DarkGuard;
+        set_light(false);
+        assert!(!is_light());
+        // Dark palette + iced themes.
+        assert_eq!(palette().bg, DARK.bg);
+        assert!(matches!(base_theme(), iced::Theme::Dark));
+        assert!(matches!(
+            highlight_theme(),
+            iced::highlighter::Theme::Base16Mocha
+        ));
+
+        set_light(true);
+        assert!(is_light());
+        assert_eq!(palette().bg, LIGHT.bg);
+        assert!(matches!(base_theme(), iced::Theme::Light));
+        assert!(matches!(
+            highlight_theme(),
+            iced::highlighter::Theme::InspiredGitHub
+        ));
+    }
+
+    #[test]
+    fn color_accessors_track_active_palette() {
+        let _g = DarkGuard;
+        set_light(false);
+        // Every accessor resolves; verify each against the dark palette constants.
+        assert_eq!(BG(), DARK.bg);
+        assert_eq!(MANTLE(), DARK.mantle);
+        assert_eq!(SURFACE0(), DARK.surface0);
+        assert_eq!(SURFACE1(), DARK.surface1);
+        assert_eq!(INPUT_BG(), DARK.input_bg);
+        assert_eq!(BORDER1(), DARK.border1);
+        assert_eq!(BORDER2(), DARK.border2);
+        assert_eq!(TEXT(), DARK.text);
+        assert_eq!(SUBTEXT(), DARK.subtext);
+        assert_eq!(MUTED(), DARK.muted);
+        assert_eq!(ACCENT(), DARK.accent);
+        assert_eq!(GREEN(), DARK.green);
+        assert_eq!(BLUE(), DARK.blue);
+        assert_eq!(ORANGE(), DARK.orange);
+        assert_eq!(RED(), DARK.red);
+        assert_eq!(TEAL(), DARK.teal);
+        assert_eq!(CYAN(), DARK.cyan);
+        assert_eq!(PURPLE(), DARK.purple);
+
+        set_light(true);
+        assert_eq!(BG(), LIGHT.bg);
+        assert_eq!(ACCENT(), LIGHT.accent);
+        assert_eq!(PURPLE(), LIGHT.purple);
+        assert_eq!(TEXT(), LIGHT.text);
+    }
+
+    #[test]
+    fn method_color_all_verbs() {
+        let _g = DarkGuard;
+        set_light(false);
+        assert_eq!(method_color("get"), GREEN());
+        assert_eq!(method_color("POST"), BLUE());
+        assert_eq!(method_color("put"), ORANGE());
+        assert_eq!(method_color("PATCH"), ORANGE());
+        assert_eq!(method_color("delete"), RED());
+        assert_eq!(method_color("OPTIONS"), TEAL());
+        assert_eq!(method_color("head"), CYAN());
+        // Unknown verb -> purple.
+        assert_eq!(method_color("TRACE"), PURPLE());
+    }
+
+    #[test]
+    fn status_color_buckets() {
+        let _g = DarkGuard;
+        set_light(false);
+        assert_eq!(status_color(200), GREEN());
+        assert_eq!(status_color(299), GREEN());
+        assert_eq!(status_color(301), ACCENT());
+        assert_eq!(status_color(399), ACCENT());
+        assert_eq!(status_color(404), RED());
+        assert_eq!(status_color(599), RED());
+        // Out of range -> default text.
+        assert_eq!(status_color(100), TEXT());
+        assert_eq!(status_color(600), TEXT());
+    }
+
+    #[test]
+    fn container_styles_build() {
+        let _g = DarkGuard;
+        set_light(false);
+        // panel: with and without border.
+        let p = panel(BG(), Some(BORDER1()));
+        assert_eq!(p.border.width, 1.0);
+        let p2 = panel(BG(), None);
+        assert_eq!(p2.border.width, 0.0);
+        let _ = rounded_panel(INPUT_BG(), BORDER1());
+        let _ = menu_panel();
+        let _ = scrim();
+        let _ = modal_card();
+        let _ = separator();
+    }
+
+    #[test]
+    fn button_styles_every_status() {
+        let _g = DarkGuard;
+        set_light(false);
+        let _ = solid_button(ACCENT(), BLACK);
+        // ghost_button: hovered vs not.
+        let _ = ghost_button(button::Status::Hovered);
+        let _ = ghost_button(button::Status::Active);
+        let _ = ghost_button(button::Status::Pressed);
+        let _ = ghost_button(button::Status::Disabled);
+        // icon_button: hovered (bg) vs other (no bg).
+        let h = icon_button(button::Status::Hovered, TEXT());
+        assert!(h.background.is_some());
+        let n = icon_button(button::Status::Active, TEXT());
+        assert!(n.background.is_none());
+        // tab_button active/inactive.
+        let _ = tab_button(true);
+        let _ = tab_button(false);
+        // request_tab: active, hovered-inactive, plain-inactive.
+        let _ = request_tab(true, button::Status::Active);
+        let _ = request_tab(false, button::Status::Hovered);
+        let _ = request_tab(false, button::Status::Active);
+        // danger_button hovered vs not.
+        let _ = danger_button(button::Status::Hovered);
+        let _ = danger_button(button::Status::Active);
+        // menu_item: hovered/not x danger/not.
+        let _ = menu_item(button::Status::Hovered, true);
+        let _ = menu_item(button::Status::Active, false);
+        // sidebar_item: selected, hovered-unselected, plain-unselected.
+        let _ = sidebar_item(true, button::Status::Active);
+        let _ = sidebar_item(false, button::Status::Hovered);
+        let _ = sidebar_item(false, button::Status::Active);
+    }
+
+    #[test]
+    fn input_styles_every_status() {
+        let _g = DarkGuard;
+        set_light(false);
+        let t = &iced::Theme::Dark;
+        let focused = text_input::Status::Focused { is_hovered: false };
+        // input_style: focused / hovered / default.
+        assert_eq!(input_style(t, focused).border.color, ACCENT());
+        assert_eq!(
+            input_style(t, text_input::Status::Hovered).border.color,
+            BORDER2()
+        );
+        assert_eq!(
+            input_style(t, text_input::Status::Active).border.color,
+            BORDER1()
+        );
+        assert_eq!(
+            input_style(t, text_input::Status::Disabled).border.color,
+            BORDER1()
+        );
+
+        // cell_input: focused (input bg + accent border) vs other (transparent).
+        let cf = cell_input(t, focused);
+        assert_eq!(cf.border.color, ACCENT());
+        let cn = cell_input(t, text_input::Status::Active);
+        assert_eq!(cn.border.color, Color::TRANSPARENT);
+    }
+
+    #[test]
+    fn picklist_style_every_status() {
+        let _g = DarkGuard;
+        set_light(false);
+        let t = &iced::Theme::Dark;
+        assert_eq!(
+            picklist_style(t, pick_list::Status::Opened { is_hovered: false })
+                .border
+                .color,
+            ACCENT()
+        );
+        assert_eq!(
+            picklist_style(t, pick_list::Status::Hovered).border.color,
+            BORDER2()
+        );
+        assert_eq!(
+            picklist_style(t, pick_list::Status::Active).border.color,
+            BORDER1()
+        );
+    }
+
+    #[test]
+    fn checkbox_style_every_status() {
+        let _g = DarkGuard;
+        set_light(false);
+        let t = &iced::Theme::Dark;
+        // Checked variants -> accent background/border.
+        for st in [
+            checkbox::Status::Active { is_checked: true },
+            checkbox::Status::Hovered { is_checked: true },
+            checkbox::Status::Disabled { is_checked: true },
+        ] {
+            let s = checkbox_style(t, st);
+            assert_eq!(s.border.color, ACCENT());
+        }
+        // Unchecked variants -> border2 + input bg.
+        for st in [
+            checkbox::Status::Active { is_checked: false },
+            checkbox::Status::Hovered { is_checked: false },
+            checkbox::Status::Disabled { is_checked: false },
+        ] {
+            let s = checkbox_style(t, st);
+            assert_eq!(s.border.color, BORDER2());
+        }
+    }
+}

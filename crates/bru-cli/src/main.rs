@@ -148,7 +148,11 @@ async fn run(args: RunArgs) -> ExitCode {
         }
     }
 
-    let prefix = if multi { format!("{iterations} iterations, ") } else { String::new() };
+    let prefix = if multi {
+        format!("{iterations} iterations, ")
+    } else {
+        String::new()
+    };
     println!("\n{prefix}{passed} passed, {failed} failed");
     if failed == 0 {
         ExitCode::SUCCESS
@@ -266,7 +270,11 @@ fn print_outcome(o: &RunOutcome) {
     }
     for a in &o.assertions {
         let mark = if a.passed { "PASS" } else { "FAIL" };
-        let extra = if a.passed { String::new() } else { format!("  (actual: {})", a.actual) };
+        let extra = if a.passed {
+            String::new()
+        } else {
+            format!("  (actual: {})", a.actual)
+        };
         println!("  [{mark}] {} {} {}{extra}", a.expr, a.operator, a.expected);
     }
     for t in &o.tests {
@@ -293,5 +301,394 @@ fn redact(name: &str, value: &str) -> String {
         "***".to_string()
     } else {
         value.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bru_core::AssertOutcome;
+    use bru_engine::TestResult;
+    use bru_http::HttpResponse;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A temp directory cleaned up on drop. Unique per test via pid + counter.
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            static N: AtomicU32 = AtomicU32::new(0);
+            let p = std::env::temp_dir().join(format!(
+                "bru-cli-unit-{tag}-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            TempDir(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // ---- load_json ----------------------------------------------------------
+
+    #[test]
+    fn load_json_valid_array_of_objects() {
+        let rows = load_json(r#"[{"id":1,"name":"a"},{"id":2,"name":"b"}]"#).unwrap();
+        assert_eq!(rows.len(), 2);
+        // Order within a row is not guaranteed (serde_json object iteration), so
+        // check by lookup rather than position.
+        let find = |row: &Vec<(String, String)>, k: &str| {
+            row.iter().find(|(rk, _)| rk == k).map(|(_, v)| v.clone())
+        };
+        assert_eq!(find(&rows[0], "id"), Some("1".to_string()));
+        assert_eq!(find(&rows[0], "name"), Some("a".to_string()));
+        assert_eq!(find(&rows[1], "id"), Some("2".to_string()));
+        assert_eq!(find(&rows[1], "name"), Some("b".to_string()));
+    }
+
+    #[test]
+    fn load_json_empty_array_ok() {
+        let rows = load_json("[]").unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn load_json_invalid_json_errors() {
+        let err = load_json("{not json").unwrap_err();
+        assert!(err.contains("invalid JSON"), "{err}");
+    }
+
+    #[test]
+    fn load_json_non_array_errors() {
+        let err = load_json(r#"{"id":1}"#).unwrap_err();
+        assert!(err.contains("must be an array"), "{err}");
+    }
+
+    #[test]
+    fn load_json_row_not_object_errors() {
+        let err = load_json(r#"[{"ok":1}, 42]"#).unwrap_err();
+        assert!(err.contains("row 1 is not an object"), "{err}");
+    }
+
+    // ---- json_to_string -----------------------------------------------------
+
+    #[test]
+    fn json_to_string_each_kind() {
+        use serde_json::json;
+        assert_eq!(json_to_string(&json!("hello")), "hello");
+        assert_eq!(json_to_string(&serde_json::Value::Null), "");
+        assert_eq!(json_to_string(&json!(42)), "42");
+        assert_eq!(json_to_string(&json!(3.5)), "3.5");
+        assert_eq!(json_to_string(&json!(true)), "true");
+        assert_eq!(json_to_string(&json!(false)), "false");
+        // Nested object/array fall through to compact JSON text.
+        assert_eq!(json_to_string(&json!({"a":1})), r#"{"a":1}"#);
+        assert_eq!(json_to_string(&json!([1, 2])), "[1,2]");
+    }
+
+    // ---- load_csv -----------------------------------------------------------
+
+    #[test]
+    fn load_csv_header_and_rows() {
+        let rows = load_csv("id,name\n10,alice\n20,bob\n").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0],
+            vec![
+                ("id".to_string(), "10".to_string()),
+                ("name".to_string(), "alice".to_string())
+            ]
+        );
+        assert_eq!(
+            rows[1],
+            vec![
+                ("id".to_string(), "20".to_string()),
+                ("name".to_string(), "bob".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn load_csv_header_only_no_rows() {
+        let rows = load_csv("id,name\n").unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn load_csv_malformed_row_errors() {
+        // A record with more fields than the header makes the (non-flexible)
+        // csv reader return an unequal-lengths error mid-iteration.
+        let err = load_csv("id,name\n1,alice,extra\n").unwrap_err();
+        assert!(err.contains("invalid CSV row"), "{err}");
+    }
+
+    // ---- collect_targets / flatten -----------------------------------------
+
+    #[test]
+    fn collect_targets_single_file() {
+        let td = TempDir::new("single");
+        let f = td.path().join("solo.bru");
+        std::fs::write(&f, "meta {\n  name: Solo\n}\n").unwrap();
+        let targets = collect_targets(&f).unwrap();
+        assert_eq!(targets, vec![f]);
+    }
+
+    #[test]
+    fn collect_targets_nonexistent_path_treated_as_file() {
+        // A path that is not a dir is returned verbatim (existence is checked
+        // later when the file is read).
+        let p = PathBuf::from("does/not/exist.bru");
+        let targets = collect_targets(&p).unwrap();
+        assert_eq!(targets, vec![p]);
+    }
+
+    #[test]
+    fn collect_targets_collection_dir_with_nested_folders() {
+        let td = TempDir::new("coll");
+        let root = td.path();
+        std::fs::write(
+            root.join("bruno.json"),
+            r#"{"version":"1","name":"C","type":"collection"}"#,
+        )
+        .unwrap();
+        // Top-level request (seq 1).
+        std::fs::write(
+            root.join("a.bru"),
+            "meta {\n  name: A\n  type: http\n  seq: 1\n}\n\nget {\n  url: http://x/\n  auth: none\n}\n",
+        )
+        .unwrap();
+        // Nested folder with one request.
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join("b.bru"),
+            "meta {\n  name: B\n  type: http\n  seq: 1\n}\n\nget {\n  url: http://y/\n  auth: none\n}\n",
+        )
+        .unwrap();
+
+        let targets = collect_targets(root).unwrap();
+        // flatten emits this folder's requests first, then descends — so the
+        // root request comes before the nested one.
+        assert_eq!(targets.len(), 2);
+        assert!(targets[0].ends_with("a.bru"), "{targets:?}");
+        assert!(targets[1].ends_with("b.bru"), "{targets:?}");
+    }
+
+    #[test]
+    fn flatten_walks_nested_folders_depth_first() {
+        let leaf_req = |name: &str| bru_core::RequestItem {
+            name: name.to_string(),
+            path: PathBuf::from(format!("{name}.bru")),
+            method: Some("GET".to_string()),
+            seq: Some(1),
+        };
+        let inner = bru_core::Folder {
+            name: "inner".to_string(),
+            path: PathBuf::from("inner"),
+            folders: vec![],
+            requests: vec![leaf_req("deep")],
+        };
+        let root = bru_core::Folder {
+            name: "root".to_string(),
+            path: PathBuf::from("root"),
+            folders: vec![inner],
+            requests: vec![leaf_req("top")],
+        };
+        let mut out = Vec::new();
+        flatten(&root, &mut out);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].ends_with("top.bru"));
+        assert!(out[1].ends_with("deep.bru"));
+    }
+
+    #[test]
+    fn flatten_empty_folder_yields_nothing() {
+        let folder = bru_core::Folder::default();
+        let mut out = Vec::new();
+        flatten(&folder, &mut out);
+        assert!(out.is_empty());
+    }
+
+    // ---- load_dataset (dispatch by extension) -------------------------------
+
+    #[test]
+    fn load_dataset_dispatches_csv() {
+        let td = TempDir::new("ds-csv");
+        let f = td.path().join("rows.csv");
+        std::fs::write(&f, "k\nv1\nv2\n").unwrap();
+        let rows = load_dataset(&f).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], vec![("k".to_string(), "v1".to_string())]);
+    }
+
+    #[test]
+    fn load_dataset_dispatches_csv_uppercase_ext() {
+        let td = TempDir::new("ds-csv-up");
+        let f = td.path().join("rows.CSV");
+        std::fs::write(&f, "k\nv1\n").unwrap();
+        let rows = load_dataset(&f).unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn load_dataset_dispatches_json() {
+        let td = TempDir::new("ds-json");
+        let f = td.path().join("rows.json");
+        std::fs::write(&f, r#"[{"k":"v"}]"#).unwrap();
+        let rows = load_dataset(&f).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], vec![("k".to_string(), "v".to_string())]);
+    }
+
+    #[test]
+    fn load_dataset_no_extension_treated_as_json() {
+        let td = TempDir::new("ds-noext");
+        let f = td.path().join("data");
+        std::fs::write(&f, r#"[{"k":"v"}]"#).unwrap();
+        let rows = load_dataset(&f).unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn load_dataset_read_error_includes_path() {
+        let missing = std::env::temp_dir().join(format!(
+            "bru-cli-missing-{}-{}.json",
+            std::process::id(),
+            42
+        ));
+        let err = load_dataset(&missing).unwrap_err();
+        // The error is prefixed with the path display.
+        assert!(err.contains("bru-cli-missing"), "{err}");
+    }
+
+    // ---- redact -------------------------------------------------------------
+
+    #[test]
+    fn redact_masks_secretish_names() {
+        for name in ["token", "secret", "password", "passwd", "key", "auth"] {
+            assert_eq!(redact(name, "sensitive"), "***", "name = {name}");
+        }
+        // Case-insensitive and substring matching.
+        assert_eq!(redact("API_TOKEN", "x"), "***");
+        assert_eq!(redact("userPassword", "x"), "***");
+        assert_eq!(redact("AuthHeader", "x"), "***");
+    }
+
+    #[test]
+    fn redact_passes_through_normal_names() {
+        assert_eq!(redact("username", "alice"), "alice");
+        assert_eq!(redact("id", "42"), "42");
+        assert_eq!(redact("", "anything"), "anything");
+    }
+
+    // ---- print_outcome (smoke: exercises every branch) ---------------------
+
+    fn assertion(passed: bool) -> AssertOutcome {
+        AssertOutcome {
+            expr: "res.status".to_string(),
+            operator: "eq".to_string(),
+            expected: "200".to_string(),
+            actual: if passed {
+                "200".to_string()
+            } else {
+                "500".to_string()
+            },
+            passed,
+        }
+    }
+
+    fn test_result(name: &str, passed: bool, error: Option<&str>) -> TestResult {
+        TestResult {
+            name: name.to_string(),
+            passed,
+            error: error.map(str::to_string),
+        }
+    }
+
+    fn response() -> HttpResponse {
+        HttpResponse {
+            status: 200,
+            status_text: "OK".to_string(),
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: b"{\"ok\":true}".to_vec(),
+            duration_ms: 12,
+        }
+    }
+
+    #[test]
+    fn print_outcome_error_branch_returns_early() {
+        // An errored outcome prints the ERROR line and skips response/assertions.
+        let mut o = RunOutcome::errored("Boom", "connection refused");
+        o.method = "GET".to_string();
+        o.url = "http://x/".to_string();
+        // Even with assertions present, the error branch returns before them.
+        o.assertions.push(assertion(false));
+        print_outcome(&o); // must not panic
+    }
+
+    #[test]
+    fn print_outcome_full_response_and_results() {
+        let o = RunOutcome {
+            name: "Full".to_string(),
+            method: "POST".to_string(),
+            url: "http://api/".to_string(),
+            response: Some(response()),
+            assertions: vec![assertion(true), assertion(false)],
+            tests: vec![
+                test_result("t-pass", true, None),
+                test_result("t-fail", false, Some("expected 1 to be 2")),
+                // A failed test with no error message hits the `_ =>` arm.
+                test_result("t-fail-noerr", false, None),
+                // A passed test that carries an error string also hits `_ =>`.
+                test_result("t-pass-err", true, Some("ignored")),
+            ],
+            console: vec!["log line one".to_string(), "log line two".to_string()],
+            vars_set: vec![
+                ("userId".to_string(), "42".to_string()),
+                ("authToken".to_string(), "should-be-masked".to_string()),
+            ],
+            error: None,
+        };
+        print_outcome(&o); // must not panic; exercises all loops + redact
+    }
+
+    #[test]
+    fn print_outcome_no_response_no_results() {
+        // No error, no response, empty assertion/test/console/vars lists: the
+        // function should fall straight through without printing those blocks.
+        let o = RunOutcome {
+            name: "Bare".to_string(),
+            method: "GET".to_string(),
+            url: "http://bare/".to_string(),
+            ..Default::default()
+        };
+        print_outcome(&o); // must not panic
+    }
+
+    #[test]
+    fn outcome_passed_helper_reflects_state() {
+        // Sanity-check the helper print_outcome leans on, across branches.
+        let mut ok = RunOutcome::default();
+        ok.assertions.push(assertion(true));
+        ok.tests.push(test_result("t", true, None));
+        assert!(ok.passed());
+
+        let mut bad_assert = RunOutcome::default();
+        bad_assert.assertions.push(assertion(false));
+        assert!(!bad_assert.passed());
+
+        let mut bad_test = RunOutcome::default();
+        bad_test.tests.push(test_result("t", false, None));
+        assert!(!bad_test.passed());
+
+        let errored = RunOutcome::errored("n", "boom");
+        assert!(!errored.passed());
     }
 }

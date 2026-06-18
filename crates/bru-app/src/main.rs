@@ -134,7 +134,11 @@ struct Prefs {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { timeout_secs: 30, insecure: false, light: false }
+        Prefs {
+            timeout_secs: 30,
+            insecure: false,
+            light: false,
+        }
     }
 }
 
@@ -339,16 +343,49 @@ enum MenuTarget {
 /// A modal dialog. Text/selection state lives inline so the view is pure.
 #[derive(Debug, Clone)]
 enum Modal {
-    NewRequest { dir: PathBuf, name: String, method: String, url: String, error: Option<String> },
-    NewFolder { parent: PathBuf, name: String, error: Option<String> },
-    Rename { path: PathBuf, is_folder: bool, name: String, error: Option<String> },
-    Clone { path: PathBuf, is_folder: bool, name: String, error: Option<String> },
-    Delete { path: PathBuf, is_folder: bool, name: String },
-    ConfirmClose { id: usize },
-    Palette { query: String, selected: usize },
-    Code { code: String },
+    NewRequest {
+        dir: PathBuf,
+        name: String,
+        method: String,
+        url: String,
+        error: Option<String>,
+    },
+    NewFolder {
+        parent: PathBuf,
+        name: String,
+        error: Option<String>,
+    },
+    Rename {
+        path: PathBuf,
+        is_folder: bool,
+        name: String,
+        error: Option<String>,
+    },
+    Clone {
+        path: PathBuf,
+        is_folder: bool,
+        name: String,
+        error: Option<String>,
+    },
+    Delete {
+        path: PathBuf,
+        is_folder: bool,
+        name: String,
+    },
+    ConfirmClose {
+        id: usize,
+    },
+    Palette {
+        query: String,
+        selected: usize,
+    },
+    Code {
+        code: String,
+    },
     Prefs,
-    SaveExample { name: String },
+    SaveExample {
+        name: String,
+    },
 }
 
 /// The multiline `text_editor` buffers for the active request. Rebuilt from
@@ -715,7 +752,11 @@ impl App {
     /// unchanged) if the file can't be read/parsed, so callers like Run don't
     /// then act on the previously-active tab.
     fn open_request(&mut self, path: PathBuf) -> bool {
-        if let Some(i) = self.tabs.iter().position(|t| t.path.as_deref() == Some(&path)) {
+        if let Some(i) = self
+            .tabs
+            .iter()
+            .position(|t| t.path.as_deref() == Some(&path))
+        {
             self.active = Some(i);
             return true;
         }
@@ -772,7 +813,11 @@ impl App {
     /// (a `collection.bru` or `folder.bru`). Missing files start blank.
     fn open_settings(&mut self, path: PathBuf, kind: TabKind) {
         self.menu = None;
-        if let Some(i) = self.tabs.iter().position(|t| t.path.as_deref() == Some(&path)) {
+        if let Some(i) = self
+            .tabs
+            .iter()
+            .position(|t| t.path.as_deref() == Some(&path))
+        {
             self.active = Some(i);
             return;
         }
@@ -824,7 +869,9 @@ impl App {
                 self.menu = None;
                 if i < self.tabs.len() {
                     if self.tabs[i].dirty {
-                        self.modal = Some(Modal::ConfirmClose { id: self.tabs[i].id });
+                        self.modal = Some(Modal::ConfirmClose {
+                            id: self.tabs[i].id,
+                        });
                     } else {
                         self.remove_tab(i);
                     }
@@ -871,7 +918,10 @@ impl App {
             Message::AuthModeChanged(mode) => {
                 // Settings files keep the mode in a top-level `auth { mode }` block;
                 // requests keep it in the method block.
-                let settings = self.active.map(|i| self.tabs[i].is_settings()).unwrap_or(false);
+                let settings = self
+                    .active
+                    .map(|i| self.tabs[i].is_settings())
+                    .unwrap_or(false);
                 self.mutate(|f| {
                     if settings {
                         let entries = edit::dict_block_mut(f, "auth");
@@ -882,7 +932,9 @@ impl App {
                 });
             }
             Message::KvName(s, i, v) => self.mutate(|f| edit::set_entry_key(f, s.block(), i, &v)),
-            Message::KvValue(s, i, v) => self.mutate(|f| edit::set_entry_value(f, s.block(), i, &v)),
+            Message::KvValue(s, i, v) => {
+                self.mutate(|f| edit::set_entry_value(f, s.block(), i, &v))
+            }
             Message::KvToggle(s, i, on) => self.mutate(|f| edit::toggle_entry(f, s.block(), i, on)),
             Message::KvAdd(s) => self.mutate(|f| edit::add_row(f, s.block())),
             Message::KvRemove(s, i) => self.mutate(|f| edit::remove_row(f, s.block(), i)),
@@ -970,7 +1022,10 @@ impl App {
                     self.status = "Sending...".to_string();
                     let id = self.tabs[i].id;
                     let file = self.tabs[i].file.clone();
-                    let vars_path = self.tabs[i].path.clone().or_else(|| self.collection_dir.clone());
+                    let vars_path = self.tabs[i]
+                        .path
+                        .clone()
+                        .or_else(|| self.collection_dir.clone());
                     let script_dir = self.tabs[i]
                         .path
                         .as_deref()
@@ -1015,7 +1070,11 @@ impl App {
                     method: outcome.method.clone(),
                     url: outcome.url.clone(),
                     status: outcome.response.as_ref().map(|r| r.status).unwrap_or(0),
-                    ms: outcome.response.as_ref().map(|r| r.duration_ms).unwrap_or(0),
+                    ms: outcome
+                        .response
+                        .as_ref()
+                        .map(|r| r.duration_ms)
+                        .unwrap_or(0),
                     size: outcome.response.as_ref().map(|r| r.body.len()).unwrap_or(0),
                     ok: outcome.error.is_none(),
                 });
@@ -1061,7 +1120,10 @@ impl App {
             }
             Message::OpenMenu(target) => {
                 self.cancel_drag();
-                self.menu = Some(MenuState { target, at: self.cursor });
+                self.menu = Some(MenuState {
+                    target,
+                    at: self.cursor,
+                });
             }
             Message::CloseMenu => self.menu = None,
 
@@ -1080,22 +1142,40 @@ impl App {
             }
             Message::NewFolderPrompt(parent) => {
                 self.menu = None;
-                self.modal = Some(Modal::NewFolder { parent, name: String::new(), error: None });
+                self.modal = Some(Modal::NewFolder {
+                    parent,
+                    name: String::new(),
+                    error: None,
+                });
             }
             Message::RenamePrompt(path, is_folder) => {
                 self.menu = None;
                 let name = fsops::display_name(&path);
-                self.modal = Some(Modal::Rename { path, is_folder, name, error: None });
+                self.modal = Some(Modal::Rename {
+                    path,
+                    is_folder,
+                    name,
+                    error: None,
+                });
             }
             Message::ClonePrompt(path, is_folder) => {
                 self.menu = None;
                 let name = fsops::clone_suggested_name(&path);
-                self.modal = Some(Modal::Clone { path, is_folder, name, error: None });
+                self.modal = Some(Modal::Clone {
+                    path,
+                    is_folder,
+                    name,
+                    error: None,
+                });
             }
             Message::DeletePrompt(path, is_folder) => {
                 self.menu = None;
                 let name = fsops::display_name(&path);
-                self.modal = Some(Modal::Delete { path, is_folder, name });
+                self.modal = Some(Modal::Delete {
+                    path,
+                    is_folder,
+                    name,
+                });
             }
             Message::CopyItem(path, is_folder) => {
                 self.menu = None;
@@ -1189,7 +1269,7 @@ impl App {
             Message::CloseAll => {
                 self.menu = None;
                 self.close_where(|_| true); // drop the clean tabs first
-                // Then prompt for the first remaining dirty tab (repeat to clear all).
+                                            // Then prompt for the first remaining dirty tab (repeat to clear all).
                 if let Some(id) = self.tabs.iter().find(|t| t.dirty).map(|t| t.id) {
                     self.modal = Some(Modal::ConfirmClose { id });
                 }
@@ -1234,7 +1314,10 @@ impl App {
             Message::OpenPalette => {
                 self.menu = None;
                 if self.modal.is_none() && self.env_editor.is_none() && self.runner.is_none() {
-                    self.modal = Some(Modal::Palette { query: String::new(), selected: 0 });
+                    self.modal = Some(Modal::Palette {
+                        query: String::new(),
+                        selected: 0,
+                    });
                 }
             }
             Message::PaletteQuery(q) => {
@@ -1270,7 +1353,8 @@ impl App {
                     .and_then(|i| self.tabs[i].result.as_ref())
                     .and_then(|o| o.response.as_ref())
                 {
-                    if let Some(path) = rfd::FileDialog::new().set_file_name("response").save_file() {
+                    if let Some(path) = rfd::FileDialog::new().set_file_name("response").save_file()
+                    {
                         match std::fs::write(&path, &resp.body) {
                             Ok(()) => self.status = format!("Saved {}", path.display()),
                             Err(e) => self.status = format!("Save failed: {e}"),
@@ -1319,7 +1403,9 @@ impl App {
             Message::SaveExamplePrompt => {
                 if let Some(i) = self.active {
                     let n = example_count(&self.tabs[i].file) + 1;
-                    self.modal = Some(Modal::SaveExample { name: format!("Example {n}") });
+                    self.modal = Some(Modal::SaveExample {
+                        name: format!("Example {n}"),
+                    });
                 }
             }
             Message::TagInput(v) => {
@@ -1458,7 +1544,10 @@ impl App {
             }
             Message::EnvAddRow => {
                 if let Some(ed) = &mut self.env_editor {
-                    ed.rows.push(fsops::EnvRow { enabled: true, ..Default::default() });
+                    ed.rows.push(fsops::EnvRow {
+                        enabled: true,
+                        ..Default::default()
+                    });
                 }
             }
             Message::EnvRemoveRow(i) => {
@@ -1523,7 +1612,11 @@ impl App {
                             ed.selected = self.envs.first().cloned().unwrap_or_default();
                         }
                     }
-                    let sel = self.env_editor.as_ref().map(|e| e.selected.clone()).unwrap_or_default();
+                    let sel = self
+                        .env_editor
+                        .as_ref()
+                        .map(|e| e.selected.clone())
+                        .unwrap_or_default();
                     let rows = self.load_env_rows(&sel);
                     if let Some(ed) = &mut self.env_editor {
                         ed.rows = rows;
@@ -1585,7 +1678,11 @@ impl App {
                     .and_then(|s| s.to_str())
                     .map(str::to_string)
                     .unwrap_or_else(|| "Collection".to_string());
-                self.runner = Some(Runner { title, running: true, results: Vec::new() });
+                self.runner = Some(Runner {
+                    title,
+                    running: true,
+                    results: Vec::new(),
+                });
                 let files = self.requests_under(&dir);
                 let env = self.selected_env.clone();
                 let dev = self.developer_mode;
@@ -1689,7 +1786,11 @@ impl App {
                 }
                 match dlg.save_file() {
                     Some(p) => {
-                        let p = if p.extension().is_some() { p } else { p.with_extension("bru") };
+                        let p = if p.extension().is_some() {
+                            p
+                        } else {
+                            p.with_extension("bru")
+                        };
                         self.tabs[i].path = Some(p.clone());
                         p
                     }
@@ -1798,7 +1899,11 @@ impl App {
         for (i, p) in order.iter().enumerate() {
             let seq = (i + 1) as i64;
             let _ = fsops::set_seq(p, seq);
-            if let Some(t) = self.tabs.iter_mut().find(|t| t.path.as_deref() == Some(p.as_path())) {
+            if let Some(t) = self
+                .tabs
+                .iter_mut()
+                .find(|t| t.path.as_deref() == Some(p.as_path()))
+            {
                 let entries = edit::dict_block_mut(&mut t.file, "meta");
                 edit::set_entry(entries, "seq", &seq.to_string());
                 if let Ok(disk) = std::fs::read_to_string(p) {
@@ -1894,24 +1999,45 @@ impl App {
         };
         let at_root = |p: &Path| self.collection_dir.as_deref() == Some(p);
         match modal {
-            Modal::NewRequest { dir, name, method, url, .. } => {
-                match fsops::new_request(&dir, &name, &method, &url) {
-                    Ok(p) => {
-                        self.reload_tree();
-                        self.open_request(p);
-                    }
-                    Err(e) => {
-                        self.modal = Some(Modal::NewRequest { dir, name, method, url, error: Some(e) });
-                    }
+            Modal::NewRequest {
+                dir,
+                name,
+                method,
+                url,
+                ..
+            } => match fsops::new_request(&dir, &name, &method, &url) {
+                Ok(p) => {
+                    self.reload_tree();
+                    self.open_request(p);
                 }
-            }
+                Err(e) => {
+                    self.modal = Some(Modal::NewRequest {
+                        dir,
+                        name,
+                        method,
+                        url,
+                        error: Some(e),
+                    });
+                }
+            },
             Modal::NewFolder { parent, name, .. } => {
                 match fsops::new_folder(&parent, &name, at_root(&parent)) {
                     Ok(_) => self.reload_tree(),
-                    Err(e) => self.modal = Some(Modal::NewFolder { parent, name, error: Some(e) }),
+                    Err(e) => {
+                        self.modal = Some(Modal::NewFolder {
+                            parent,
+                            name,
+                            error: Some(e),
+                        })
+                    }
                 }
             }
-            Modal::Rename { path, is_folder, name, .. } => {
+            Modal::Rename {
+                path,
+                is_folder,
+                name,
+                ..
+            } => {
                 let root = path.parent().map(at_root).unwrap_or(false);
                 match fsops::rename(&path, is_folder, &name, root) {
                     Ok(newp) => {
@@ -1937,28 +2063,45 @@ impl App {
                         self.reload_tree();
                     }
                     Err(e) => {
-                        self.modal = Some(Modal::Rename { path, is_folder, name, error: Some(e) })
+                        self.modal = Some(Modal::Rename {
+                            path,
+                            is_folder,
+                            name,
+                            error: Some(e),
+                        })
                     }
                 }
             }
-            Modal::Clone { path, is_folder, name, .. } => match fsops::clone(&path, is_folder, &name) {
+            Modal::Clone {
+                path,
+                is_folder,
+                name,
+                ..
+            } => match fsops::clone(&path, is_folder, &name) {
                 Ok(_) => self.reload_tree(),
-                Err(e) => self.modal = Some(Modal::Clone { path, is_folder, name, error: Some(e) }),
-            },
-            Modal::Delete { path, is_folder, .. } => {
-                match fsops::delete(&path, is_folder) {
-                    Ok(()) => {
-                        let active_id = self.active.and_then(|i| self.tabs.get(i)).map(|t| t.id);
-                        self.tabs
-                            .retain(|t| !t.path.as_deref().is_some_and(|p| p.starts_with(&path)));
-                        self.active = active_id
-                            .and_then(|id| self.tabs.iter().position(|t| t.id == id))
-                            .or_else(|| (!self.tabs.is_empty()).then_some(0));
-                        self.reload_tree();
-                    }
-                    Err(e) => self.status = e,
+                Err(e) => {
+                    self.modal = Some(Modal::Clone {
+                        path,
+                        is_folder,
+                        name,
+                        error: Some(e),
+                    })
                 }
-            }
+            },
+            Modal::Delete {
+                path, is_folder, ..
+            } => match fsops::delete(&path, is_folder) {
+                Ok(()) => {
+                    let active_id = self.active.and_then(|i| self.tabs.get(i)).map(|t| t.id);
+                    self.tabs
+                        .retain(|t| !t.path.as_deref().is_some_and(|p| p.starts_with(&path)));
+                    self.active = active_id
+                        .and_then(|id| self.tabs.iter().position(|t| t.id == id))
+                        .or_else(|| (!self.tabs.is_empty()).then_some(0));
+                    self.reload_tree();
+                }
+                Err(e) => self.status = e,
+            },
             Modal::ConfirmClose { id } => {
                 if let Some(i) = self.tabs.iter().position(|t| t.id == id) {
                     self.remove_tab(i);
@@ -1966,14 +2109,21 @@ impl App {
             }
             Modal::Palette { .. } => {
                 // Enter in the palette opens the selected result.
-                if let Some(p) = self.palette_results().get(self.palette_selected()).map(|r| r.1.clone()) {
+                if let Some(p) = self
+                    .palette_results()
+                    .get(self.palette_selected())
+                    .map(|r| r.1.clone())
+                {
                     self.open_request(p);
                 }
             }
             Modal::SaveExample { name } => {
                 if let Some(i) = self.active {
                     let req = self.tabs[i].file.to_request();
-                    let resp = self.tabs[i].result.as_ref().and_then(|o| o.response.clone());
+                    let resp = self.tabs[i]
+                        .result
+                        .as_ref()
+                        .and_then(|o| o.response.clone());
                     if let (Some(req), Some(resp)) = (req, resp) {
                         let text = build_example_text(name.trim(), &req, &resp);
                         edit::push_text_block(&mut self.tabs[i].file, "example", text);
@@ -1999,7 +2149,12 @@ impl App {
                 }
             }
         }
-        let moved: Vec<PathBuf> = self.collapsed.iter().filter(|p| p.starts_with(old)).cloned().collect();
+        let moved: Vec<PathBuf> = self
+            .collapsed
+            .iter()
+            .filter(|p| p.starts_with(old))
+            .cloned()
+            .collect();
         for p in moved {
             self.collapsed.remove(&p);
             if let Ok(rest) = p.strip_prefix(old) {
@@ -2152,8 +2307,7 @@ fn load_editors_for(tab: &mut Tab) {
         // Keep uncommitted unparseable edits: regenerating from `file` would
         // silently discard the user's in-progress (broken) source text.
         ReqTab::Source if !tab.source_invalid => {
-            tab.editors.source =
-                text_editor::Content::with_text(&bru_lang::serialize(&tab.file));
+            tab.editors.source = text_editor::Content::with_text(&bru_lang::serialize(&tab.file));
         }
         _ => {}
     }
@@ -2200,7 +2354,10 @@ impl App {
         let passed = r.results.iter().filter(|x| x.passed).count();
         let total = r.results.len();
         let header = row![
-            text(format!("Run: {}", r.title)).size(15).color(TEXT()).font(BOLD),
+            text(format!("Run: {}", r.title))
+                .size(15)
+                .color(TEXT())
+                .font(BOLD),
             fill_x(),
             text(if r.running {
                 "running...".to_string()
@@ -2240,8 +2397,15 @@ impl App {
             list = list.push(
                 row![
                     text(mark).size(12).color(c),
-                    text(res.name.clone()).size(12).color(TEXT()).width(Length::FillPortion(2)),
-                    text(detail).size(12).color(SUBTEXT()).font(MONO).width(Length::FillPortion(3)),
+                    text(res.name.clone())
+                        .size(12)
+                        .color(TEXT())
+                        .width(Length::FillPortion(2)),
+                    text(detail)
+                        .size(12)
+                        .color(SUBTEXT())
+                        .font(MONO)
+                        .width(Length::FillPortion(3)),
                 ]
                 .spacing(10)
                 .align_y(Center),
@@ -2249,7 +2413,11 @@ impl App {
         }
 
         let card = container(
-            column![header, container(scrollable(list).height(Fill)).height(Fill)].spacing(12),
+            column![
+                header,
+                container(scrollable(list).height(Fill)).height(Fill)
+            ]
+            .spacing(12),
         )
         .style(|_| modal_card())
         .width(Length::Fixed(620.0))
@@ -2257,8 +2425,13 @@ impl App {
         .padding(16);
 
         let backdrop = opaque(
-            mouse_area(container(Space::new()).width(Fill).height(Fill).style(|_| scrim()))
-                .on_press(Message::RunnerClose),
+            mouse_area(
+                container(Space::new())
+                    .width(Fill)
+                    .height(Fill)
+                    .style(|_| scrim()),
+            )
+            .on_press(Message::RunnerClose),
         );
         stack![backdrop, container(opaque(card)).center(Fill).padding(40)].into()
     }
@@ -2267,10 +2440,14 @@ impl App {
     fn console_panel(&self) -> Element<'_, Message> {
         let tab_btn = |label: &str, t: DevTab| {
             let active = self.devtools_tab == t;
-            button(text(label.to_string()).size(12).color(if active { TEXT() } else { MUTED() }))
-                .style(move |_, _| tab_button(active))
-                .padding(Padding::from([2, 8]))
-                .on_press(Message::DevtoolsTab(t))
+            button(
+                text(label.to_string())
+                    .size(12)
+                    .color(if active { TEXT() } else { MUTED() }),
+            )
+            .style(move |_, _| tab_button(active))
+            .padding(Padding::from([2, 8]))
+            .on_press(Message::DevtoolsTab(t))
         };
         let header = row![
             tab_btn("Console", DevTab::Console),
@@ -2306,15 +2483,24 @@ impl App {
                 }
                 for e in &self.network {
                     let status = if e.ok {
-                        text(e.status.to_string()).size(12).color(status_color(e.status))
+                        text(e.status.to_string())
+                            .size(12)
+                            .color(status_color(e.status))
                     } else {
                         text("ERR").size(12).color(RED())
                     };
                     col = col.push(
                         row![
-                            text(short_method(&e.method)).size(11).color(method_color(&e.method)).font(MONO).width(46),
+                            text(short_method(&e.method))
+                                .size(11)
+                                .color(method_color(&e.method))
+                                .font(MONO)
+                                .width(46),
                             status.width(44),
-                            text(format!("{} ms", e.ms)).size(11).color(SUBTEXT()).width(70),
+                            text(format!("{} ms", e.ms))
+                                .size(11)
+                                .color(SUBTEXT())
+                                .width(70),
                             text(human_size(e.size)).size(11).color(SUBTEXT()).width(70),
                             text(e.url.clone()).size(11).color(TEXT()).font(MONO),
                         ]
@@ -2326,14 +2512,12 @@ impl App {
             }
         };
 
-        container(
-            column![header, container(body).padding(6).height(Fill)].spacing(2),
-        )
-        .style(|_| panel(MANTLE(), Some(BORDER1())))
-        .width(Fill)
-        .height(Length::Fixed(180.0))
-        .padding(6)
-        .into()
+        container(column![header, container(body).padding(6).height(Fill)].spacing(2))
+            .style(|_| panel(MANTLE(), Some(BORDER1())))
+            .width(Fill)
+            .height(Length::Fixed(180.0))
+            .padding(6)
+            .into()
     }
 
     /// A click-anywhere catcher beneath an overlay so an outside click dismisses it.
@@ -2358,15 +2542,8 @@ impl App {
         // Offset toward the click with leading spacers (clamped a little).
         let x = menu.at.x.max(0.0);
         let y = menu.at.y.max(0.0);
-        let positioned = column![
-            Space::new().height(y),
-            row![Space::new().width(x), panel],
-        ];
-        stack![
-            self.dismiss_layer(Message::CloseMenu),
-            positioned,
-        ]
-        .into()
+        let positioned = column![Space::new().height(y), row![Space::new().width(x), panel],];
+        stack![self.dismiss_layer(Message::CloseMenu), positioned,].into()
     }
 
     /// The `{{variable}}` value popover: the resolved value plus a Copy button,
@@ -2381,11 +2558,8 @@ impl App {
             Some(v) => text(v.clone()).size(12).font(MONO).color(TEXT()).into(),
             None => text("not set").size(12).color(RED()).into(),
         };
-        let mut col = column![
-            text(label).size(12).font(MONO).color(ACCENT()),
-            value_line,
-        ]
-        .spacing(8);
+        let mut col =
+            column![text(label).size(12).font(MONO).color(ACCENT()), value_line,].spacing(8);
         if let Some(v) = vp.value.clone() {
             col = col.push(
                 button(text("Copy").size(12).color(TEXT()))
@@ -2407,11 +2581,7 @@ impl App {
         // than the panel opening directly under the pointer).
         let x = self.cursor.x.max(0.0);
         let y = (self.cursor.y + 14.0).max(0.0);
-        column![
-            Space::new().height(y),
-            row![Space::new().width(x), panel],
-        ]
-        .into()
+        column![Space::new().height(y), row![Space::new().width(x), panel],].into()
     }
 
     /// The list of menu rows for a given right-click target.
@@ -2422,41 +2592,97 @@ impl App {
                 v.push(menu_row("Open", false, Message::OpenRequest(p.clone())));
                 v.push(menu_row("Run", false, Message::RunItem(p.clone())));
                 v.push(menu_sep());
-                v.push(menu_row("Clone", false, Message::ClonePrompt(p.clone(), false)));
+                v.push(menu_row(
+                    "Clone",
+                    false,
+                    Message::ClonePrompt(p.clone(), false),
+                ));
                 v.push(menu_row("Copy", false, Message::CopyItem(p.clone(), false)));
-                v.push(menu_row("Rename", false, Message::RenamePrompt(p.clone(), false)));
-                v.push(menu_row("Generate Code", false, Message::GenerateCode(p.clone())));
+                v.push(menu_row(
+                    "Rename",
+                    false,
+                    Message::RenamePrompt(p.clone(), false),
+                ));
+                v.push(menu_row(
+                    "Generate Code",
+                    false,
+                    Message::GenerateCode(p.clone()),
+                ));
                 v.push(menu_sep());
                 v.push(menu_row("Move Up", false, Message::MoveItem(p.clone(), -1)));
-                v.push(menu_row("Move Down", false, Message::MoveItem(p.clone(), 1)));
-                v.push(menu_row("Reveal in Explorer", false, Message::RevealItem(p.clone())));
+                v.push(menu_row(
+                    "Move Down",
+                    false,
+                    Message::MoveItem(p.clone(), 1),
+                ));
+                v.push(menu_row(
+                    "Reveal in Explorer",
+                    false,
+                    Message::RevealItem(p.clone()),
+                ));
                 v.push(menu_sep());
-                v.push(menu_row("Delete", true, Message::DeletePrompt(p.clone(), false)));
+                v.push(menu_row(
+                    "Delete",
+                    true,
+                    Message::DeletePrompt(p.clone(), false),
+                ));
             }
             MenuTarget::Folder(p) => {
-                v.push(menu_row("New Request", false, Message::NewRequestPrompt(p.clone())));
-                v.push(menu_row("New Folder", false, Message::NewFolderPrompt(p.clone())));
+                v.push(menu_row(
+                    "New Request",
+                    false,
+                    Message::NewRequestPrompt(p.clone()),
+                ));
+                v.push(menu_row(
+                    "New Folder",
+                    false,
+                    Message::NewFolderPrompt(p.clone()),
+                ));
                 v.push(menu_row("Run", false, Message::RunFolder(p.clone())));
                 v.push(menu_sep());
-                v.push(menu_row("Clone", false, Message::ClonePrompt(p.clone(), true)));
+                v.push(menu_row(
+                    "Clone",
+                    false,
+                    Message::ClonePrompt(p.clone(), true),
+                ));
                 v.push(menu_row("Copy", false, Message::CopyItem(p.clone(), true)));
                 if self.clipboard_item.is_some() {
                     v.push(menu_row("Paste", false, Message::PasteItem(p.clone())));
                 }
-                v.push(menu_row("Rename", false, Message::RenamePrompt(p.clone(), true)));
+                v.push(menu_row(
+                    "Rename",
+                    false,
+                    Message::RenamePrompt(p.clone(), true),
+                ));
                 v.push(menu_row(
                     "Settings",
                     false,
                     Message::OpenSettings(p.join("folder.bru"), TabKind::FolderSettings),
                 ));
-                v.push(menu_row("Reveal in Explorer", false, Message::RevealItem(p.clone())));
+                v.push(menu_row(
+                    "Reveal in Explorer",
+                    false,
+                    Message::RevealItem(p.clone()),
+                ));
                 v.push(menu_sep());
-                v.push(menu_row("Delete", true, Message::DeletePrompt(p.clone(), true)));
+                v.push(menu_row(
+                    "Delete",
+                    true,
+                    Message::DeletePrompt(p.clone(), true),
+                ));
             }
             MenuTarget::Collection => {
                 if let Some(dir) = self.collection_dir.clone() {
-                    v.push(menu_row("New Request", false, Message::NewRequestPrompt(dir.clone())));
-                    v.push(menu_row("New Folder", false, Message::NewFolderPrompt(dir.clone())));
+                    v.push(menu_row(
+                        "New Request",
+                        false,
+                        Message::NewRequestPrompt(dir.clone()),
+                    ));
+                    v.push(menu_row(
+                        "New Folder",
+                        false,
+                        Message::NewFolderPrompt(dir.clone()),
+                    ));
                     v.push(menu_row("Run", false, Message::RunFolder(dir.clone())));
                     v.push(menu_sep());
                     if self.clipboard_item.is_some() {
@@ -2465,10 +2691,17 @@ impl App {
                     v.push(menu_row(
                         "Settings",
                         false,
-                        Message::OpenSettings(dir.join("collection.bru"), TabKind::CollectionSettings),
+                        Message::OpenSettings(
+                            dir.join("collection.bru"),
+                            TabKind::CollectionSettings,
+                        ),
                     ));
                     v.push(menu_row("Collapse All", false, Message::CollapseAll));
-                    v.push(menu_row("Reveal in Explorer", false, Message::RevealItem(dir)));
+                    v.push(menu_row(
+                        "Reveal in Explorer",
+                        false,
+                        Message::RevealItem(dir),
+                    ));
                 }
             }
             MenuTarget::Tab(i) => {
@@ -2480,7 +2713,11 @@ impl App {
                     .unwrap_or((false, false));
                 v.push(menu_row("Close", false, Message::CloseTab(i)));
                 v.push(menu_row("Close Others", false, Message::CloseOthers(i)));
-                v.push(menu_row("Close to the Right", false, Message::CloseRight(i)));
+                v.push(menu_row(
+                    "Close to the Right",
+                    false,
+                    Message::CloseRight(i),
+                ));
                 v.push(menu_row("Close to the Left", false, Message::CloseLeft(i)));
                 v.push(menu_row("Close Saved", false, Message::CloseSaved));
                 v.push(menu_row("Close All", false, Message::CloseAll));
@@ -2499,12 +2736,41 @@ impl App {
 
     fn modal_overlay<'a>(&'a self, modal: &'a Modal) -> Element<'a, Message> {
         let card: Element<'a, Message> = match modal {
-            Modal::NewRequest { name, method, url, error, .. } => modal_card_view(
+            Modal::NewRequest {
+                name,
+                method,
+                url,
+                error,
+                ..
+            } => modal_card_view(
                 "New Request",
                 column![
-                    labeled("Name", text_input("Request name", name).on_input(Message::ModalName).on_submit(Message::ModalSubmit).padding(8).style(input_style)),
-                    labeled("Method", dropdown(pairs(METHODS), method, Length::Fixed(140.0), Message::ModalMethod)),
-                    labeled("URL", text_input("https://...", url).on_input(Message::ModalUrl).on_submit(Message::ModalSubmit).padding(8).font(MONO).style(input_style)),
+                    labeled(
+                        "Name",
+                        text_input("Request name", name)
+                            .on_input(Message::ModalName)
+                            .on_submit(Message::ModalSubmit)
+                            .padding(8)
+                            .style(input_style)
+                    ),
+                    labeled(
+                        "Method",
+                        dropdown(
+                            pairs(METHODS),
+                            method,
+                            Length::Fixed(140.0),
+                            Message::ModalMethod
+                        )
+                    ),
+                    labeled(
+                        "URL",
+                        text_input("https://...", url)
+                            .on_input(Message::ModalUrl)
+                            .on_submit(Message::ModalSubmit)
+                            .padding(8)
+                            .font(MONO)
+                            .style(input_style)
+                    ),
                     modal_error(error),
                 ]
                 .spacing(10)
@@ -2515,7 +2781,14 @@ impl App {
             Modal::NewFolder { name, error, .. } => modal_card_view(
                 "New Folder",
                 column![
-                    labeled("Name", text_input("Folder name", name).on_input(Message::ModalName).on_submit(Message::ModalSubmit).padding(8).style(input_style)),
+                    labeled(
+                        "Name",
+                        text_input("Folder name", name)
+                            .on_input(Message::ModalName)
+                            .on_submit(Message::ModalSubmit)
+                            .padding(8)
+                            .style(input_style)
+                    ),
                     modal_error(error),
                 ]
                 .spacing(10)
@@ -2526,7 +2799,11 @@ impl App {
             Modal::Rename { name, error, .. } => modal_card_view(
                 "Rename",
                 column![
-                    text_input("New name", name).on_input(Message::ModalName).on_submit(Message::ModalSubmit).padding(8).style(input_style),
+                    text_input("New name", name)
+                        .on_input(Message::ModalName)
+                        .on_submit(Message::ModalSubmit)
+                        .padding(8)
+                        .style(input_style),
                     modal_error(error),
                 ]
                 .spacing(10)
@@ -2537,7 +2814,11 @@ impl App {
             Modal::Clone { name, error, .. } => modal_card_view(
                 "Clone",
                 column![
-                    text_input("Name for the copy", name).on_input(Message::ModalName).on_submit(Message::ModalSubmit).padding(8).style(input_style),
+                    text_input("Name for the copy", name)
+                        .on_input(Message::ModalName)
+                        .on_submit(Message::ModalSubmit)
+                        .padding(8)
+                        .style(input_style),
                     modal_error(error),
                 ]
                 .spacing(10)
@@ -2545,7 +2826,9 @@ impl App {
                 "Clone",
                 false,
             ),
-            Modal::Delete { name, is_folder, .. } => modal_card_view(
+            Modal::Delete {
+                name, is_folder, ..
+            } => modal_card_view(
                 "Delete",
                 text(format!(
                     "Delete {} \"{}\"? This removes it from disk.",
@@ -2567,10 +2850,12 @@ impl App {
                     .unwrap_or_default();
                 modal_card_view(
                     "Unsaved Changes",
-                    text(format!("\"{name}\" has unsaved changes. Close without saving?"))
-                        .size(13)
-                        .color(TEXT())
-                        .into(),
+                    text(format!(
+                        "\"{name}\" has unsaved changes. Close without saving?"
+                    ))
+                    .size(13)
+                    .color(TEXT())
+                    .into(),
                     "Don't Save",
                     true,
                 )
@@ -2610,7 +2895,9 @@ impl App {
                         .size(15)
                         .text_size(13)
                         .style(checkbox_style),
-                    text("Saved automatically to ~/.bruno-rs.json").size(11).color(MUTED()),
+                    text("Saved automatically to ~/.bruno-rs.json")
+                        .size(11)
+                        .color(MUTED()),
                 ]
                 .spacing(12)
                 .into(),
@@ -2632,7 +2919,10 @@ impl App {
                 .spacing(8);
                 container(
                     column![
-                        text("Generate Code \u{00B7} curl").size(15).color(TEXT()).font(BOLD),
+                        text("Generate Code \u{00B7} curl")
+                            .size(15)
+                            .color(TEXT())
+                            .font(BOLD),
                         container(scrollable(code_block(code)).height(Length::Fixed(300.0)))
                             .width(Fill),
                         footer,
@@ -2647,8 +2937,13 @@ impl App {
         };
 
         let backdrop = opaque(
-            mouse_area(container(Space::new()).width(Fill).height(Fill).style(|_| scrim()))
-                .on_press(Message::ModalCancel),
+            mouse_area(
+                container(Space::new())
+                    .width(Fill)
+                    .height(Fill)
+                    .style(|_| scrim()),
+            )
+            .on_press(Message::ModalCancel),
         );
         stack![backdrop, container(opaque(card)).center(Fill).padding(40)].into()
     }
@@ -2662,11 +2957,24 @@ impl App {
         for (idx, (name, path)) in results.iter().enumerate() {
             let active = idx == selected;
             list = list.push(
-                button(text(name.clone()).size(13).color(if active { TEXT() } else { SUBTEXT() }))
-                    .style(move |_, _| menu_item(if active { button::Status::Hovered } else { button::Status::Active }, false))
-                    .width(Fill)
-                    .padding(Padding::from([5, 8]))
-                    .on_press(Message::OpenRequest(path.clone())),
+                button(
+                    text(name.clone())
+                        .size(13)
+                        .color(if active { TEXT() } else { SUBTEXT() }),
+                )
+                .style(move |_, _| {
+                    menu_item(
+                        if active {
+                            button::Status::Hovered
+                        } else {
+                            button::Status::Active
+                        },
+                        false,
+                    )
+                })
+                .width(Fill)
+                .padding(Padding::from([5, 8]))
+                .on_press(Message::OpenRequest(path.clone())),
             );
         }
         let card = column![
@@ -2700,11 +3008,15 @@ impl App {
         for name in &self.envs {
             let active = ed.selected == *name;
             let row_el = row![
-                button(text(name.clone()).size(12).color(if active { TEXT() } else { SUBTEXT() }))
-                    .style(move |_, s| sidebar_item(active, s))
-                    .width(Fill)
-                    .padding(Padding::from([4, 8]))
-                    .on_press(Message::EnvSelect(name.clone())),
+                button(
+                    text(name.clone())
+                        .size(12)
+                        .color(if active { TEXT() } else { SUBTEXT() })
+                )
+                .style(move |_, s| sidebar_item(active, s))
+                .width(Fill)
+                .padding(Padding::from([4, 8]))
+                .on_press(Message::EnvSelect(name.clone())),
                 button(text("\u{29C9}").size(11).color(MUTED()))
                     .style(|_, s| icon_button(s, MUTED()))
                     .padding(Padding::from([4, 4]))
@@ -2725,9 +3037,13 @@ impl App {
 
         // Right: variables table for the selected environment.
         let right: Element<'a, Message> = if ed.selected.is_empty() {
-            container(text("Select or create an environment.").size(12).color(MUTED()))
-                .center(Fill)
-                .into()
+            container(
+                text("Select or create an environment.")
+                    .size(12)
+                    .color(MUTED()),
+            )
+            .center(Fill)
+            .into()
         } else {
             let rename_row = row![
                 text("Name").size(11).color(MUTED()),
@@ -2750,9 +3066,18 @@ impl App {
             table = table.push(
                 row![
                     hspace(24.0),
-                    text("Name").size(11).color(MUTED()).width(Length::FillPortion(2)),
-                    text("Value").size(11).color(MUTED()).width(Length::FillPortion(3)),
-                    text("Secret").size(11).color(MUTED()).width(Length::Fixed(56.0)),
+                    text("Name")
+                        .size(11)
+                        .color(MUTED())
+                        .width(Length::FillPortion(2)),
+                    text("Value")
+                        .size(11)
+                        .color(MUTED())
+                        .width(Length::FillPortion(3)),
+                    text("Secret")
+                        .size(11)
+                        .color(MUTED())
+                        .width(Length::Fixed(56.0)),
                     hspace(28.0),
                 ]
                 .spacing(6)
@@ -2841,8 +3166,13 @@ impl App {
         .padding(16);
 
         let backdrop = opaque(
-            mouse_area(container(Space::new()).width(Fill).height(Fill).style(|_| scrim()))
-                .on_press(Message::EnvClose),
+            mouse_area(
+                container(Space::new())
+                    .width(Fill)
+                    .height(Fill)
+                    .style(|_| scrim()),
+            )
+            .on_press(Message::EnvClose),
         );
         stack![backdrop, container(opaque(card)).center(Fill).padding(40)].into()
     }
@@ -2887,16 +3217,30 @@ impl App {
                     .style(|_, s| icon_button(s, SUBTEXT()))
                     .padding(Padding::from([2, 6]))
                     .on_press(Message::OpenEnvEditor),
-                button(text("Console").size(12).color(if self.console_open { ACCENT() } else { SUBTEXT() }))
-                    .style(|_, s| icon_button(s, SUBTEXT()))
-                    .padding(Padding::from([2, 8]))
-                    .on_press(Message::ToggleConsole),
+                button(text("Console").size(12).color(if self.console_open {
+                    ACCENT()
+                } else {
+                    SUBTEXT()
+                }))
+                .style(|_, s| icon_button(s, SUBTEXT()))
+                .padding(Padding::from([2, 8]))
+                .on_press(Message::ToggleConsole),
                 tooltip(
-                    button(text(if theme::is_light() { "\u{263E}" } else { "\u{2600}" }).size(14).color(SUBTEXT()))
-                        .style(|_, s| icon_button(s, SUBTEXT()))
-                        .padding(Padding::from([2, 6]))
-                        .on_press(Message::ToggleTheme(!theme::is_light())),
-                    container(text("Toggle light / dark theme").size(11)).style(|_| menu_panel()).padding(4),
+                    button(
+                        text(if theme::is_light() {
+                            "\u{263E}"
+                        } else {
+                            "\u{2600}"
+                        })
+                        .size(14)
+                        .color(SUBTEXT())
+                    )
+                    .style(|_, s| icon_button(s, SUBTEXT()))
+                    .padding(Padding::from([2, 6]))
+                    .on_press(Message::ToggleTheme(!theme::is_light())),
+                    container(text("Toggle light / dark theme").size(11))
+                        .style(|_| menu_panel())
+                        .padding(4),
                     tooltip::Position::Bottom,
                 ),
                 button(text("Prefs").size(12).color(SUBTEXT()))
@@ -2928,7 +3272,9 @@ impl App {
                     .size(10)
                     .color(method_color(&method))
                     .font(MONO),
-                text(tab.title()).size(12).color(if active { TEXT() } else { SUBTEXT() }),
+                text(tab.title())
+                    .size(12)
+                    .color(if active { TEXT() } else { SUBTEXT() }),
                 text(if tab.dirty { "\u{25CF}" } else { "" })
                     .size(10)
                     .color(ACCENT()),
@@ -2956,9 +3302,11 @@ impl App {
             .on_press(Message::NewDraft);
         strip = strip.push(plus);
 
-        container(scrollable(strip).direction(scrollable::Direction::Horizontal(
-            scrollable::Scrollbar::new().width(4).scroller_width(4),
-        )))
+        container(
+            scrollable(strip).direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::new().width(4).scroller_width(4),
+            )),
+        )
         .style(|_| panel(MANTLE(), Some(BORDER1())))
         .width(Fill)
         .into()
@@ -2979,9 +3327,7 @@ impl App {
                                 .style(|_, s| icon_button(s, SUBTEXT()))
                                 .padding(Padding::from([0, 6]))
                                 .on_press_maybe(
-                                    self.collection_dir
-                                        .clone()
-                                        .map(Message::NewRequestPrompt),
+                                    self.collection_dir.clone().map(Message::NewRequestPrompt),
                                 ),
                         ]
                         .align_y(Center),
@@ -3071,8 +3417,8 @@ impl App {
             let method = req.method.clone().unwrap_or_default();
             let is_sel = active == Some(req.path.as_path());
             // Highlight the row currently hovered as a drag-and-drop target.
-            let dropping = self.dragging.is_some()
-                && self.drag_over.as_deref() == Some(req.path.as_path());
+            let dropping =
+                self.dragging.is_some() && self.drag_over.as_deref() == Some(req.path.as_path());
             let label = row![
                 text(short_method(&method))
                     .size(11)
@@ -3126,7 +3472,13 @@ impl App {
             ReqTab::Source | ReqTab::Script | ReqTab::Tests | ReqTab::Docs => true,
             ReqTab::Body => matches!(
                 req.as_ref().map(|r| &r.body),
-                Some(Body::Json(_) | Body::Text(_) | Body::Xml(_) | Body::Sparql(_) | Body::GraphQl { .. })
+                Some(
+                    Body::Json(_)
+                        | Body::Text(_)
+                        | Body::Xml(_)
+                        | Body::Sparql(_)
+                        | Body::GraphQl { .. }
+                )
             ),
             _ => false,
         };
@@ -3134,13 +3486,17 @@ impl App {
         let req_area = if fills {
             container(inner).padding(10).height(Fill)
         } else {
-            container(scrollable(inner).height(Fill)).padding(10).height(Fill)
+            container(scrollable(inner).height(Fill))
+                .padding(10)
+                .height(Fill)
         };
         let resp = self.response_pane(tab);
 
         let split: Element<'_, Message> = if self.layout_horizontal {
             row![
-                container(req_area).width(Length::FillPortion(1)).height(Fill),
+                container(req_area)
+                    .width(Length::FillPortion(1))
+                    .height(Fill),
                 container(resp).width(Length::FillPortion(1)).height(Fill),
             ]
             .height(Fill)
@@ -3214,14 +3570,21 @@ impl App {
             ReqTab::Docs,
             ReqTab::Source,
         ];
-        let mut r = row![].spacing(2).padding(Padding::from([0, 8])).align_y(Center);
+        let mut r = row![]
+            .spacing(2)
+            .padding(Padding::from([0, 8]))
+            .align_y(Center);
         for &t in TABS {
             let active = t == tab.req_tab;
             r = r.push(
-                button(text(t.label()).size(12).color(if active { TEXT() } else { MUTED() }))
-                    .style(move |_, _| tab_button(active))
-                    .padding(Padding::from([6, 10]))
-                    .on_press(Message::ReqTab(t)),
+                button(
+                    text(t.label())
+                        .size(12)
+                        .color(if active { TEXT() } else { MUTED() }),
+                )
+                .style(move |_, _| tab_button(active))
+                .padding(Padding::from([6, 10]))
+                .on_press(Message::ReqTab(t)),
             );
         }
         if tab.req_tab == ReqTab::Auth {
@@ -3252,10 +3615,18 @@ impl App {
             ),
             ReqTab::Vars => column![
                 section("Pre Request"),
-                self.vars_or_bulk(tab, KvSection::VarsPre, block_var_rows(&tab.file, "vars:pre-request")),
+                self.vars_or_bulk(
+                    tab,
+                    KvSection::VarsPre,
+                    block_var_rows(&tab.file, "vars:pre-request")
+                ),
                 vspace(12.0),
                 section("Post Response"),
-                self.vars_or_bulk(tab, KvSection::VarsPost, block_var_rows(&tab.file, "vars:post-response")),
+                self.vars_or_bulk(
+                    tab,
+                    KvSection::VarsPost,
+                    block_var_rows(&tab.file, "vars:post-response")
+                ),
             ]
             .spacing(4)
             .into(),
@@ -3265,10 +3636,20 @@ impl App {
             }
             ReqTab::Script => column![
                 section("Pre Request"),
-                editor_box(&tab.editors.script_pre, EditorField::ScriptPre, "js", FIXED_EDITOR),
+                editor_box(
+                    &tab.editors.script_pre,
+                    EditorField::ScriptPre,
+                    "js",
+                    FIXED_EDITOR
+                ),
                 vspace(12.0),
                 section("Post Response"),
-                editor_box(&tab.editors.script_post, EditorField::ScriptPost, "js", FIXED_EDITOR),
+                editor_box(
+                    &tab.editors.script_post,
+                    EditorField::ScriptPost,
+                    "js",
+                    FIXED_EDITOR
+                ),
             ]
             .spacing(4)
             .into(),
@@ -3362,11 +3743,12 @@ impl App {
                 continue;
             }
             let active = t == tab.req_tab;
-            let mut label = row![text(t.label())
-                .size(12)
-                .color(if active { TEXT() } else { MUTED() })]
-            .spacing(3)
-            .align_y(Center);
+            let mut label =
+                row![text(t.label())
+                    .size(12)
+                    .color(if active { TEXT() } else { MUTED() })]
+                .spacing(3)
+                .align_y(Center);
             if let Some(ind) = self.tab_indicator(t, tab, req) {
                 label = label.push(ind);
             }
@@ -3475,13 +3857,23 @@ impl App {
                 self.kv_or_bulk(tab, KvSection::Query, "Name", "Value", kv_rows(&req.query)),
                 vspace(12.0),
                 section("Path Params"),
-                self.kv_or_bulk(tab, KvSection::Path, "Name", "Value", kv_rows(&req.path_params)),
+                self.kv_or_bulk(
+                    tab,
+                    KvSection::Path,
+                    "Name",
+                    "Value",
+                    kv_rows(&req.path_params)
+                ),
             ]
             .spacing(4)
             .into(),
-            ReqTab::Headers => {
-                self.kv_or_bulk(tab, KvSection::Headers, "Name", "Value", kv_rows(&req.headers))
-            }
+            ReqTab::Headers => self.kv_or_bulk(
+                tab,
+                KvSection::Headers,
+                "Name",
+                "Value",
+                kv_rows(&req.headers),
+            ),
             ReqTab::Body => self.body_view(tab, &req.body),
             ReqTab::Auth => auth_view(&req.auth),
             ReqTab::Vars => column![
@@ -3504,7 +3896,12 @@ impl App {
                 editor_box(&tab.editors.script_pre, EditorField::ScriptPre, "js", Fill),
                 vspace(12.0),
                 section("Post Response"),
-                editor_box(&tab.editors.script_post, EditorField::ScriptPost, "js", Fill),
+                editor_box(
+                    &tab.editors.script_post,
+                    EditorField::ScriptPost,
+                    "js",
+                    Fill
+                ),
             ]
             .spacing(4)
             .height(Fill)
@@ -3623,7 +4020,11 @@ impl App {
         if names.is_empty() {
             return None;
         }
-        let pre = tab.file.to_request().map(|r| r.vars_pre).unwrap_or_default();
+        let pre = tab
+            .file
+            .to_request()
+            .map(|r| r.vars_pre)
+            .unwrap_or_default();
         let lookup = |name: &str| -> Option<String> {
             if let Some(v) = pre.iter().find(|v| v.enabled && v.name == name) {
                 return Some(v.value.clone());
@@ -3664,8 +4065,11 @@ impl App {
                 ]
                 .spacing(4)
                 .height(Fill);
-                let combined =
-                    format!("{} {}", tab.editors.gql_query.text(), tab.editors.gql_vars.text());
+                let combined = format!(
+                    "{} {}",
+                    tab.editors.gql_query.text(),
+                    tab.editors.gql_vars.text()
+                );
                 match self.var_strip(tab, &combined) {
                     Some(strip) => column![strip, inner].spacing(2).height(Fill).into(),
                     None => inner.into(),
@@ -3695,7 +4099,9 @@ impl App {
             Body::File(items) => {
                 let selected = items.iter().find(|i| i.selected).or_else(|| items.first());
                 let path = selected.map(|i| i.path.clone()).unwrap_or_default();
-                let ct = selected.and_then(|i| i.content_type.clone()).unwrap_or_default();
+                let ct = selected
+                    .and_then(|i| i.content_type.clone())
+                    .unwrap_or_default();
                 let label = if path.is_empty() {
                     "No file selected".to_string()
                 } else {
@@ -3736,11 +4142,12 @@ impl App {
             .align_y(Center);
         for t in RespTab::ALL {
             let active = t == tab.resp_tab;
-            let mut label = row![text(t.label())
-                .size(12)
-                .color(if active { TEXT() } else { MUTED() })]
-            .spacing(3)
-            .align_y(Center);
+            let mut label =
+                row![text(t.label())
+                    .size(12)
+                    .color(if active { TEXT() } else { MUTED() })]
+                .spacing(3)
+                .align_y(Center);
             if let Some(ind) = self.resp_indicator(t, tab) {
                 label = label.push(ind);
             }
@@ -3755,17 +4162,21 @@ impl App {
 
         // Action buttons (layout toggle always; copy/download/clear once there's
         // a response).
-        let layout_glyph = if self.layout_horizontal { "\u{2926}" } else { "\u{2925}" };
-        strip = strip.push(
-            tooltip(
-                button(text(layout_glyph).size(13).color(SUBTEXT()))
-                    .style(|_, s| icon_button(s, SUBTEXT()))
-                    .padding(Padding::from([2, 6]))
-                    .on_press(Message::ToggleLayout),
-                container(text("Toggle layout").size(11)).style(|_| menu_panel()).padding(4),
-                tooltip::Position::Bottom,
-            ),
-        );
+        let layout_glyph = if self.layout_horizontal {
+            "\u{2926}"
+        } else {
+            "\u{2925}"
+        };
+        strip = strip.push(tooltip(
+            button(text(layout_glyph).size(13).color(SUBTEXT()))
+                .style(|_, s| icon_button(s, SUBTEXT()))
+                .padding(Padding::from([2, 6]))
+                .on_press(Message::ToggleLayout),
+            container(text("Toggle layout").size(11))
+                .style(|_| menu_panel())
+                .padding(4),
+            tooltip::Position::Bottom,
+        ));
         if let Some(r) = tab.result.as_ref().and_then(|o| o.response.as_ref()) {
             if tab.resp_tab == RespTab::Response && !is_image_response(&r.headers) {
                 let fmt = match tab.resp_format {
@@ -3819,7 +4230,9 @@ impl App {
                         .size(12)
                         .color(status_color(r.status))
                         .font(BOLD),
-                    text(format!("{} ms", r.duration_ms)).size(12).color(SUBTEXT()),
+                    text(format!("{} ms", r.duration_ms))
+                        .size(12)
+                        .color(SUBTEXT()),
                     tooltip(
                         text(human_size(r.body.len())).size(12).color(SUBTEXT()),
                         container(text(format!("{} bytes", r.body.len())).size(11))
@@ -3955,8 +4368,8 @@ impl App {
                 } else {
                     let mut con = Column::new().spacing(2);
                     for line in &o.console {
-                        con = con
-                            .push(text(format!("| {line}")).size(12).color(MUTED()).font(MONO));
+                        con =
+                            con.push(text(format!("| {line}")).size(12).color(MUTED()).font(MONO));
                     }
                     column![con, body].spacing(6).height(Fill).into()
                 }
@@ -4073,7 +4486,11 @@ fn kv_table<'a>(
             .style(move |_, s| icon_button(s, RED()))
             .padding(Padding::from([2, 6]))
             .on_press(Message::KvRemove(section, i));
-        col = col.push(row![check, name_in, value_in, del].spacing(6).align_y(Center));
+        col = col.push(
+            row![check, name_in, value_in, del]
+                .spacing(6)
+                .align_y(Center),
+        );
     }
     col = col.push(
         row![
@@ -4100,9 +4517,18 @@ fn vars_table<'a>(
     col = col.push(
         row![
             hspace(24.0),
-            text("Name").size(11).color(MUTED()).width(Length::FillPortion(2)),
-            text("Value").size(11).color(MUTED()).width(Length::FillPortion(3)),
-            text("Local").size(11).color(MUTED()).width(Length::Fixed(48.0)),
+            text("Name")
+                .size(11)
+                .color(MUTED())
+                .width(Length::FillPortion(2)),
+            text("Value")
+                .size(11)
+                .color(MUTED())
+                .width(Length::FillPortion(3)),
+            text("Local")
+                .size(11)
+                .color(MUTED())
+                .width(Length::Fixed(48.0)),
             hspace(28.0),
         ]
         .spacing(6)
@@ -4165,8 +4591,14 @@ fn multipart_table<'a>(rows: Vec<(String, String, bool)>) -> Element<'a, Message
     col = col.push(
         row![
             hspace(24.0),
-            text("Name").size(11).color(MUTED()).width(Length::FillPortion(2)),
-            text("Value (text or @file)").size(11).color(MUTED()).width(Length::FillPortion(3)),
+            text("Name")
+                .size(11)
+                .color(MUTED())
+                .width(Length::FillPortion(2)),
+            text("Value (text or @file)")
+                .size(11)
+                .color(MUTED())
+                .width(Length::FillPortion(3)),
             hspace(56.0),
         ]
         .spacing(6)
@@ -4221,9 +4653,18 @@ fn assert_table<'a>(rows: Vec<(String, String, bool)>) -> Element<'a, Message> {
     col = col.push(
         row![
             hspace(24.0),
-            text("Expression").size(11).color(MUTED()).width(Length::FillPortion(3)),
-            text("Operator").size(11).color(MUTED()).width(Length::Fixed(150.0)),
-            text("Value").size(11).color(MUTED()).width(Length::FillPortion(3)),
+            text("Expression")
+                .size(11)
+                .color(MUTED())
+                .width(Length::FillPortion(3)),
+            text("Operator")
+                .size(11)
+                .color(MUTED())
+                .width(Length::Fixed(150.0)),
+            text("Value")
+                .size(11)
+                .color(MUTED())
+                .width(Length::FillPortion(3)),
             hspace(28.0),
         ]
         .spacing(6)
@@ -4246,7 +4687,11 @@ fn assert_table<'a>(rows: Vec<(String, String, bool)>) -> Element<'a, Message> {
             .width(Length::FillPortion(3));
         let operand_for_op = operand.clone();
         let op_dd = dropdown(pairs(ASSERT_OPS), &op, Length::Fixed(150.0), move |newop| {
-            Message::KvValue(KvSection::Assert, i, combine_assert(&newop, &operand_for_op))
+            Message::KvValue(
+                KvSection::Assert,
+                i,
+                combine_assert(&newop, &operand_for_op),
+            )
         });
         let op_for_operand = op.clone();
         let mut operand_in = text_input("expected", &operand)
@@ -4327,7 +4772,11 @@ where
         return None;
     }
     let literal = |s: &str| -> Element<'static, Message> {
-        text(s.to_string()).size(12).font(MONO).color(SUBTEXT()).into()
+        text(s.to_string())
+            .size(12)
+            .font(MONO)
+            .color(SUBTEXT())
+            .into()
     };
 
     let mut segments: Vec<Element<'static, Message>> = Vec::new();
@@ -4505,7 +4954,11 @@ fn auth_view(auth: &Auth) -> Element<'static, Message> {
                     &o.access_token_url,
                     AuthField::Oauth2TokenUrl,
                 ))
-                .push(auth_field("Client Id", &o.client_id, AuthField::Oauth2ClientId))
+                .push(auth_field(
+                    "Client Id",
+                    &o.client_id,
+                    AuthField::Oauth2ClientId,
+                ))
                 .push(auth_field(
                     "Client Secret",
                     &o.client_secret,
@@ -4514,8 +4967,16 @@ fn auth_view(auth: &Auth) -> Element<'static, Message> {
                 .push(auth_field("Scope", &o.scope, AuthField::Oauth2Scope));
             if o.grant_type == "password" {
                 col = col
-                    .push(auth_field("Username", &o.username, AuthField::Oauth2Username))
-                    .push(auth_field("Password", &o.password, AuthField::Oauth2Password));
+                    .push(auth_field(
+                        "Username",
+                        &o.username,
+                        AuthField::Oauth2Username,
+                    ))
+                    .push(auth_field(
+                        "Password",
+                        &o.password,
+                        AuthField::Oauth2Password,
+                    ));
             }
         }
     }
@@ -4553,7 +5014,11 @@ fn settings_view(file: &BruFile) -> Element<'static, Message> {
     column![
         section("Request Settings"),
         setting_bool("Encode URL", "encodeUrl", is_true("encodeUrl")),
-        setting_bool("Follow Redirects", "followRedirects", is_true("followRedirects")),
+        setting_bool(
+            "Follow Redirects",
+            "followRedirects",
+            is_true("followRedirects")
+        ),
         setting_num("Max Redirects", "maxRedirects", &val("maxRedirects")),
         setting_num("Timeout (ms)", "timeout", &val("timeout")),
     ]
@@ -4605,12 +5070,16 @@ fn section(title: &str) -> Element<'static, Message> {
 }
 
 fn menu_row<'a>(label: &str, danger: bool, msg: Message) -> Element<'a, Message> {
-    button(text(label.to_string()).size(12).color(if danger { RED() } else { TEXT() }))
-        .style(move |_, s| menu_item(s, danger))
-        .width(Fill)
-        .padding(Padding::from([5, 8]))
-        .on_press(msg)
-        .into()
+    button(
+        text(label.to_string())
+            .size(12)
+            .color(if danger { RED() } else { TEXT() }),
+    )
+    .style(move |_, s| menu_item(s, danger))
+    .width(Fill)
+    .padding(Padding::from([5, 8]))
+    .on_press(msg)
+    .into()
 }
 
 fn menu_sep<'a>() -> Element<'a, Message> {
@@ -4620,9 +5089,12 @@ fn menu_sep<'a>() -> Element<'a, Message> {
 }
 
 fn labeled<'a>(label: &str, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    column![text(label.to_string()).size(11).color(MUTED()), control.into()]
-        .spacing(3)
-        .into()
+    column![
+        text(label.to_string()).size(11).color(MUTED()),
+        control.into()
+    ]
+    .spacing(3)
+    .into()
 }
 
 fn modal_error<'a>(error: &Option<String>) -> Element<'a, Message> {
@@ -4638,14 +5110,21 @@ fn modal_card_view<'a>(
     confirm: &str,
     danger: bool,
 ) -> Element<'a, Message> {
-    let confirm_btn = button(
-        text(confirm.to_string())
-            .size(13)
-            .color(if danger { WHITE } else { BLACK }),
-    )
-    .style(move |_, s| if danger { danger_button(s) } else { solid_button(ACCENT(), BLACK) })
-    .padding(Padding::from([6, 16]))
-    .on_press(Message::ModalSubmit);
+    let confirm_btn =
+        button(
+            text(confirm.to_string())
+                .size(13)
+                .color(if danger { WHITE } else { BLACK }),
+        )
+        .style(move |_, s| {
+            if danger {
+                danger_button(s)
+            } else {
+                solid_button(ACCENT(), BLACK)
+            }
+        })
+        .padding(Padding::from([6, 16]))
+        .on_press(Message::ModalSubmit);
 
     let cancel = button(text("Cancel").size(13).color(TEXT()))
         .style(|_, s| ghost_button(s))
@@ -4761,7 +5240,11 @@ fn build_example_text(name: &str, req: &Request, resp: &HttpResponse) -> String 
     s.push_str(&format!("      code: {}\n", resp.status));
     s.push_str(&format!("      text: {}\n", resp.status_text));
     s.push_str("    }\n\n");
-    let kind = if resp.json().is_some() { "json" } else { "text" };
+    let kind = if resp.json().is_some() {
+        "json"
+    } else {
+        "text"
+    };
     s.push_str("    body: {\n");
     s.push_str(&format!("      type: {kind}\n"));
     s.push_str("      content: '''\n");
@@ -4812,11 +5295,15 @@ fn parse_bulk(text: &str) -> Vec<(String, String, bool, bool)> {
                 None => (false, line),
             };
             let (name, value) = line.split_once(':')?;
-            Some((name.trim().to_string(), value.trim().to_string(), enabled, local))
+            Some((
+                name.trim().to_string(),
+                value.trim().to_string(),
+                enabled,
+                local,
+            ))
         })
         .collect()
 }
-
 
 /// Project a dictionary block's entries to editable `(name, value, enabled)`
 /// rows directly (used by settings tabs, which have no method block to project).
@@ -4989,8 +5476,12 @@ const AUTH_MODES: &[(&str, &str)] = &[
 
 const API_KEY_PLACEMENTS: &[(&str, &str)] = &[("header", "Header"), ("queryparams", "Query Param")];
 
-const RESP_FORMATS: &[(&str, &str)] =
-    &[("pretty", "Pretty"), ("tree", "Tree"), ("raw", "Raw"), ("hex", "Hex")];
+const RESP_FORMATS: &[(&str, &str)] = &[
+    ("pretty", "Pretty"),
+    ("tree", "Tree"),
+    ("raw", "Raw"),
+    ("hex", "Hex"),
+];
 
 const OAUTH2_GRANTS: &[(&str, &str)] = &[
     ("client_credentials", "Client Credentials"),
@@ -5031,8 +5522,18 @@ const ASSERT_OPS: &[(&str, &str)] = &[
 
 /// Operators that take no operand (the value field is disabled for these).
 const UNARY_OPS: &[&str] = &[
-    "isEmpty", "isNotEmpty", "isNull", "isUndefined", "isDefined", "isTruthy", "isFalsy", "isJson",
-    "isNumber", "isString", "isBoolean", "isArray",
+    "isEmpty",
+    "isNotEmpty",
+    "isNull",
+    "isUndefined",
+    "isDefined",
+    "isTruthy",
+    "isFalsy",
+    "isJson",
+    "isNumber",
+    "isString",
+    "isBoolean",
+    "isArray",
 ];
 
 fn is_unary_op(op: &str) -> bool {
@@ -5110,7 +5611,10 @@ fn reveal_in_explorer(path: &Path) {
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+        let _ = std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn();
     }
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     {
@@ -5165,7 +5669,10 @@ fn collect_folder_requests(folder: &Folder, out: &mut Vec<PathBuf>) {
 /// Whether a folder, or any descendant, matches the sidebar filter.
 fn folder_matches(folder: &Folder, query: &str) -> bool {
     folder.name.to_lowercase().contains(query)
-        || folder.requests.iter().any(|r| r.name.to_lowercase().contains(query))
+        || folder
+            .requests
+            .iter()
+            .any(|r| r.name.to_lowercase().contains(query))
         || folder.folders.iter().any(|f| folder_matches(f, query))
 }
 
@@ -5232,14 +5739,26 @@ async fn run_folder(
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) => {
-                results.push(RunResult { name: fname, passed: false, status: 0, ms: 0, error: Some(e.to_string()) });
+                results.push(RunResult {
+                    name: fname,
+                    passed: false,
+                    status: 0,
+                    ms: 0,
+                    error: Some(e.to_string()),
+                });
                 continue;
             }
         };
         let file = match bru_lang::parse(&text) {
             Ok(f) => f,
             Err(e) => {
-                results.push(RunResult { name: fname, passed: false, status: 0, ms: 0, error: Some(e.to_string()) });
+                results.push(RunResult {
+                    name: fname,
+                    passed: false,
+                    status: 0,
+                    ms: 0,
+                    error: Some(e.to_string()),
+                });
                 continue;
             }
         };
@@ -5248,7 +5767,11 @@ async fn run_folder(
         }
         let outcome = run_request(&file, &mut ctx).await;
         let status = outcome.response.as_ref().map(|r| r.status).unwrap_or(0);
-        let ms = outcome.response.as_ref().map(|r| r.duration_ms).unwrap_or(0);
+        let ms = outcome
+            .response
+            .as_ref()
+            .map(|r| r.duration_ms)
+            .unwrap_or(0);
         results.push(RunResult {
             name: outcome.name.clone(),
             passed: outcome.passed(),
@@ -5321,11 +5844,20 @@ fn summarize(outcome: &RunOutcome) -> String {
 fn gen_curl(req: &Request) -> String {
     let q = |s: &str| s.replace('\'', "'\\''");
     let mut url = bru_http::resolve_url(req).unwrap_or_else(|_| req.url.clone());
-    if let Auth::ApiKey { key, value, placement: bru_core::ApiKeyPlacement::Query } = &req.auth {
+    if let Auth::ApiKey {
+        key,
+        value,
+        placement: bru_core::ApiKeyPlacement::Query,
+    } = &req.auth
+    {
         let sep = if url.contains('?') { '&' } else { '?' };
         url = format!("{url}{sep}{key}={value}");
     }
-    let mut parts = vec![format!("curl -X {} '{}'", req.method.to_uppercase(), q(&url))];
+    let mut parts = vec![format!(
+        "curl -X {} '{}'",
+        req.method.to_uppercase(),
+        q(&url)
+    )];
     for h in req.headers.iter().filter(|h| h.enabled) {
         parts.push(format!("-H '{}: {}'", q(&h.name), q(&h.value)));
     }
@@ -5343,9 +5875,11 @@ fn gen_curl(req: &Request) -> String {
             parts.push(format!("-u '{}:{}'", q(username), q(password)))
         }
         Auth::Bearer { token } => parts.push(format!("-H 'Authorization: Bearer {}'", q(token))),
-        Auth::ApiKey { key, value, placement: bru_core::ApiKeyPlacement::Header } => {
-            parts.push(format!("-H '{}: {}'", q(key), q(value)))
-        }
+        Auth::ApiKey {
+            key,
+            value,
+            placement: bru_core::ApiKeyPlacement::Header,
+        } => parts.push(format!("-H '{}: {}'", q(key), q(value))),
         _ => {}
     }
     match &req.body {
@@ -5487,7 +6021,14 @@ fn json_node<'a>(
             ));
             if open {
                 for (idx, v) in arr.iter().enumerate() {
-                    json_node(&format!("{path}/a:{idx}"), &format!("[{idx}]"), v, expanded, depth + 1, out);
+                    json_node(
+                        &format!("{path}/a:{idx}"),
+                        &format!("[{idx}]"),
+                        v,
+                        expanded,
+                        depth + 1,
+                        out,
+                    );
                 }
             }
         }
@@ -5501,7 +6042,10 @@ fn json_node<'a>(
             out.push(indent(
                 depth,
                 row![
-                    text(format!("{label}: ")).size(12).color(SUBTEXT()).font(MONO),
+                    text(format!("{label}: "))
+                        .size(12)
+                        .color(SUBTEXT())
+                        .font(MONO),
                     text(val).size(12).color(color).font(MONO),
                 ]
                 .into(),
@@ -5517,9 +6061,20 @@ fn hex_dump(bytes: &[u8]) -> String {
         let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
         let ascii: String = chunk
             .iter()
-            .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+            .map(|&b| {
+                if (0x20..0x7f).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
             .collect();
-        out.push_str(&format!("{:08x}  {:<47}  {}\n", i * 16, hex.join(" "), ascii));
+        out.push_str(&format!(
+            "{:08x}  {:<47}  {}\n",
+            i * 16,
+            hex.join(" "),
+            ascii
+        ));
     }
     if bytes.len() > 4096 * 16 {
         out.push_str("... (truncated)\n");
@@ -5534,7 +6089,10 @@ fn open_response_in_browser(resp: &HttpResponse) {
         return;
     }
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd").args(["/C", "start", ""]).arg(&path).spawn();
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", ""])
+        .arg(&path)
+        .spawn();
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(&path).spawn();
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
@@ -5547,6 +6105,13 @@ fn pretty_body(resp: &HttpResponse) -> String {
         None => resp.text(),
     }
 }
+
+#[cfg(test)]
+mod tests_helpers;
+#[cfg(test)]
+mod tests_update;
+#[cfg(test)]
+mod tests_view;
 
 #[cfg(test)]
 mod tests {
@@ -5564,7 +6129,11 @@ mod tests {
             body: b"{\"a\":1}".to_vec(),
             duration_ms: 5,
         };
-        edit::push_text_block(&mut f, "example", build_example_text("My Example", &req, &resp));
+        edit::push_text_block(
+            &mut f,
+            "example",
+            build_example_text("My Example", &req, &resp),
+        );
         // The nested-brace example block must reparse and be readable back.
         let reparsed = bru_lang::parse(&bru_lang::serialize(&f)).expect("example must reparse");
         assert_eq!(example_count(&reparsed), 1);

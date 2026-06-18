@@ -441,8 +441,7 @@ async fn settings_disables_redirect_following() {
     let src = "meta {\n  name: R\n  type: http\n}\n\n\
         get {\n  url: URL\n  auth: none\n}\n\n\
         settings {\n  followRedirects: false\n}\n";
-    let file =
-        bru_lang::parse(&src.replace("URL", &format!("http://{redir_addr}/start"))).unwrap();
+    let file = bru_lang::parse(&src.replace("URL", &format!("http://{redir_addr}/start"))).unwrap();
 
     let mut ctx = RunContext::default();
     let outcome = run_request(&file, &mut ctx).await;
@@ -455,7 +454,8 @@ async fn settings_disables_redirect_following() {
         "302 must be surfaced, not followed, when followRedirects:false"
     );
     assert!(
-        rx.recv_timeout(std::time::Duration::from_millis(400)).is_err(),
+        rx.recv_timeout(std::time::Duration::from_millis(400))
+            .is_err(),
         "destination was contacted — redirect was followed despite followRedirects:false"
     );
 }
