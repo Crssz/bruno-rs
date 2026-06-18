@@ -1062,6 +1062,22 @@ fn git_branch_none_outside_repo() {
 }
 
 #[test]
+fn bump_recent_dedups_and_caps() {
+    // Pure list logic (no prefs file IO).
+    let mut recent = Vec::new();
+    for i in 0..12 {
+        bump_recent(&mut recent, format!("/c/coll{i}"));
+    }
+    // Capped at 10, most-recent first.
+    assert_eq!(recent.len(), 10);
+    assert_eq!(recent[0], "/c/coll11");
+    // Re-opening an existing one moves it to the front without duplicating.
+    bump_recent(&mut recent, "/c/coll5".to_string());
+    assert_eq!(recent[0], "/c/coll5");
+    assert_eq!(recent.iter().filter(|r| *r == "/c/coll5").count(), 1);
+}
+
+#[test]
 fn req_matches_name_and_indexed_content() {
     let req = bru_core::RequestItem {
         name: "Search Repos".to_string(),

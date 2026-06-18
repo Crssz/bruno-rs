@@ -120,6 +120,9 @@ struct App {
     search_index: HashMap<PathBuf, String>,
     /// "Eye" toggle: reveal secret/masked values in the env manager.
     reveal_secrets: bool,
+    /// Force-show the Home/welcome screen even when a collection is open
+    /// (toggled by the top-bar Home button).
+    home: bool,
     /// Cookies observed from response `Set-Cookie` headers this session, shown in
     /// the Cookies manager. (A viewer: a fresh client is built per send, so these
     /// aren't auto-replayed — see the Cookies overlay note.)
@@ -161,6 +164,9 @@ struct Prefs {
     insecure: bool,
     /// Use the light palette instead of the dark one.
     light: bool,
+    /// Recently-opened collection dirs (most-recent first), the "workspace" the
+    /// top-bar switcher and Home screen list.
+    recent: Vec<String>,
 }
 
 impl Default for Prefs {
@@ -169,6 +175,7 @@ impl Default for Prefs {
             timeout_secs: 30,
             insecure: false,
             light: false,
+            recent: Vec::new(),
         }
     }
 }
@@ -200,6 +207,13 @@ fn globals_root() -> Option<PathBuf> {
     Some(root)
 }
 
+/// Move `s` to the front of the recent list, deduped and capped at 10.
+fn bump_recent(recent: &mut Vec<String>, s: String) {
+    recent.retain(|r| r != &s);
+    recent.insert(0, s);
+    recent.truncate(10);
+}
+
 fn load_prefs() -> Prefs {
     let mut p = Prefs::default();
     if let Some(path) = prefs_path() {
@@ -214,6 +228,12 @@ fn load_prefs() -> Prefs {
                 if let Some(b) = v.get("light").and_then(|x| x.as_bool()) {
                     p.light = b;
                 }
+                if let Some(arr) = v.get("recent").and_then(|x| x.as_array()) {
+                    p.recent = arr
+                        .iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect();
+                }
             }
         }
     }
@@ -226,6 +246,7 @@ fn save_prefs(p: &Prefs) {
             "timeout_secs": p.timeout_secs,
             "insecure": p.insecure,
             "light": p.light,
+            "recent": p.recent,
         });
         let _ = std::fs::write(path, v.to_string());
     }
@@ -630,6 +651,9 @@ enum EditorField {
 #[derive(Debug, Clone)]
 enum Message {
     OpenFolder,
+    /// Open a specific collection dir (from the Home screen / workspace switcher).
+    OpenCollectionPath(PathBuf),
+    GoHome,
     OpenRequest(PathBuf),
     SelectTab(usize),
     CloseTab(usize),
@@ -811,11 +835,22 @@ impl App {
                 self.collapsed.clear();
                 self.tabs.clear();
                 self.active = None;
+                self.home = false;
                 self.refresh_vars();
                 self.build_search_index();
+                if let Some(dir) = &self.collection_dir {
+                    self.push_recent(dir.clone());
+                }
             }
             Err(e) => self.status = format!("Failed to open {}: {e}", dir.display()),
         }
+    }
+
+    /// Record a just-opened collection at the front of the recent list (deduped,
+    /// capped) and persist it.
+    fn push_recent(&mut self, dir: PathBuf) {
+        bump_recent(&mut self.prefs.recent, dir.to_string_lossy().into_owned());
+        save_prefs(&self.prefs);
     }
 
     /// Open (or focus) a request tab. Returns `false` (leaving `active`
@@ -925,6 +960,11 @@ impl App {
                     self.load(dir);
                 }
             }
+            Message::OpenCollectionPath(dir) => {
+                self.menu = None;
+                self.load(dir);
+            }
+            Message::GoHome => self.home = !self.home,
             Message::OpenRequest(path) => {
                 self.menu = None;
                 self.cancel_drag();
@@ -2550,9 +2590,14 @@ fn load_editors_for(tab: &mut Tab) {
 
 impl App {
     fn view(&self) -> Element<'_, Message> {
-        let mut center = column![self.request_tabs(), self.main_panel()]
-            .width(Fill)
-            .height(Fill);
+        let show_home = self.collection.is_none() || self.home;
+        let mut center = if show_home {
+            column![self.home_screen()].width(Fill).height(Fill)
+        } else {
+            column![self.request_tabs(), self.main_panel()]
+                .width(Fill)
+                .height(Fill)
+        };
         if self.console_open {
             center = center.push(self.console_panel());
         }
@@ -3653,15 +3698,53 @@ impl App {
             None => Space::new().into(),
         };
 
+        // Workspace switcher: a dropdown over recently-opened collections, with
+        // the current collection selected. Falls back to plain name text.
+        let title: Element<'_, Message> =
+            if self.collection.is_some() && !self.prefs.recent.is_empty() {
+                let pairs: Vec<(String, String)> = self
+                    .prefs
+                    .recent
+                    .iter()
+                    .map(|p| {
+                        let label = PathBuf::from(p)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| p.clone());
+                        (p.clone(), label)
+                    })
+                    .collect();
+                let cur = self
+                    .collection_dir
+                    .as_ref()
+                    .map(|d| d.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                dropdown(pairs, &cur, Length::Fixed(190.0), |s| {
+                    Message::OpenCollectionPath(PathBuf::from(s))
+                })
+            } else {
+                text(name).size(13).color(ACCENT()).font(BOLD).into()
+            };
+
         container(
             row![
+                tooltip(
+                    button(text("\u{2302}").size(15).color(SUBTEXT()))
+                        .style(|_, s| icon_button(s, SUBTEXT()))
+                        .padding(Padding::from([2, 8]))
+                        .on_press(Message::GoHome),
+                    container(text("Home").size(11))
+                        .style(|_| menu_panel())
+                        .padding(4),
+                    tooltip::Position::Bottom,
+                ),
                 button(text("Open Collection").size(13))
                     .style(|_, s| ghost_button(s))
                     .on_press(Message::OpenFolder),
                 button(text("New").size(13))
                     .style(|_, s| ghost_button(s))
                     .on_press(Message::NewCollectionPrompt),
-                text(name).size(13).color(ACCENT()).font(BOLD),
+                title,
                 branch,
                 coll_actions,
                 fill_x(),
@@ -3777,6 +3860,59 @@ impl App {
         .style(|_| panel(MANTLE(), Some(BORDER1())))
         .width(Fill)
         .into()
+    }
+
+    /// The Home / welcome screen: open / new collection actions + recent list.
+    fn home_screen(&self) -> Element<'_, Message> {
+        let mut col = Column::new().spacing(14).align_x(Center);
+        col = col.push(text("bruno-rs").size(28).color(ACCENT()).font(BOLD));
+        col = col.push(
+            text("Open or create a collection to begin.")
+                .size(13)
+                .color(SUBTEXT()),
+        );
+        col = col.push(
+            row![
+                button(text("Open Collection").size(13).color(TEXT()))
+                    .style(|_, s| ghost_button(s))
+                    .padding(Padding::from([8, 16]))
+                    .on_press(Message::OpenFolder),
+                button(text("New Collection").size(13).color(BLACK))
+                    .style(|_, _| solid_button(ACCENT(), BLACK))
+                    .padding(Padding::from([8, 16]))
+                    .on_press(Message::NewCollectionPrompt),
+            ]
+            .spacing(10),
+        );
+        if !self.prefs.recent.is_empty() {
+            col = col.push(text("Recent").size(12).color(MUTED()));
+            let mut recents = Column::new().spacing(2);
+            for p in &self.prefs.recent {
+                let path = PathBuf::from(p);
+                let name = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| p.clone());
+                recents = recents.push(
+                    button(
+                        column![
+                            text(name).size(13).color(TEXT()),
+                            text(p.clone()).size(10).color(MUTED()),
+                        ]
+                        .spacing(1),
+                    )
+                    .style(|_, s| ghost_button(s))
+                    .width(Fill)
+                    .padding(Padding::from([6, 10]))
+                    .on_press(Message::OpenCollectionPath(path)),
+                );
+            }
+            col = col.push(
+                container(scrollable(recents).height(Length::Fixed(220.0)))
+                    .width(Length::Fixed(440.0)),
+            );
+        }
+        container(col).center(Fill).width(Fill).height(Fill).into()
     }
 
     /// The strip of open-request tabs above the request pane, with a "+" button.
