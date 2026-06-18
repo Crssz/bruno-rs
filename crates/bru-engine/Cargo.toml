@@ -11,6 +11,10 @@ bru-http.workspace = true
 bru-lang.workspace = true
 bru-script.workspace = true
 serde_json.workspace = true
+md-5 = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

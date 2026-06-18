@@ -94,6 +94,22 @@ pub enum Auth {
         placement: ApiKeyPlacement,
     },
     OAuth2(OAuth2),
+    /// HTTP Digest (RFC 7616/2617). Resolved in the engine via a 401 challenge
+    /// (the server's `WWW-Authenticate: Digest ...` nonce drives the response).
+    Digest {
+        username: String,
+        password: String,
+    },
+    /// AWS Signature Version 4. Resolved (pure computation) before send: the
+    /// signed `Authorization`/`x-amz-date` headers are pushed and auth cleared.
+    AwsV4 {
+        access_key_id: String,
+        secret_access_key: String,
+        session_token: String,
+        service: String,
+        region: String,
+        profile_name: String,
+    },
 }
 
 /// A typed HTTP request projected from a `.bru` file.
@@ -239,6 +255,18 @@ impl BruFile {
                     token_query_key: with_default("token_query_key", "access_token"),
                 })
             }
+            "digest" => Auth::Digest {
+                username: v("auth:digest", "username"),
+                password: v("auth:digest", "password"),
+            },
+            "awsv4" => Auth::AwsV4 {
+                access_key_id: v("auth:awsv4", "accessKeyId"),
+                secret_access_key: v("auth:awsv4", "secretAccessKey"),
+                session_token: v("auth:awsv4", "sessionToken"),
+                service: v("auth:awsv4", "service"),
+                region: v("auth:awsv4", "region"),
+                profile_name: v("auth:awsv4", "profileName"),
+            },
             _ => Auth::None,
         }
     }

@@ -5,7 +5,9 @@
 //! scripts. Scripts run in the `bru-script` QuickJS Safe-Mode sandbox.
 
 mod context;
+mod digest;
 mod oauth;
+mod sigv4;
 
 pub use bru_script::TestResult;
 pub use context::{base_vars, find_collection_root};
@@ -121,6 +123,30 @@ pub async fn run_request(file: &BruFile, ctx: &mut RunContext) -> RunOutcome {
         }
     }
 
+    // Resolve AWS SigV4: pure computation, signed before send (like OAuth2 but
+    // with no network round-trip). Pushes x-amz-date/Authorization headers.
+    if matches!(req.auth, Auth::AwsV4 { .. }) {
+        if let Err(e) = sigv4::resolve(&mut req, now_unix()) {
+            let mut outcome = RunOutcome::errored(name, e);
+            outcome.method = req.method;
+            outcome.url = req.url;
+            outcome.tests = tests;
+            outcome.console = console;
+            return outcome;
+        }
+    }
+
+    // Digest auth is a challenge/response: stash the credentials, then clear the
+    // auth so the first send goes out unauthenticated to elicit the 401 nonce.
+    let digest_creds = match &req.auth {
+        Auth::Digest { username, password } => {
+            let creds = (username.clone(), password.clone());
+            req.auth = Auth::None;
+            Some(creds)
+        }
+        _ => None,
+    };
+
     let resp = match ctx.client.send(&req).await {
         Ok(resp) => resp,
         Err(e) => {
@@ -131,6 +157,43 @@ pub async fn run_request(file: &BruFile, ctx: &mut RunContext) -> RunOutcome {
             outcome.console = console;
             return outcome;
         }
+    };
+
+    // If the server issued a Digest 401 challenge, recompute the Authorization
+    // header from the nonce and re-send once.
+    let resp = if let Some((username, password)) = digest_creds {
+        match resp_digest_challenge(&resp) {
+            Some(challenge) if resp.status == 401 => {
+                let uri = digest_request_uri(&req.url);
+                let header = digest::authorization_header(
+                    &challenge,
+                    &username,
+                    &password,
+                    &req.method.to_uppercase(),
+                    &uri,
+                    &digest::derive_cnonce(),
+                );
+                req.headers.push(KeyVal {
+                    name: "Authorization".to_string(),
+                    value: header,
+                    enabled: true,
+                });
+                match ctx.client.send(&req).await {
+                    Ok(resp2) => resp2,
+                    Err(e) => {
+                        let mut outcome = RunOutcome::errored(name, e.to_string());
+                        outcome.method = req.method;
+                        outcome.url = req.url;
+                        outcome.tests = tests;
+                        outcome.console = console;
+                        return outcome;
+                    }
+                }
+            }
+            _ => resp,
+        }
+    } else {
+        resp
     };
 
     let json = resp.json();
@@ -235,6 +298,33 @@ fn enabled_pairs(kvs: &[KeyVal]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Find and parse a `WWW-Authenticate: Digest ...` header from a response.
+fn resp_digest_challenge(resp: &HttpResponse) -> Option<digest::Challenge> {
+    resp.headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("www-authenticate"))
+        .and_then(|(_, v)| digest::parse_challenge(v))
+}
+
+/// The request-URI used in the Digest `uri=` field and HA2: the path + query of
+/// the request URL (Digest signs the path, not the full absolute URL).
+fn digest_request_uri(url: &str) -> String {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    match after_scheme.find('/') {
+        Some(idx) => after_scheme[idx..].to_string(),
+        None => "/".to_string(),
+    }
+}
+
+/// Current wall-clock time as whole seconds since the Unix epoch (for SigV4's
+/// `x-amz-date`). Falls back to 0 if the clock is before the epoch.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Apply `{{var}}` interpolation to every outgoing string field of the request.
 fn interpolate_request(req: &mut Request, vars: &HashMap<String, String>) {
     let i = |s: &str| interpolate(s, vars);
@@ -284,6 +374,25 @@ fn interpolate_request(req: &mut Request, vars: &HashMap<String, String>) {
             password: i(&cfg.password),
             ..cfg
         }),
+        Auth::Digest { username, password } => Auth::Digest {
+            username: i(&username),
+            password: i(&password),
+        },
+        Auth::AwsV4 {
+            access_key_id,
+            secret_access_key,
+            session_token,
+            service,
+            region,
+            profile_name,
+        } => Auth::AwsV4 {
+            access_key_id: i(&access_key_id),
+            secret_access_key: i(&secret_access_key),
+            session_token: i(&session_token),
+            service: i(&service),
+            region: i(&region),
+            profile_name: i(&profile_name),
+        },
         other => other,
     };
 }

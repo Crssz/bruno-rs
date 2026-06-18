@@ -196,3 +196,114 @@ async fn failed_assertion_marks_outcome_failed() {
     assert!(!outcome.passed());
     assert_eq!(outcome.assertions[0].actual, "200");
 }
+
+/// A two-connection Digest mock: the first request gets a 401 + Digest challenge,
+/// the second (with the recomputed Authorization) gets a 200. Returns the raw
+/// bytes of the SECOND (retried) request so the test can inspect its header.
+fn digest_mock() -> (String, thread::JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        // 1) unauthenticated request → 401 challenge
+        let (mut s1, _) = listener.accept().unwrap();
+        let _ = s1.read(&mut [0u8; 4096]);
+        let challenge = "WWW-Authenticate: Digest realm=\"x\", nonce=\"abc\", qop=\"auth\"";
+        let resp401 = format!(
+            "HTTP/1.1 401 Unauthorized\r\n{challenge}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let _ = s1.write_all(resp401.as_bytes());
+        let _ = s1.flush();
+
+        // 2) retried request carrying Authorization → 200
+        let (mut s2, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let n = s2.read(&mut buf).unwrap_or(0);
+        let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+        let body = "{\"ok\":true}";
+        let resp200 = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = s2.write_all(resp200.as_bytes());
+        let _ = s2.flush();
+        req
+    });
+    (format!("http://{addr}"), handle)
+}
+
+#[tokio::test]
+async fn digest_challenge_response_resends_with_authorization() {
+    let (base, server) = digest_mock();
+    let src = "meta {\n  name: D\n  type: http\n}\n\n\
+        get {\n  url: URL\n  auth: digest\n}\n\n\
+        auth:digest {\n  username: Mufasa\n  password: secret\n}\n";
+    let file = bru_lang::parse(&src.replace("URL", &format!("{base}/dir/index.html"))).unwrap();
+
+    let mut ctx = RunContext::default();
+    let outcome = run_request(&file, &mut ctx).await;
+    let retried = server.join().unwrap();
+
+    assert!(outcome.error.is_none(), "error: {:?}", outcome.error);
+    assert_eq!(
+        outcome.response.as_ref().unwrap().status,
+        200,
+        "digest retry should land 200"
+    );
+    let lower = retried.to_lowercase();
+    assert!(
+        lower.contains("authorization: digest "),
+        "retry missing Digest Authorization header:\n{retried}"
+    );
+    assert!(
+        lower.contains("response="),
+        "retry Authorization missing response= field:\n{retried}"
+    );
+    assert!(
+        retried.contains("username=\"Mufasa\""),
+        "retry Authorization missing username:\n{retried}"
+    );
+    assert!(
+        retried.contains("uri=\"/dir/index.html\""),
+        "retry Authorization should sign the request path:\n{retried}"
+    );
+}
+
+#[tokio::test]
+async fn awsv4_signs_request_before_send() {
+    let (base, server) = mock_server(r#"{"ok":true}"#);
+    let src = "meta {\n  name: A\n  type: http\n}\n\n\
+        get {\n  url: URL\n  auth: awsv4\n}\n\n\
+        auth:awsv4 {\n  accessKeyId: AKIDEXAMPLE\n  secretAccessKey: secret\n  service: service\n  region: us-east-1\n}\n";
+    let file = bru_lang::parse(&src.replace("URL", &format!("{base}/"))).unwrap();
+
+    let mut ctx = RunContext::default();
+    let outcome = run_request(&file, &mut ctx).await;
+    let sent = server.join().unwrap();
+
+    assert!(outcome.error.is_none(), "error: {:?}", outcome.error);
+    assert_eq!(outcome.response.as_ref().unwrap().status, 200);
+    let lower = sent.to_lowercase();
+    assert!(
+        lower.contains("authorization: aws4-hmac-sha256 "),
+        "request missing SigV4 Authorization header:\n{sent}"
+    );
+    assert!(
+        lower.contains("x-amz-date:"),
+        "request missing x-amz-date header:\n{sent}"
+    );
+    assert!(
+        sent.contains("Credential=AKIDEXAMPLE/")
+            && sent.contains("/us-east-1/service/aws4_request"),
+        "SigV4 credential scope wrong:\n{sent}"
+    );
+    assert!(
+        sent.contains("SignedHeaders=") && sent.contains("Signature="),
+        "SigV4 Authorization missing SignedHeaders/Signature:\n{sent}"
+    );
+    // No session token configured → no security-token header.
+    assert!(
+        !lower.contains("x-amz-security-token:"),
+        "unexpected security-token header:\n{sent}"
+    );
+}
