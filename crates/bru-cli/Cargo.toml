@@ -16,3 +16,5 @@ bru-engine.workspace = true
 bru-http.workspace = true
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde_json.workspace = true
+csv.workspace = true
