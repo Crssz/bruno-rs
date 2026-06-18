@@ -1,0 +1,9 @@
+[package]
+name = "bru-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bru-core.workspace = true

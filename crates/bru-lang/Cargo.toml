@@ -1,0 +1,11 @@
+[package]
+name = "bru-lang"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bru-core.workspace = true
+indexmap.workspace = true
+thiserror.workspace = true

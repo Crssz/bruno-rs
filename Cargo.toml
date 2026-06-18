@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bru-core",
+    "crates/bru-lang",
+    "crates/bru-http",
+    "crates/bru-script",
+    "crates/bru-import",
+    "crates/bru-engine",
+    "crates/bru-cli",
+    "crates/bru-app",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/narawit/bruno-rs"
+
+[workspace.dependencies]
+# internal crates
+bru-core = { path = "crates/bru-core" }
+bru-lang = { path = "crates/bru-lang" }
+bru-http = { path = "crates/bru-http" }
+bru-script = { path = "crates/bru-script" }
+bru-import = { path = "crates/bru-import" }
+bru-engine = { path = "crates/bru-engine" }
+
+# shared external deps (single source of version truth)
+indexmap = { version = "2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

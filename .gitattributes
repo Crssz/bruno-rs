@@ -1,0 +1,8 @@
+# .bru round-trip fidelity depends on exact bytes — never let git normalize line
+# endings or whitespace on fixtures or sources the parser must reproduce verbatim.
+tests/fixtures/**/*.bru -text
+crates/bru-lang/tests/**/*.bru -text
+*.bru -text
+
+# Rust sources use LF.
+*.rs text eol=lf

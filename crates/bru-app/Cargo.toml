@@ -1,0 +1,15 @@
+[package]
+name = "bru-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "bruno-rs"
+path = "src/main.rs"
+
+[dependencies]
+bru-core.workspace = true
+bru-lang.workspace = true
+# iced (wgpu) added in the M0 app step.

@@ -1,0 +1,14 @@
+[package]
+name = "bru-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "bru"
+path = "src/main.rs"
+
+[dependencies]
+bru-core.workspace = true
+bru-lang.workspace = true
