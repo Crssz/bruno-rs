@@ -31,9 +31,10 @@ struct RunArgs {
     #[arg(long)]
     data: Option<PathBuf>,
     /// Number of iterations to run. Ignored when `--data` is given (the row
-    /// count wins). Defaults to 1.
-    #[arg(long)]
-    iterations: Option<usize>,
+    /// count wins). Defaults to 1. Must be at least 1 — `0` would run nothing
+    /// and still exit success (a false green).
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    iterations: Option<u64>,
     /// Developer Mode: let scripts `require()` local `.js` files (relative to the
     /// request). Off by default (Safe Mode — scripts have no filesystem access).
     #[arg(long)]
@@ -86,7 +87,7 @@ async fn run(args: RunArgs) -> ExitCode {
     };
     let iterations = match &dataset {
         Some(rows) => rows.len(),
-        None => args.iterations.unwrap_or(1),
+        None => args.iterations.unwrap_or(1) as usize,
     };
     if let Some(rows) = &dataset {
         if rows.is_empty() {
@@ -295,7 +296,10 @@ fn print_outcome(o: &RunOutcome) {
 /// Mask values captured into secret-looking variable names so tokens don't land
 /// in CI logs or shell history.
 fn redact(name: &str, value: &str) -> String {
-    const SECRETISH: &[&str] = &["token", "secret", "password", "passwd", "key", "auth"];
+    const SECRETISH: &[&str] = &[
+        "token", "secret", "password", "passwd", "key", "auth", "bearer", "jwt", "cookie",
+        "credential",
+    ];
     let lower = name.to_lowercase();
     if SECRETISH.iter().any(|s| lower.contains(s)) {
         "***".to_string()
@@ -572,13 +576,26 @@ mod tests {
 
     #[test]
     fn redact_masks_secretish_names() {
-        for name in ["token", "secret", "password", "passwd", "key", "auth"] {
+        for name in [
+            "token",
+            "secret",
+            "password",
+            "passwd",
+            "key",
+            "auth",
+            "bearer",
+            "jwt",
+            "cookie",
+            "credential",
+        ] {
             assert_eq!(redact(name, "sensitive"), "***", "name = {name}");
         }
         // Case-insensitive and substring matching.
         assert_eq!(redact("API_TOKEN", "x"), "***");
         assert_eq!(redact("userPassword", "x"), "***");
         assert_eq!(redact("AuthHeader", "x"), "***");
+        assert_eq!(redact("Bearer", "x"), "***");
+        assert_eq!(redact("sessionCookie", "x"), "***");
     }
 
     #[test]

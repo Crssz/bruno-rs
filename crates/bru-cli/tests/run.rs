@@ -341,6 +341,19 @@ fn iterations_flag_runs_multiple_times() {
 }
 
 #[test]
+fn iterations_zero_is_rejected() {
+    // Regression: `--iterations 0` ran nothing yet exited success (a false green).
+    // It must now be rejected at parse time.
+    let output = Command::new(env!("CARGO_BIN_EXE_bru"))
+        .args([".", "--iterations", "0"])
+        .output()
+        .expect("run bru");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(stderr.contains("iterations"), "stderr:\n{stderr}");
+}
+
+#[test]
 fn empty_data_file_exits_nonzero() {
     // A JSON data file that is an empty array has no rows -> error, no requests.
     let dir = unique_dir(60001);

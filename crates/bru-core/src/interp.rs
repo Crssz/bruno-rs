@@ -63,27 +63,38 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// A non-cryptographic random u64 seeded from the high-resolution clock. Used
-/// only for `$randomInt`/`$guid`; never for anything security-sensitive.
-fn next_rand() -> u64 {
-    let nanos = SystemTime::now()
+/// Fill `buf` with random bytes from the OS CSPRNG. `$guid`/`$randomInt` are
+/// commonly dropped into tokens/nonces/idempotency keys, so they must be
+/// unpredictable; a clock-seeded PRNG also collides (two reads in the same tick
+/// return the same value). Falls back to a clock+address mix only if the OS RNG
+/// is unavailable, so interpolation never panics.
+fn fill_random(buf: &mut [u8]) {
+    if getrandom::fill(buf).is_ok() {
+        return;
+    }
+    let mut x = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    // xorshift64* on the clock seed.
-    let mut x = nanos ^ 0x9E37_79B9_7F4A_7C15;
-    x ^= x >> 12;
-    x ^= x << 25;
-    x ^= x >> 27;
-    x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        .unwrap_or(0)
+        ^ (buf.as_ptr() as u64);
+    for b in buf.iter_mut() {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        x = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        *b = (x >> 33) as u8;
+    }
+}
+
+fn next_rand() -> u64 {
+    let mut b = [0u8; 8];
+    fill_random(&mut b);
+    u64::from_le_bytes(b)
 }
 
 fn uuid_v4() -> String {
-    let a = next_rand();
-    let b = next_rand();
     let mut bytes = [0u8; 16];
-    bytes[..8].copy_from_slice(&a.to_le_bytes());
-    bytes[8..].copy_from_slice(&b.to_le_bytes());
+    fill_random(&mut bytes);
     bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
     bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant
     let h = |r: std::ops::Range<usize>| {

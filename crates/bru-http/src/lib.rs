@@ -48,7 +48,9 @@ pub struct SendOptions {
     /// Maximum decoded response body size before the request errors.
     pub max_response_bytes: usize,
     /// Whether the client follows 3xx redirects. When `false`, redirects are
-    /// surfaced to the caller as-is (policy `none`).
+    /// surfaced to the caller as-is (policy `none`). Even when `true`, a redirect
+    /// that changes host is not followed (the 3xx is surfaced) so credentials in
+    /// custom headers can't leak to a different host.
     pub follow_redirects: bool,
     /// Maximum number of redirect hops to follow (ignored when
     /// `follow_redirects` is `false`).
@@ -88,8 +90,25 @@ impl HttpClient {
     pub fn new(opts: &SendOptions) -> Result<Self, HttpError> {
         // A per-client cookie store lets session cookies (Set-Cookie) carry across
         // requests in a run/collection-runner, like Bruno's cookie jar.
+        // reqwest only strips the *standard* sensitive headers (Authorization,
+        // Cookie, …) on a cross-host redirect — credentials carried in a custom
+        // header name (api-key-in-header auth, or any user-set auth header) would
+        // otherwise be replayed verbatim to whatever host the server points at,
+        // leaking them. Stop following on a host change and surface the 3xx
+        // instead, so credentials never cross to a different host.
         let redirect = if opts.follow_redirects {
-            reqwest::redirect::Policy::limited(opts.max_redirects)
+            let max = opts.max_redirects;
+            reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() >= max {
+                    return attempt.error(format!("exceeded {max} redirects"));
+                }
+                let prev_host = attempt.previous().last().and_then(|u| u.host_str());
+                if prev_host.is_some() && prev_host != attempt.url().host_str() {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            })
         } else {
             reqwest::redirect::Policy::none()
         };

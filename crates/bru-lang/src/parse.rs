@@ -53,14 +53,17 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    /// The current line (without its trailing `\n`), or `None` at EOF.
+    /// The current line (without its trailing `\r\n`/`\n`), or `None` at EOF.
+    /// Stripping the `\r` keeps exact-match consumers (e.g. the `}` block closer)
+    /// working on CRLF files, which .bru files saved on Windows routinely are.
     fn peek_line(&self) -> Option<&'a str> {
         if self.pos >= self.input.len() {
             return None;
         }
         let rest = &self.input[self.pos..];
         let end = rest.find('\n').unwrap_or(rest.len());
-        Some(&rest[..end])
+        let line = &rest[..end];
+        Some(line.strip_suffix('\r').unwrap_or(line))
     }
 
     fn advance_line(&mut self) {

@@ -113,6 +113,19 @@ fn interpolate_dynamic_guid_and_uuid() {
 }
 
 #[test]
+fn interpolate_dynamic_guid_is_unique_and_not_self_colliding() {
+    // Regression: a clock-seeded PRNG returned identical values within the same
+    // tick, so back-to-back $guid expansions collided (~77% of the time). A
+    // CSPRNG makes every draw distinct.
+    let v = HashMap::new();
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..1000 {
+        let id = interpolate("{{$guid}}", &v);
+        assert!(seen.insert(id.clone()), "duplicate guid generated: {id}");
+    }
+}
+
+#[test]
 fn interpolate_dynamic_iso_timestamp_shape() {
     let v = HashMap::new();
     let iso = interpolate("{{$isoTimestamp}}", &v);

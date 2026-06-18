@@ -137,6 +137,20 @@ pub fn new_folder(parent: &Path, name: &str, at_root: bool) -> Result<PathBuf, S
 
 /// Rename a request file or folder, updating its `meta.name` too. Returns the
 /// new path.
+/// Whether `a` and `b` are the same on-disk object. A case-only rename
+/// (`Get` → `get`) targets the same file on a case-insensitive filesystem
+/// (Windows/macOS) but two *distinct* files on a case-sensitive one (Linux).
+/// Comparing canonicalized paths gets this right; the old `eq_ignore_ascii_case`
+/// heuristic wrongly treated the case-sensitive collision as "same" and let
+/// `fs::rename` silently destroy the other file.
+fn same_object(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (a.canonicalize(), b.canonicalize()),
+            (Ok(ca), Ok(cb)) if ca == cb
+        )
+}
+
 pub fn rename(
     path: &Path,
     is_folder: bool,
@@ -151,7 +165,7 @@ pub fn rename(
         let new_dir = parent.join(&stem);
         // A case-only change is the same item on case-insensitive filesystems
         // (Windows/macOS); don't treat it as a pre-existing collision.
-        let same = new_dir == path || new_dir.as_os_str().eq_ignore_ascii_case(path.as_os_str());
+        let same = same_object(&new_dir, path);
         if !same && new_dir.exists() {
             return Err(format!("\"{}\" already exists", new_dir.display()));
         }
@@ -167,7 +181,7 @@ pub fn rename(
         Ok(new_dir)
     } else {
         let new_path = parent.join(format!("{stem}.bru"));
-        let same = new_path == path || new_path.as_os_str().eq_ignore_ascii_case(path.as_os_str());
+        let same = same_object(&new_path, path);
         if !same && new_path.exists() {
             return Err(format!("\"{}\" already exists", new_path.display()));
         }
@@ -381,7 +395,7 @@ pub fn rename_env(collection_dir: &Path, old: &str, new: &str) -> Result<(), Str
     let op = env_path(collection_dir, old);
     let np = env_path(collection_dir, new);
     // A case-only change maps to the same file on case-insensitive filesystems.
-    let same = np == op || np.as_os_str().eq_ignore_ascii_case(op.as_os_str());
+    let same = same_object(&np, &op);
     if !same && np.exists() {
         return Err(format!("Environment \"{new}\" already exists"));
     }
@@ -409,7 +423,14 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         let entry = entry.map_err(|e| e.to_string())?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
-        if from.is_dir() {
+        // Classify with the entry's own type (does NOT follow symlinks). Skip
+        // symlinks: following one could copy files from outside the collection
+        // tree (e.g. a planted link to ~/.ssh) into the clone/paste target.
+        let ft = entry.file_type().map_err(|e| e.to_string())?;
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
             copy_dir_recursive(&from, &to)?;
         } else {
             std::fs::copy(&from, &to).map_err(|e| e.to_string())?;

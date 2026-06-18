@@ -8,9 +8,18 @@ use bru_core::{Auth, Body, KeyVal, OAuth2, Request};
 use bru_http::HttpClient;
 
 fn cache_key(cfg: &OAuth2) -> String {
+    // Include the secret material: a changed client_secret/password mints a
+    // different token, so two configs differing only there must not collide on
+    // the same cache entry (which would silently reuse the first one's token).
     format!(
-        "{}|{}|{}|{}|{}",
-        cfg.grant_type, cfg.access_token_url, cfg.client_id, cfg.scope, cfg.username
+        "{}|{}|{}|{}|{}|{}|{}",
+        cfg.grant_type,
+        cfg.access_token_url,
+        cfg.client_id,
+        cfg.client_secret,
+        cfg.scope,
+        cfg.username,
+        cfg.password,
     )
 }
 
@@ -130,6 +139,13 @@ mod tests {
         b.scope = "write".to_string();
         // Different scope → different cache key (independent tokens).
         assert_ne!(cache_key(&a), cache_key(&b));
+        // A changed client_secret or password must also force a fresh token.
+        let mut c = cfg();
+        c.client_secret = "rotated".to_string();
+        assert_ne!(cache_key(&a), cache_key(&c));
+        let mut d = cfg();
+        d.password = "different".to_string();
+        assert_ne!(cache_key(&a), cache_key(&d));
         // Same config → identical key (cache hit).
         assert_eq!(cache_key(&a), cache_key(&cfg()));
         // The key embeds the five identity fields.

@@ -7,6 +7,7 @@
 //! this module is the pure computation (challenge parse + response digest).
 
 use md5::{Digest, Md5};
+use sha2::Sha256;
 
 /// A parsed `WWW-Authenticate: Digest ...` challenge.
 #[derive(Debug, Clone, Default)]
@@ -98,6 +99,28 @@ fn md5_hex(input: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+fn sha256_hex(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Hash with the algorithm the server's challenge selected. RFC 7616 added the
+/// `SHA-256`/`SHA-256-sess` algorithms; anything else (including a missing
+/// algorithm, which means MD5) uses MD5. Without this the digest was always
+/// computed with MD5 even when the header advertised SHA-256, so the response
+/// never matched and auth silently failed.
+fn hash_hex(algorithm: Option<&str>, input: &str) -> String {
+    match algorithm {
+        Some(a)
+            if a.eq_ignore_ascii_case("SHA-256") || a.eq_ignore_ascii_case("SHA-256-sess") =>
+        {
+            sha256_hex(input)
+        }
+        _ => md5_hex(input),
+    }
+}
+
 /// The result of computing a Digest response: the full `Authorization` header
 /// value to send on the retry.
 pub fn authorization_header(
@@ -108,19 +131,19 @@ pub fn authorization_header(
     uri: &str,
     cnonce: &str,
 ) -> String {
-    let base_ha1 = md5_hex(&format!("{}:{}:{}", username, challenge.realm, password));
-    // `algorithm=MD5-sess` derives HA1 from a per-session hash.
-    let sess = challenge
-        .algorithm
-        .as_deref()
-        .map(|a| a.eq_ignore_ascii_case("MD5-sess"))
+    let alg = challenge.algorithm.as_deref();
+    let base_ha1 = hash_hex(alg, &format!("{}:{}:{}", username, challenge.realm, password));
+    // Any `*-sess` algorithm (MD5-sess / SHA-256-sess) derives HA1 from a
+    // per-session hash that folds in the cnonce.
+    let sess = alg
+        .map(|a| a.to_ascii_lowercase().ends_with("-sess"))
         .unwrap_or(false);
     let ha1 = if sess {
-        md5_hex(&format!("{base_ha1}:{}:{cnonce}", challenge.nonce))
+        hash_hex(alg, &format!("{base_ha1}:{}:{cnonce}", challenge.nonce))
     } else {
         base_ha1
     };
-    let ha2 = md5_hex(&format!("{}:{}", method, uri));
+    let ha2 = hash_hex(alg, &format!("{}:{}", method, uri));
 
     // RFC 7616: qop may be a comma-separated list; we support `auth`.
     let qop_auth = challenge
@@ -131,13 +154,13 @@ pub fn authorization_header(
 
     let nc = "00000001";
     let response = if qop_auth {
-        md5_hex(&format!(
-            "{ha1}:{}:{nc}:{cnonce}:auth:{ha2}",
-            challenge.nonce
-        ))
+        hash_hex(
+            alg,
+            &format!("{ha1}:{}:{nc}:{cnonce}:auth:{ha2}", challenge.nonce),
+        )
     } else {
         // Legacy RFC 2069 no-qop form.
-        md5_hex(&format!("{ha1}:{}:{ha2}", challenge.nonce))
+        hash_hex(alg, &format!("{ha1}:{}:{ha2}", challenge.nonce))
     };
 
     // Quoted-string values (some echoed from the server's challenge) must be
@@ -156,6 +179,10 @@ pub fn authorization_header(
         parts.push("qop=auth".to_string());
         parts.push(format!("nc={nc}"));
         parts.push(format!("cnonce=\"{}\"", quote(cnonce)));
+    } else if sess {
+        // A `*-sess` HA1 folds in the cnonce, so the server needs it to
+        // reconstruct HA1 even when there is no qop.
+        parts.push(format!("cnonce=\"{}\"", quote(cnonce)));
     }
     if let Some(opaque) = &challenge.opaque {
         parts.push(format!("opaque=\"{}\"", quote(opaque)));
@@ -171,15 +198,21 @@ fn quote(s: &str) -> String {
         .replace(['\r', '\n'], "")
 }
 
-/// Derive a client nonce from the system clock (no `rand` dependency): the
-/// nanosecond timestamp, MD5-hashed for a fixed-width hex string. Uniqueness
-/// per request is all that's needed for `qop=auth`.
+/// Derive a client nonce from the OS CSPRNG: 16 random bytes, hex-encoded.
+/// RFC 7616 wants the cnonce to be *unpredictable* (it guards against a hostile
+/// server mounting a chosen-plaintext/precomputation attack on the password), so
+/// a clock-derived value is not enough. Falls back to the clock only if the OS
+/// RNG is unavailable, so it at least stays unique per request.
 pub fn derive_cnonce() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    md5_hex(&format!("bru-cnonce-{nanos}"))
+    let mut buf = [0u8; 16];
+    if getrandom::fill(&mut buf).is_err() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        return md5_hex(&format!("bru-cnonce-{nanos}"));
+    }
+    hex::encode(buf)
 }
 
 #[cfg(test)]
@@ -298,6 +331,83 @@ mod tests {
         assert!(header.contains("opaque=\"op\""), "{header}");
         assert!(header.contains("qop=auth"), "{header}");
         assert!(header.contains("nc=00000001"), "{header}");
+    }
+
+    #[test]
+    fn authorization_sha256_known_answer() {
+        // RFC 7616 §3.9.1 SHA-256 worked example.
+        let ch = Challenge {
+            realm: "http-auth@example.org".to_string(),
+            nonce: "7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v".to_string(),
+            qop: Some("auth".to_string()),
+            opaque: Some("FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS".to_string()),
+            algorithm: Some("SHA-256".to_string()),
+        };
+        let header = authorization_header(
+            &ch,
+            "Mufasa",
+            "Circle of Life",
+            "GET",
+            "/dir/index.html",
+            "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ",
+        );
+        assert!(
+            header.contains(
+                "response=\"753927fa0e85d155564e2e272a28d1802ca10daf4496794697cf8db5856cb6c1\""
+            ),
+            "header was: {header}"
+        );
+        assert!(header.contains("algorithm=SHA-256"), "{header}");
+    }
+
+    #[test]
+    fn authorization_sha256_differs_from_md5() {
+        // Same inputs, only the algorithm differs → SHA-256 must actually be used
+        // (a 64-hex-char digest), not MD5 (32) mislabeled as SHA-256.
+        let base = Challenge {
+            realm: "r".to_string(),
+            nonce: "n".to_string(),
+            qop: Some("auth".to_string()),
+            opaque: None,
+            algorithm: Some("MD5".to_string()),
+        };
+        let md5_header = authorization_header(&base, "u", "p", "GET", "/x", "cn");
+        let sha = Challenge {
+            algorithm: Some("SHA-256".to_string()),
+            ..base.clone()
+        };
+        let sha_header = authorization_header(&sha, "u", "p", "GET", "/x", "cn");
+        let sha_resp = sha_header
+            .split("response=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap();
+        assert_eq!(sha_resp.len(), 64, "{sha_header}");
+        assert_ne!(md5_header, sha_header);
+    }
+
+    #[test]
+    fn authorization_sess_without_qop_emits_cnonce() {
+        // MD5-sess folds the cnonce into HA1, so it must be transmitted even with
+        // no qop — otherwise the server cannot reconstruct HA1.
+        let ch = Challenge {
+            realm: "r".to_string(),
+            nonce: "n".to_string(),
+            qop: None,
+            opaque: None,
+            algorithm: Some("MD5-sess".to_string()),
+        };
+        let header = authorization_header(&ch, "u", "p", "GET", "/x", "cn");
+        assert!(!header.contains("qop="), "{header}");
+        assert!(header.contains("cnonce=\"cn\""), "{header}");
+        let base_ha1 = md5_hex("u:r:p");
+        let ha1 = md5_hex(&format!("{base_ha1}:n:cn"));
+        let ha2 = md5_hex("GET:/x");
+        let expect = md5_hex(&format!("{ha1}:n:{ha2}"));
+        assert!(
+            header.contains(&format!("response=\"{expect}\"")),
+            "{header}"
+        );
     }
 
     #[test]

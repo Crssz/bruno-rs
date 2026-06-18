@@ -6084,10 +6084,41 @@ fn hex_dump(bytes: &[u8]) -> String {
 
 /// Write an HTML response to a temp file and open it in the OS browser.
 fn open_response_in_browser(resp: &HttpResponse) {
-    let path = std::env::temp_dir().join("bruno-rs-response.html");
-    if std::fs::write(&path, &resp.body).is_err() {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    // A unique, freshly-created file — not a fixed name in the world-shared temp
+    // dir. `create_new` refuses to follow a pre-planted symlink (so a local user
+    // can't redirect the write), and the per-process-unique name avoids leaking
+    // the response body via a predictable leftover file.
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "bruno-rs-response-{}-{}.html",
+        std::process::id(),
+        n
+    ));
+    let open_excl = |p: &std::path::Path| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(p)
+    };
+    let mut file = match open_excl(&path) {
+        Ok(f) => f,
+        Err(_) => {
+            // A leftover from a crashed prior run (or a planted symlink): remove
+            // the entry — remove_file does not follow the link — and retry once.
+            let _ = std::fs::remove_file(&path);
+            match open_excl(&path) {
+                Ok(f) => f,
+                Err(_) => return,
+            }
+        }
+    };
+    if file.write_all(&resp.body).is_err() {
         return;
     }
+    drop(file);
     #[cfg(target_os = "windows")]
     let _ = std::process::Command::new("cmd")
         .args(["/C", "start", ""])

@@ -91,3 +91,22 @@ fn unterminated_multiline_errors_without_swallowing_next_block() {
 fn trailing_text_after_multiline_errors() {
     assert!(parse("meta {\n  k: '''a'''junk'''\n}\n").is_err());
 }
+
+#[test]
+fn crlf_line_endings_parse() {
+    // Regression: peek_line did not strip the trailing `\r`, so the `}` closer of
+    // a CRLF-terminated block ("}\r") never matched — every dict and text block
+    // in a Windows-saved .bru file failed to parse. Both must parse cleanly now.
+    let dict = parse("meta {\r\n  name: Foo\r\n  seq: 2\r\n}\r\n").unwrap();
+    let BlockContent::Dict(e) = &dict.blocks[0].content else {
+        panic!("expected a dict block")
+    };
+    assert!(matches!(&e[0].key, Key::Bare(k) if k == "name"));
+    assert!(matches!(&e[0].value, Value::Inline(v) if v == "Foo"));
+
+    let text = parse("body:json {\r\n  {\"hi\": 1}\r\n}\r\n").unwrap();
+    let BlockContent::Text(t) = &text.blocks[0].content else {
+        panic!("expected a text block")
+    };
+    assert_eq!(t, "  {\"hi\": 1}");
+}
