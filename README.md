@@ -21,9 +21,10 @@ responses, and run collections headless in CI.
 | Auth | ✅ none / basic / bearer / api-key · ⏳ oauth2 / digest / awsv4 / ntlm / wsse |
 | Assertions | ✅ `res.status` / `res.body.*` / `res.headers.*` with `eq`/`neq`/`gt`/`contains`/… |
 | Post-response vars | ✅ capture `res.body.*` into variables for request chaining |
-| GUI | ✅ tree + send + response (status/timing/assertions/body) |
+| Scripting | ✅ pre/post/test JS in a QuickJS Safe-Mode sandbox — `bru.*` / `req` / `res` / `test` / `expect` + a `pm.*` Postman shim; time/memory/stack-limited |
+| GUI | ✅ tree + send + response (status/timing/assertions/tests/console/body) |
 | CLI | ✅ `bru run <file-or-dir> [--env] [--insecure]` with pass/fail exit codes |
-| Scripting (JS), Postman import, collection runner, full auth | ⏳ planned |
+| Postman import, collection runner, full auth (OAuth2/digest/…) | ⏳ planned |
 
 ## Build & run
 
@@ -51,9 +52,9 @@ crates/
   bru-lang    .bru <-> model codec (lossless), collection + env loaders
   bru-http    request execution (reqwest + rustls), timing
   bru-engine  orchestrator: vars -> interpolate -> send -> assert -> capture
+  bru-script  QuickJS Safe-Mode sandbox + bru/req/res/test/expect/pm prelude
   bru-cli     `bru` — headless runner
   bru-app     `bruno-rs` — iced (wgpu) desktop app
-  bru-script  JS sandbox (planned)
   bru-import  Postman / OpenAPI / Insomnia / cURL import (planned)
 ```
 

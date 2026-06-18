@@ -15,6 +15,15 @@ use serde_json::json;
 
 const PRELUDE: &str = include_str!("prelude.js");
 
+/// Read state back as JSON, resiliently: each field is stringified independently
+/// with a BigInt-safe replacer and a try/catch, so a script poisoning one field
+/// (a cycle or BigInt assigned directly to `__vars`) can't wipe the others.
+const READBACK: &str = "(function(){\
+  function rep(k,v){ return (typeof v === 'bigint') ? v.toString() : v; }\
+  function safe(o){ try { return JSON.parse(JSON.stringify(o, rep)); } catch (e) { return undefined; } }\
+  return JSON.stringify({ vars: safe(__vars), tests: safe(__tests), console: safe(__console) });\
+})()";
+
 /// Resource limits enforced on a script run, so a runaway or hostile script
 /// (infinite loop, unbounded allocation, deep recursion) can't hang or OOM the
 /// host process.
@@ -142,7 +151,7 @@ fn run_in_context(
         .map(|e| e.to_string());
 
     let readback: String = ctx
-        .eval::<String, _>("JSON.stringify({vars:__vars,tests:__tests,console:__console})")
+        .eval::<String, _>(READBACK)
         .catch(ctx)
         .map_err(|e| format!("readback error: {e}"))?;
 
@@ -309,6 +318,29 @@ mod tests {
     fn uncaught_error_is_captured_not_fatal() {
         let out = run_script("throw new Error('boom');", &input(&[], None));
         assert!(out.error.as_deref().unwrap_or("").contains("boom"));
+    }
+
+    #[test]
+    fn async_test_is_not_silently_passed() {
+        let out = run_script(
+            "test('a', async function(){ throw new Error('x'); });",
+            &input(&[], None),
+        );
+        assert!(out.error.is_none(), "{:?}", out.error);
+        assert_eq!(out.tests.len(), 1);
+        assert!(!out.tests[0].passed, "a failing async test must not pass");
+    }
+
+    #[test]
+    fn poisoned_vars_does_not_wipe_test_results() {
+        // A circular value assigned straight to __vars must not lose test output.
+        let out = run_script(
+            "var o = {}; o.self = o; __vars.bad = o; test('t', function(){ expect(1).to.equal(1); });",
+            &input(&[], None),
+        );
+        assert!(out.error.is_none(), "{:?}", out.error);
+        assert_eq!(out.tests.len(), 1);
+        assert!(out.tests[0].passed);
     }
 
     #[test]

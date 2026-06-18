@@ -3,7 +3,9 @@
 // exposes __vars / __tests / __console for the host to read back. No filesystem,
 // network, process, or require() exists in this sandbox.
 
-globalThis.__vars = JSON.parse(__varsJson);
+// Null-prototype so reserved keys (__proto__, constructor, hasOwnProperty)
+// round-trip as plain data instead of hitting prototype machinery.
+globalThis.__vars = Object.assign(Object.create(null), JSON.parse(__varsJson));
 globalThis.__req = JSON.parse(__reqJson);
 globalThis.__res = JSON.parse(__resJson);
 globalThis.__tests = [];
@@ -65,7 +67,12 @@ globalThis.res = __res ? {
 
 globalThis.test = function (name, fn) {
   try {
-    fn();
+    var r = fn();
+    // Async test bodies can't be awaited here (no pumped job queue), so a later
+    // rejection would be lost and wrongly reported as passing. Reject loudly.
+    if (r && typeof r.then === 'function') {
+      throw new Error('async test functions are not supported in Safe Mode');
+    }
     __tests.push({ name: String(name), passed: true });
   } catch (e) {
     __tests.push({ name: String(name), passed: false, error: (e && e.message) ? String(e.message) : String(e) });
@@ -101,9 +108,13 @@ Assertion.prototype = {
   least: function (v) { __check(this.actual >= v, 'expected ' + __fmt(this.actual) + ' to be at least ' + __fmt(v), this.negated); return this; },
   most: function (v) { __check(this.actual <= v, 'expected ' + __fmt(this.actual) + ' to be at most ' + __fmt(v), this.negated); return this; },
   include: function (v) {
-    var ok = (typeof this.actual === 'string') ? this.actual.indexOf(v) >= 0
-      : (Array.isArray(this.actual) ? this.actual.indexOf(v) >= 0 : false);
-    __check(ok, 'expected ' + __fmt(this.actual) + ' to include ' + __fmt(v), this.negated); return this;
+    var a = this.actual;
+    var ok;
+    if (typeof a === 'string') ok = a.indexOf(v) >= 0;
+    else if (Array.isArray(a)) ok = a.indexOf(v) >= 0;
+    else if (a && typeof a === 'object') ok = (v in a) || Object.keys(a).some(function (k) { return a[k] === v; });
+    else throw new Error('cannot use include on ' + (a === null ? 'null' : typeof a));
+    __check(ok, 'expected ' + __fmt(a) + ' to include ' + __fmt(v), this.negated); return this;
   },
   contain: function (v) { return this.include(v); },
   match: function (re) { __check(re.test(this.actual), 'expected ' + __fmt(this.actual) + ' to match ' + re, this.negated); return this; },
@@ -138,11 +149,20 @@ globalThis.pm = {
     json: function () { return __res.body; },
     text: function () { return (typeof __res.body === 'string') ? __res.body : JSON.stringify(__res.body); },
     to: {
+      be: {
+        get ok() { if (!(__res.status >= 200 && __res.status < 300)) throw new Error('expected response to be ok (2xx) but got ' + __res.status); return true; },
+      },
       have: {
         status: function (c) {
           if (typeof c === 'number') { if (__res.status !== c) throw new Error('expected status ' + c + ' but got ' + __res.status); }
           else { if (__res.statusText !== c) throw new Error('expected status ' + c + ' but got ' + __res.statusText); }
         },
+        header: function (name) {
+          var h = __headerGet(__res.headers, name);
+          if (h === undefined) throw new Error('expected response to have header ' + name);
+          return h;
+        },
+        jsonBody: function () { return __res.body; },
       },
     },
   } : undefined,

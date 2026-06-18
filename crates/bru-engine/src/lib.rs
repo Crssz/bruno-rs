@@ -166,10 +166,12 @@ pub async fn run_request(file: &BruFile, ctx: &mut RunContext) -> RunOutcome {
 }
 
 /// Combine `script:post-response` and `tests` into one source (Bruno runs them
-/// in sequence in the same context).
+/// in sequence in the same context). The `\n;\n` separator forces a statement
+/// boundary so a missing trailing semicolon in the first block can't merge it
+/// with the second (JS automatic-semicolon-insertion is not reliable here).
 fn combine_post_scripts(file: &BruFile) -> Option<String> {
     match (file.script_post(), file.tests_script()) {
-        (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
+        (Some(a), Some(b)) => Some(format!("{a}\n;\n{b}")),
         (Some(a), None) | (None, Some(a)) => Some(a),
         (None, None) => None,
     }

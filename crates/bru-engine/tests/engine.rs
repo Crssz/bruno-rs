@@ -88,6 +88,27 @@ async fn pre_and_post_scripts_run_and_share_vars() {
 }
 
 #[tokio::test]
+async fn post_script_and_tests_combine_without_asi_breakage() {
+    let (base, server) = mock_server(r#"{"id":1}"#);
+    // post-response ends WITHOUT a semicolon; tests starts with `(` (an IIFE).
+    // Under a bare `\n` join these merge into `setVar(...)(...)` and throw.
+    let src = "meta {\n  name: A\n  type: http\n}\n\n\
+        get {\n  url: URL\n  auth: none\n}\n\n\
+        script:post-response {\n  bru.setVar('a', '1')\n}\n\n\
+        tests {\n  (function(){ test('ok', function(){ expect(res.body.id).to.equal(1); }); })()\n}\n";
+    let file = bru_lang::parse(&src.replace("URL", &format!("{base}/a"))).unwrap();
+
+    let mut ctx = RunContext::default();
+    let outcome = run_request(&file, &mut ctx).await;
+    let _ = server.join();
+
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(outcome.tests.len(), 1, "tests: {:?}", outcome.tests);
+    assert!(outcome.passed(), "tests: {:?}", outcome.tests);
+    assert_eq!(ctx.vars.get("a").map(String::as_str), Some("1"));
+}
+
+#[tokio::test]
 async fn content_type_not_duplicated_when_header_present() {
     let (base, server) = mock_server(r#"{"ok":true}"#);
     let src = "meta {\n  name: C\n  type: http\n}\n\n\
