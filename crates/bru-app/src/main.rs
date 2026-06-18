@@ -45,7 +45,7 @@ fn main() -> iced::Result {
 }
 
 fn app_theme(_: &App) -> iced::Theme {
-    iced::Theme::Dark
+    theme::base_theme()
 }
 
 // === state ===================================================================
@@ -126,11 +126,13 @@ struct NetEntry {
 struct Prefs {
     timeout_secs: u64,
     insecure: bool,
+    /// Use the light palette instead of the dark one.
+    light: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { timeout_secs: 30, insecure: false }
+        Prefs { timeout_secs: 30, insecure: false, light: false }
     }
 }
 
@@ -161,6 +163,9 @@ fn load_prefs() -> Prefs {
                 if let Some(b) = v.get("insecure").and_then(|x| x.as_bool()) {
                     p.insecure = b;
                 }
+                if let Some(b) = v.get("light").and_then(|x| x.as_bool()) {
+                    p.light = b;
+                }
             }
         }
     }
@@ -169,7 +174,11 @@ fn load_prefs() -> Prefs {
 
 fn save_prefs(p: &Prefs) {
     if let Some(path) = prefs_path() {
-        let v = serde_json::json!({ "timeout_secs": p.timeout_secs, "insecure": p.insecure });
+        let v = serde_json::json!({
+            "timeout_secs": p.timeout_secs,
+            "insecure": p.insecure,
+            "light": p.light,
+        });
         let _ = std::fs::write(path, v.to_string());
     }
 }
@@ -647,6 +656,7 @@ enum Message {
     OpenPrefs,
     PrefTimeout(String),
     PrefInsecure(bool),
+    ToggleTheme(bool),
 
     // ── keyboard ──
     Key(iced::keyboard::Event),
@@ -661,6 +671,7 @@ impl App {
             split: 0.6,
             ..App::default()
         };
+        theme::set_light(app.prefs.light);
         match std::env::args().nth(1) {
             Some(arg) => app.load(PathBuf::from(arg)),
             None => app.status = "Open a Bruno collection folder to begin.".to_string(),
@@ -1593,6 +1604,11 @@ impl App {
                 self.prefs.insecure = b;
                 save_prefs(&self.prefs);
             }
+            Message::ToggleTheme(light) => {
+                self.prefs.light = light;
+                theme::set_light(light);
+                save_prefs(&self.prefs);
+            }
 
             // ── keyboard ──
             Message::Key(event) => return self.handle_key(event),
@@ -2127,7 +2143,7 @@ impl App {
         }
         let body = column![self.top_bar(), row![self.sidebar(), center].height(Fill)];
         let base = container(body)
-            .style(|_| panel(BG, None))
+            .style(|_| panel(BG(), None))
             .width(Fill)
             .height(Fill);
         // Track the cursor (to anchor context menus) without blocking children.
@@ -2153,7 +2169,7 @@ impl App {
         let passed = r.results.iter().filter(|x| x.passed).count();
         let total = r.results.len();
         let header = row![
-            text(format!("Run: {}", r.title)).size(15).color(TEXT).font(BOLD),
+            text(format!("Run: {}", r.title)).size(15).color(TEXT()).font(BOLD),
             fill_x(),
             text(if r.running {
                 "running...".to_string()
@@ -2162,13 +2178,13 @@ impl App {
             })
             .size(12)
             .color(if r.running {
-                ACCENT
+                ACCENT()
             } else if passed == total {
-                GREEN
+                GREEN()
             } else {
-                RED
+                RED()
             }),
-            button(text("Close").size(13).color(TEXT))
+            button(text("Close").size(13).color(TEXT()))
                 .style(|_, s| ghost_button(s))
                 .padding(Padding::from([6, 14]))
                 .on_press(Message::RunnerClose),
@@ -2178,13 +2194,13 @@ impl App {
 
         let mut list = Column::new().spacing(2);
         if r.running && r.results.is_empty() {
-            list = list.push(text("Running requests...").size(12).color(MUTED));
+            list = list.push(text("Running requests...").size(12).color(MUTED()));
         }
         for res in &r.results {
             let (mark, c) = if res.passed {
-                ("\u{2713}", GREEN)
+                ("\u{2713}", GREEN())
             } else {
-                ("\u{2717}", RED)
+                ("\u{2717}", RED())
             };
             let detail = match &res.error {
                 Some(e) => e.clone(),
@@ -2193,8 +2209,8 @@ impl App {
             list = list.push(
                 row![
                     text(mark).size(12).color(c),
-                    text(res.name.clone()).size(12).color(TEXT).width(Length::FillPortion(2)),
-                    text(detail).size(12).color(SUBTEXT).font(MONO).width(Length::FillPortion(3)),
+                    text(res.name.clone()).size(12).color(TEXT()).width(Length::FillPortion(2)),
+                    text(detail).size(12).color(SUBTEXT()).font(MONO).width(Length::FillPortion(3)),
                 ]
                 .spacing(10)
                 .align_y(Center),
@@ -2220,7 +2236,7 @@ impl App {
     fn console_panel(&self) -> Element<'_, Message> {
         let tab_btn = |label: &str, t: DevTab| {
             let active = self.devtools_tab == t;
-            button(text(label.to_string()).size(12).color(if active { TEXT } else { MUTED }))
+            button(text(label.to_string()).size(12).color(if active { TEXT() } else { MUTED() }))
                 .style(move |_, _| tab_button(active))
                 .padding(Padding::from([2, 8]))
                 .on_press(Message::DevtoolsTab(t))
@@ -2229,12 +2245,12 @@ impl App {
             tab_btn("Console", DevTab::Console),
             tab_btn("Network", DevTab::Network),
             fill_x(),
-            button(text("Clear").size(11).color(SUBTEXT))
-                .style(|_, s| icon_button(s, SUBTEXT))
+            button(text("Clear").size(11).color(SUBTEXT()))
+                .style(|_, s| icon_button(s, SUBTEXT()))
                 .padding(Padding::from([2, 6]))
                 .on_press(Message::ClearConsole),
-            button(text("\u{00D7}").size(13).color(MUTED))
-                .style(|_, s| icon_button(s, MUTED))
+            button(text("\u{00D7}").size(13).color(MUTED()))
+                .style(|_, s| icon_button(s, MUTED()))
                 .padding(Padding::from([2, 6]))
                 .on_press(Message::ToggleConsole),
         ]
@@ -2245,31 +2261,31 @@ impl App {
             DevTab::Console => {
                 let mut col = Column::new().spacing(1);
                 if self.console.is_empty() {
-                    col = col.push(text("Console is empty.").size(12).color(MUTED));
+                    col = col.push(text("Console is empty.").size(12).color(MUTED()));
                 }
                 for line in &self.console {
-                    col = col.push(text(line.clone()).size(12).color(SUBTEXT).font(MONO));
+                    col = col.push(text(line.clone()).size(12).color(SUBTEXT()).font(MONO));
                 }
                 scrollable(col).height(Fill).into()
             }
             DevTab::Network => {
                 let mut col = Column::new().spacing(1);
                 if self.network.is_empty() {
-                    col = col.push(text("No requests yet.").size(12).color(MUTED));
+                    col = col.push(text("No requests yet.").size(12).color(MUTED()));
                 }
                 for e in &self.network {
                     let status = if e.ok {
                         text(e.status.to_string()).size(12).color(status_color(e.status))
                     } else {
-                        text("ERR").size(12).color(RED)
+                        text("ERR").size(12).color(RED())
                     };
                     col = col.push(
                         row![
                             text(short_method(&e.method)).size(11).color(method_color(&e.method)).font(MONO).width(46),
                             status.width(44),
-                            text(format!("{} ms", e.ms)).size(11).color(SUBTEXT).width(70),
-                            text(human_size(e.size)).size(11).color(SUBTEXT).width(70),
-                            text(e.url.clone()).size(11).color(TEXT).font(MONO),
+                            text(format!("{} ms", e.ms)).size(11).color(SUBTEXT()).width(70),
+                            text(human_size(e.size)).size(11).color(SUBTEXT()).width(70),
+                            text(e.url.clone()).size(11).color(TEXT()).font(MONO),
                         ]
                         .spacing(8)
                         .align_y(Center),
@@ -2282,7 +2298,7 @@ impl App {
         container(
             column![header, container(body).padding(6).height(Fill)].spacing(2),
         )
-        .style(|_| panel(MANTLE, Some(BORDER1)))
+        .style(|_| panel(MANTLE(), Some(BORDER1())))
         .width(Fill)
         .height(Length::Fixed(180.0))
         .padding(6)
@@ -2461,7 +2477,7 @@ impl App {
                     name
                 ))
                 .size(13)
-                .color(TEXT)
+                .color(TEXT())
                 .into(),
                 "Delete",
                 true,
@@ -2477,7 +2493,7 @@ impl App {
                     "Unsaved Changes",
                     text(format!("\"{name}\" has unsaved changes. Close without saving?"))
                         .size(13)
-                        .color(TEXT)
+                        .color(TEXT())
                         .into(),
                     "Don't Save",
                     true,
@@ -2512,7 +2528,13 @@ impl App {
                         .size(15)
                         .text_size(13)
                         .style(checkbox_style),
-                    text("Saved automatically to ~/.bruno-rs.json").size(11).color(MUTED),
+                    checkbox(self.prefs.light)
+                        .label("Light theme")
+                        .on_toggle(Message::ToggleTheme)
+                        .size(15)
+                        .text_size(13)
+                        .style(checkbox_style),
+                    text("Saved automatically to ~/.bruno-rs.json").size(11).color(MUTED()),
                 ]
                 .spacing(12)
                 .into(),
@@ -2522,19 +2544,19 @@ impl App {
             Modal::Code { code } => {
                 let footer = row![
                     fill_x(),
-                    button(text("Copy").size(13).color(TEXT))
+                    button(text("Copy").size(13).color(TEXT()))
                         .style(|_, s| ghost_button(s))
                         .padding(Padding::from([6, 14]))
                         .on_press(Message::CopyText(code.clone())),
                     button(text("Close").size(13).color(BLACK))
-                        .style(|_, _| solid_button(ACCENT, BLACK))
+                        .style(|_, _| solid_button(ACCENT(), BLACK))
                         .padding(Padding::from([6, 16]))
                         .on_press(Message::ModalCancel),
                 ]
                 .spacing(8);
                 container(
                     column![
-                        text("Generate Code \u{00B7} curl").size(15).color(TEXT).font(BOLD),
+                        text("Generate Code \u{00B7} curl").size(15).color(TEXT()).font(BOLD),
                         container(scrollable(code_block(code)).height(Length::Fixed(300.0)))
                             .width(Fill),
                         footer,
@@ -2559,12 +2581,12 @@ impl App {
         let results = self.palette_results();
         let mut list = Column::new().spacing(1);
         if results.is_empty() {
-            list = list.push(text("No matching requests").size(12).color(MUTED));
+            list = list.push(text("No matching requests").size(12).color(MUTED()));
         }
         for (idx, (name, path)) in results.iter().enumerate() {
             let active = idx == selected;
             list = list.push(
-                button(text(name.clone()).size(13).color(if active { TEXT } else { SUBTEXT }))
+                button(text(name.clone()).size(13).color(if active { TEXT() } else { SUBTEXT() }))
                     .style(move |_, _| menu_item(if active { button::Status::Hovered } else { button::Status::Active }, false))
                     .width(Fill)
                     .padding(Padding::from([5, 8]))
@@ -2593,8 +2615,8 @@ impl App {
         // Left: environment list with New / per-env duplicate+delete.
         let mut list = Column::new().spacing(2);
         list = list.push(
-            button(text("+ New Environment").size(12).color(ACCENT))
-                .style(|_, s| icon_button(s, ACCENT))
+            button(text("+ New Environment").size(12).color(ACCENT()))
+                .style(|_, s| icon_button(s, ACCENT()))
                 .width(Fill)
                 .padding(Padding::from([5, 8]))
                 .on_press(Message::EnvNew),
@@ -2602,17 +2624,17 @@ impl App {
         for name in &self.envs {
             let active = ed.selected == *name;
             let row_el = row![
-                button(text(name.clone()).size(12).color(if active { TEXT } else { SUBTEXT }))
+                button(text(name.clone()).size(12).color(if active { TEXT() } else { SUBTEXT() }))
                     .style(move |_, s| sidebar_item(active, s))
                     .width(Fill)
                     .padding(Padding::from([4, 8]))
                     .on_press(Message::EnvSelect(name.clone())),
-                button(text("\u{29C9}").size(11).color(MUTED))
-                    .style(|_, s| icon_button(s, MUTED))
+                button(text("\u{29C9}").size(11).color(MUTED()))
+                    .style(|_, s| icon_button(s, MUTED()))
                     .padding(Padding::from([4, 4]))
                     .on_press(Message::EnvDuplicate(name.clone())),
-                button(text("\u{2715}").size(11).color(RED))
-                    .style(|_, s| icon_button(s, RED))
+                button(text("\u{2715}").size(11).color(RED()))
+                    .style(|_, s| icon_button(s, RED()))
                     .padding(Padding::from([4, 4]))
                     .on_press(Message::EnvDelete(name.clone())),
             ]
@@ -2627,12 +2649,12 @@ impl App {
 
         // Right: variables table for the selected environment.
         let right: Element<'a, Message> = if ed.selected.is_empty() {
-            container(text("Select or create an environment.").size(12).color(MUTED))
+            container(text("Select or create an environment.").size(12).color(MUTED()))
                 .center(Fill)
                 .into()
         } else {
             let rename_row = row![
-                text("Name").size(11).color(MUTED),
+                text("Name").size(11).color(MUTED()),
                 text_input("environment name", &ed.rename_buf)
                     .on_input(Message::EnvRenameBuf)
                     .on_submit(Message::EnvRenameApply)
@@ -2640,7 +2662,7 @@ impl App {
                     .padding(Padding::from([4, 8]))
                     .style(input_style)
                     .width(Length::Fixed(240.0)),
-                button(text("Rename").size(12).color(TEXT))
+                button(text("Rename").size(12).color(TEXT()))
                     .style(|_, s| ghost_button(s))
                     .padding(Padding::from([4, 10]))
                     .on_press(Message::EnvRenameApply),
@@ -2652,9 +2674,9 @@ impl App {
             table = table.push(
                 row![
                     hspace(24.0),
-                    text("Name").size(11).color(MUTED).width(Length::FillPortion(2)),
-                    text("Value").size(11).color(MUTED).width(Length::FillPortion(3)),
-                    text("Secret").size(11).color(MUTED).width(Length::Fixed(56.0)),
+                    text("Name").size(11).color(MUTED()).width(Length::FillPortion(2)),
+                    text("Value").size(11).color(MUTED()).width(Length::FillPortion(3)),
+                    text("Secret").size(11).color(MUTED()).width(Length::Fixed(56.0)),
                     hspace(28.0),
                 ]
                 .spacing(6)
@@ -2687,8 +2709,8 @@ impl App {
                     .size(14)
                     .style(checkbox_style)
                     .width(Length::Fixed(56.0));
-                let del = button(text("\u{2715}").size(12).color(MUTED))
-                    .style(|_, s| icon_button(s, RED))
+                let del = button(text("\u{2715}").size(12).color(MUTED()))
+                    .style(|_, s| icon_button(s, RED()))
                     .padding(Padding::from([2, 6]))
                     .on_press(Message::EnvRemoveRow(i));
                 table = table.push(
@@ -2698,8 +2720,8 @@ impl App {
                 );
             }
             table = table.push(
-                button(text("+ Add Variable").size(12).color(ACCENT))
-                    .style(|_, s| icon_button(s, ACCENT))
+                button(text("+ Add Variable").size(12).color(ACCENT()))
+                    .style(|_, s| icon_button(s, ACCENT()))
                     .padding(Padding::from([4, 8]))
                     .on_press(Message::EnvAddRow),
             );
@@ -2710,7 +2732,7 @@ impl App {
                 row![
                     fill_x(),
                     button(text("Save").size(13).color(BLACK))
-                        .style(|_, _| solid_button(ACCENT, BLACK))
+                        .style(|_, _| solid_button(ACCENT(), BLACK))
                         .padding(Padding::from([6, 16]))
                         .on_press(Message::EnvSave),
                 ],
@@ -2723,9 +2745,9 @@ impl App {
         let card = container(
             column![
                 row![
-                    text("Environments").size(15).color(TEXT).font(BOLD),
+                    text("Environments").size(15).color(TEXT()).font(BOLD),
                     fill_x(),
-                    button(text("Close").size(13).color(TEXT))
+                    button(text("Close").size(13).color(TEXT()))
                         .style(|_, s| ghost_button(s))
                         .padding(Padding::from([6, 14]))
                         .on_press(Message::EnvClose),
@@ -2775,7 +2797,7 @@ impl App {
                 button(text("Open Collection").size(13))
                     .style(|_, s| ghost_button(s))
                     .on_press(Message::OpenFolder),
-                text(name).size(13).color(ACCENT).font(BOLD),
+                text(name).size(13).color(ACCENT()).font(BOLD),
                 fill_x(),
                 checkbox(self.developer_mode)
                     .label("Dev Mode")
@@ -2783,27 +2805,35 @@ impl App {
                     .size(14)
                     .text_size(12)
                     .style(checkbox_style),
-                text("Env:").size(12).color(MUTED),
+                text("Env:").size(12).color(MUTED()),
                 env_selector,
-                button(text("\u{2699}").size(14).color(SUBTEXT))
-                    .style(|_, s| icon_button(s, SUBTEXT))
+                button(text("\u{2699}").size(14).color(SUBTEXT()))
+                    .style(|_, s| icon_button(s, SUBTEXT()))
                     .padding(Padding::from([2, 6]))
                     .on_press(Message::OpenEnvEditor),
-                button(text("Console").size(12).color(if self.console_open { ACCENT } else { SUBTEXT }))
-                    .style(|_, s| icon_button(s, SUBTEXT))
+                button(text("Console").size(12).color(if self.console_open { ACCENT() } else { SUBTEXT() }))
+                    .style(|_, s| icon_button(s, SUBTEXT()))
                     .padding(Padding::from([2, 8]))
                     .on_press(Message::ToggleConsole),
-                button(text("Prefs").size(12).color(SUBTEXT))
-                    .style(|_, s| icon_button(s, SUBTEXT))
+                tooltip(
+                    button(text(if theme::is_light() { "\u{263E}" } else { "\u{2600}" }).size(14).color(SUBTEXT()))
+                        .style(|_, s| icon_button(s, SUBTEXT()))
+                        .padding(Padding::from([2, 6]))
+                        .on_press(Message::ToggleTheme(!theme::is_light())),
+                    container(text("Toggle light / dark theme").size(11)).style(|_| menu_panel()).padding(4),
+                    tooltip::Position::Bottom,
+                ),
+                button(text("Prefs").size(12).color(SUBTEXT()))
+                    .style(|_, s| icon_button(s, SUBTEXT()))
                     .padding(Padding::from([2, 8]))
                     .on_press(Message::OpenPrefs),
-                text(self.status.as_str()).size(12).color(SUBTEXT),
+                text(self.status.as_str()).size(12).color(SUBTEXT()),
             ]
             .spacing(12)
             .align_y(Center)
             .padding(Padding::from([6, 12])),
         )
-        .style(|_| panel(MANTLE, Some(BORDER1)))
+        .style(|_| panel(MANTLE(), Some(BORDER1())))
         .width(Fill)
         .into()
     }
@@ -2822,10 +2852,10 @@ impl App {
                     .size(10)
                     .color(method_color(&method))
                     .font(MONO),
-                text(tab.title()).size(12).color(if active { TEXT } else { SUBTEXT }),
+                text(tab.title()).size(12).color(if active { TEXT() } else { SUBTEXT() }),
                 text(if tab.dirty { "\u{25CF}" } else { "" })
                     .size(10)
-                    .color(ACCENT),
+                    .color(ACCENT()),
             ]
             .spacing(6)
             .align_y(Center);
@@ -2834,7 +2864,7 @@ impl App {
                 .style(move |_, s| request_tab(active, s))
                 .padding(Padding::from([6, 10]))
                 .on_press(Message::SelectTab(i));
-            let close = button(text("\u{00D7}").size(14).color(MUTED))
+            let close = button(text("\u{00D7}").size(14).color(MUTED()))
                 .style(move |_, s| request_tab(active, s))
                 .padding(Padding::from([6, 6]))
                 .on_press(Message::CloseTab(i));
@@ -2844,8 +2874,8 @@ impl App {
                 .on_middle_press(Message::CloseTab(i));
             strip = strip.push(tab_el);
         }
-        let plus = button(text("+").size(15).color(SUBTEXT))
-            .style(|_, s| icon_button(s, SUBTEXT))
+        let plus = button(text("+").size(15).color(SUBTEXT()))
+            .style(|_, s| icon_button(s, SUBTEXT()))
             .padding(Padding::from([4, 10]))
             .on_press(Message::NewDraft);
         strip = strip.push(plus);
@@ -2853,7 +2883,7 @@ impl App {
         container(scrollable(strip).direction(scrollable::Direction::Horizontal(
             scrollable::Scrollbar::new().width(4).scroller_width(4),
         )))
-        .style(|_| panel(MANTLE, Some(BORDER1)))
+        .style(|_| panel(MANTLE(), Some(BORDER1())))
         .width(Fill)
         .into()
     }
@@ -2861,16 +2891,16 @@ impl App {
     fn sidebar(&self) -> Element<'_, Message> {
         let mut col = Column::new().spacing(1).padding(Padding::from([8, 6]));
         match &self.collection {
-            None => col = col.push(text("No collection loaded.").size(12).color(MUTED)),
+            None => col = col.push(text("No collection loaded.").size(12).color(MUTED())),
             Some(tree) => {
                 // Collection header: name + "+" new request + right-click menu.
                 let header = mouse_area(
                     container(
                         row![
-                            text(tree.name.as_str()).size(12).color(MUTED).font(BOLD),
+                            text(tree.name.as_str()).size(12).color(MUTED()).font(BOLD),
                             fill_x(),
-                            button(text("+").size(14).color(SUBTEXT))
-                                .style(|_, s| icon_button(s, SUBTEXT))
+                            button(text("+").size(14).color(SUBTEXT()))
+                                .style(|_, s| icon_button(s, SUBTEXT()))
                                 .padding(Padding::from([0, 6]))
                                 .on_press_maybe(
                                     self.collection_dir
@@ -2905,7 +2935,7 @@ impl App {
             }
         }
         container(scrollable(col).height(Fill))
-            .style(|_| panel(BG, Some(BORDER1)))
+            .style(|_| panel(BG(), Some(BORDER1())))
             .width(280)
             .height(Fill)
             .into()
@@ -2930,8 +2960,8 @@ impl App {
             let collapsed = query.is_empty() && self.collapsed.contains(&sub.path);
             let chevron = if collapsed { "\u{25B8}" } else { "\u{25BE}" };
             let label = row![
-                text(chevron).size(11).color(MUTED).width(14),
-                text(sub.name.clone()).size(12).color(SUBTEXT).font(BOLD),
+                text(chevron).size(11).color(MUTED()).width(14),
+                text(sub.name.clone()).size(12).color(SUBTEXT()).font(BOLD),
             ]
             .spacing(2)
             .align_y(Center);
@@ -2975,7 +3005,7 @@ impl App {
                     .width(38),
                 text(req.name.clone())
                     .size(12)
-                    .color(if is_sel { TEXT } else { SUBTEXT }),
+                    .color(if is_sel { TEXT() } else { SUBTEXT() }),
             ]
             .spacing(4)
             .align_y(Center);
@@ -2986,7 +3016,7 @@ impl App {
                 .padding(Padding::from([3, 6]))
                 .on_press(Message::OpenRequest(req.path.clone()));
             // A small grip starts a drag without triggering open (separate area).
-            let grip = mouse_area(text("\u{283F}").size(11).color(MUTED))
+            let grip = mouse_area(text("\u{283F}").size(11).color(MUTED()))
                 .on_press(Message::SidebarDragStart(req.path.clone()));
             let row_el = row![grip, row_btn].spacing(3).align_y(Center);
             out.push(indent(
@@ -3002,7 +3032,7 @@ impl App {
 
     fn main_panel(&self) -> Element<'_, Message> {
         let Some(i) = self.active else {
-            return container(text("Select a request.").size(13).color(MUTED))
+            return container(text("Select a request.").size(13).color(MUTED()))
                 .center(Fill)
                 .into();
         };
@@ -3045,7 +3075,7 @@ impl App {
             let resp_p = ((1.0 - self.split) * 1000.0) as u16;
             let divider = mouse_area(
                 container(Space::new().width(Fill).height(Length::Fixed(5.0)))
-                    .style(|_| panel(BORDER2, None))
+                    .style(|_| panel(BORDER2(), None))
                     .width(Fill),
             )
             .on_press(Message::SplitDragStart)
@@ -3073,10 +3103,10 @@ impl App {
         let dot = if tab.dirty { "\u{25CF}" } else { "" };
         let bar = container(
             row![
-                text(tab.title()).size(13).color(TEXT).font(BOLD),
-                text(dot).size(10).color(ACCENT),
+                text(tab.title()).size(13).color(TEXT()).font(BOLD),
+                text(dot).size(10).color(ACCENT()),
                 fill_x(),
-                button(text("Save").size(13).color(TEXT))
+                button(text("Save").size(13).color(TEXT()))
                     .style(|_, s| ghost_button(s))
                     .padding(Padding::from([6, 12]))
                     .on_press(Message::Save),
@@ -3085,7 +3115,7 @@ impl App {
             .align_y(Center)
             .padding(8),
         )
-        .style(|_| panel(MANTLE, Some(BORDER1)))
+        .style(|_| panel(MANTLE(), Some(BORDER1())))
         .width(Fill);
 
         let content = container(scrollable(self.settings_content(tab)).height(Fill))
@@ -3112,7 +3142,7 @@ impl App {
         for &t in TABS {
             let active = t == tab.req_tab;
             r = r.push(
-                button(text(t.label()).size(12).color(if active { TEXT } else { MUTED }))
+                button(text(t.label()).size(12).color(if active { TEXT() } else { MUTED() }))
                     .style(move |_, _| tab_button(active))
                     .padding(Padding::from([6, 10]))
                     .on_press(Message::ReqTab(t)),
@@ -3129,7 +3159,7 @@ impl App {
             ));
         }
         container(r)
-            .style(|_| panel(SURFACE0, Some(BORDER2)))
+            .style(|_| panel(SURFACE0(), Some(BORDER2())))
             .width(Fill)
             .padding(Padding::from([2, 0]))
             .into()
@@ -3178,7 +3208,7 @@ impl App {
             )
             .height(FIXED_EDITOR)
             .into(),
-            _ => text("Not available here.").size(12).color(MUTED).into(),
+            _ => text("Not available here.").size(12).color(MUTED()).into(),
         }
     }
 
@@ -3207,7 +3237,7 @@ impl App {
                 .size(13)
                 .color(BLACK),
         )
-        .style(|_, _| solid_button(ACCENT, BLACK))
+        .style(|_, _| solid_button(ACCENT(), BLACK))
         .padding(Padding::from([6, 16]))
         .on_press_maybe(can_send.then_some(Message::Send));
 
@@ -3215,7 +3245,7 @@ impl App {
             row![
                 method_dd,
                 url_input,
-                button(text("Save").size(13).color(TEXT))
+                button(text("Save").size(13).color(TEXT()))
                     .style(|_, s| ghost_button(s))
                     .padding(Padding::from([6, 12]))
                     .on_press(Message::Save),
@@ -3225,7 +3255,7 @@ impl App {
             .align_y(Center)
             .padding(8),
         )
-        .style(|_| panel(MANTLE, Some(BORDER1)))
+        .style(|_| panel(MANTLE(), Some(BORDER1())))
         .width(Fill);
 
         // Show an interpolated preview of any `{{var}}` in the URL: each token is
@@ -3258,7 +3288,7 @@ impl App {
             let active = t == tab.req_tab;
             let mut label = row![text(t.label())
                 .size(12)
-                .color(if active { TEXT } else { MUTED })]
+                .color(if active { TEXT() } else { MUTED() })]
             .spacing(3)
             .align_y(Center);
             if let Some(ind) = self.tab_indicator(t, tab, req) {
@@ -3293,7 +3323,7 @@ impl App {
         }
 
         container(r)
-            .style(|_| panel(SURFACE0, Some(BORDER2)))
+            .style(|_| panel(SURFACE0(), Some(BORDER2())))
             .width(Fill)
             .padding(Padding::from([2, 0]))
             .into()
@@ -3306,8 +3336,8 @@ impl App {
         tab: &Tab,
         req: Option<&Request>,
     ) -> Option<Element<'_, Message>> {
-        let count = |n: usize| (n > 0).then(|| text(format!("{n}")).size(9).color(ACCENT).into());
-        let dot = || Some(text("\u{2022}").size(12).color(ACCENT).into());
+        let count = |n: usize| (n > 0).then(|| text(format!("{n}")).size(9).color(ACCENT()).into());
+        let dot = || Some(text("\u{2022}").size(12).color(ACCENT()).into());
         let r = req?;
         match t {
             ReqTab::Params => count(
@@ -3354,7 +3384,7 @@ impl App {
             return column![
                 text("This file has no HTTP method block - editing via Source.")
                     .size(12)
-                    .color(RED),
+                    .color(RED()),
                 text_editor(&tab.editors.source)
                     .font(MONO)
                     .height(Fill)
@@ -3410,7 +3440,7 @@ impl App {
                 let examples = request_examples(&tab.file);
                 let mut col = Column::new().spacing(10);
                 if examples.is_empty() {
-                    col = col.push(text("No saved examples.").size(12).color(MUTED));
+                    col = col.push(text("No saved examples.").size(12).color(MUTED()));
                 }
                 for (name, content) in examples {
                     col = col.push(section(&name));
@@ -3428,10 +3458,10 @@ impl App {
             row![
                 text("Bulk edit (one `name: value` per line, ~ disables)")
                     .size(11)
-                    .color(MUTED),
+                    .color(MUTED()),
                 fill_x(),
-                button(text("Done").size(11).color(ACCENT))
-                    .style(|_, s| icon_button(s, ACCENT))
+                button(text("Done").size(11).color(ACCENT()))
+                    .style(|_, s| icon_button(s, ACCENT()))
                     .padding(Padding::from([2, 8]))
                     .on_press(Message::ToggleBulk(section)),
             ]
@@ -3442,7 +3472,7 @@ impl App {
                     .height(Length::Fixed(200.0))
                     .on_action(Message::BulkEdit),
             )
-            .style(|_| rounded_panel(INPUT_BG, BORDER1))
+            .style(|_| rounded_panel(INPUT_BG(), BORDER1()))
             .width(Fill),
         ]
         .spacing(4)
@@ -3485,7 +3515,7 @@ impl App {
         let mut chips = row![].spacing(6).align_y(Center);
         for (i, t) in tags.iter().enumerate() {
             chips = chips.push(
-                button(text(format!("{t}  \u{00D7}")).size(11).color(TEXT))
+                button(text(format!("{t}  \u{00D7}")).size(11).color(TEXT()))
                     .style(|_, s| ghost_button(s))
                     .padding(Padding::from([2, 8]))
                     .on_press(Message::RemoveTag(i)),
@@ -3510,7 +3540,7 @@ impl App {
 
     fn body_view<'a>(&'a self, tab: &'a Tab, body: &Body) -> Element<'a, Message> {
         match body {
-            Body::None => text("No body").size(12).color(MUTED).into(),
+            Body::None => text("No body").size(12).color(MUTED()).into(),
             Body::Json(_) | Body::Text(_) | Body::Xml(_) | Body::Sparql(_) => editor_box(
                 &tab.editors.body,
                 EditorField::Body,
@@ -3560,11 +3590,11 @@ impl App {
                 column![
                     section("Binary File Body"),
                     row![
-                        button(text("Choose File\u{2026}").size(12).color(TEXT))
+                        button(text("Choose File\u{2026}").size(12).color(TEXT()))
                             .style(|_, s| ghost_button(s))
                             .padding(Padding::from([5, 12]))
                             .on_press(Message::BrowseFileBody),
-                        text(label).size(12).color(SUBTEXT).font(MONO),
+                        text(label).size(12).color(SUBTEXT()).font(MONO),
                     ]
                     .spacing(10)
                     .align_y(Center),
@@ -3594,7 +3624,7 @@ impl App {
             let active = t == tab.resp_tab;
             let mut label = row![text(t.label())
                 .size(12)
-                .color(if active { TEXT } else { MUTED })]
+                .color(if active { TEXT() } else { MUTED() })]
             .spacing(3)
             .align_y(Center);
             if let Some(ind) = self.resp_indicator(t, tab) {
@@ -3614,8 +3644,8 @@ impl App {
         let layout_glyph = if self.layout_horizontal { "\u{2926}" } else { "\u{2925}" };
         strip = strip.push(
             tooltip(
-                button(text(layout_glyph).size(13).color(SUBTEXT))
-                    .style(|_, s| icon_button(s, SUBTEXT))
+                button(text(layout_glyph).size(13).color(SUBTEXT()))
+                    .style(|_, s| icon_button(s, SUBTEXT()))
                     .padding(Padding::from([2, 6]))
                     .on_press(Message::ToggleLayout),
                 container(text("Toggle layout").size(11)).style(|_| menu_panel()).padding(4),
@@ -3639,33 +3669,33 @@ impl App {
             }
             if is_html_response(&r.headers) {
                 strip = strip.push(
-                    button(text("Browser").size(12).color(SUBTEXT))
-                        .style(|_, s| icon_button(s, SUBTEXT))
+                    button(text("Browser").size(12).color(SUBTEXT()))
+                        .style(|_, s| icon_button(s, SUBTEXT()))
                         .padding(Padding::from([2, 6]))
                         .on_press(Message::OpenInBrowser),
                 );
             }
             strip = strip.push(
-                button(text("Copy").size(12).color(SUBTEXT))
-                    .style(|_, s| icon_button(s, SUBTEXT))
+                button(text("Copy").size(12).color(SUBTEXT()))
+                    .style(|_, s| icon_button(s, SUBTEXT()))
                     .padding(Padding::from([2, 6]))
                     .on_press(Message::CopyResponse),
             );
             strip = strip.push(
-                button(text("Save").size(12).color(SUBTEXT))
-                    .style(|_, s| icon_button(s, SUBTEXT))
+                button(text("Save").size(12).color(SUBTEXT()))
+                    .style(|_, s| icon_button(s, SUBTEXT()))
                     .padding(Padding::from([2, 6]))
                     .on_press(Message::DownloadResponse),
             );
             strip = strip.push(
-                button(text("Clear").size(12).color(SUBTEXT))
-                    .style(|_, s| icon_button(s, SUBTEXT))
+                button(text("Clear").size(12).color(SUBTEXT()))
+                    .style(|_, s| icon_button(s, SUBTEXT()))
                     .padding(Padding::from([2, 6]))
                     .on_press(Message::ClearResponse),
             );
             strip = strip.push(
-                button(text("Save Example").size(12).color(SUBTEXT))
-                    .style(|_, s| icon_button(s, SUBTEXT))
+                button(text("Save Example").size(12).color(SUBTEXT()))
+                    .style(|_, s| icon_button(s, SUBTEXT()))
                     .padding(Padding::from([2, 6]))
                     .on_press(Message::SaveExamplePrompt),
             );
@@ -3675,9 +3705,9 @@ impl App {
                         .size(12)
                         .color(status_color(r.status))
                         .font(BOLD),
-                    text(format!("{} ms", r.duration_ms)).size(12).color(SUBTEXT),
+                    text(format!("{} ms", r.duration_ms)).size(12).color(SUBTEXT()),
                     tooltip(
-                        text(human_size(r.body.len())).size(12).color(SUBTEXT),
+                        text(human_size(r.body.len())).size(12).color(SUBTEXT()),
                         container(text(format!("{} bytes", r.body.len())).size(11))
                             .style(|_| menu_panel())
                             .padding(4),
@@ -3693,7 +3723,7 @@ impl App {
         container(
             column![
                 container(strip)
-                    .style(|_| panel(SURFACE0, Some(BORDER2)))
+                    .style(|_| panel(SURFACE0(), Some(BORDER2())))
                     .width(Fill)
                     .padding(Padding::from([2, 0])),
                 // resp_content manages its own scrolling per view (the response
@@ -3702,7 +3732,7 @@ impl App {
             ]
             .height(Fill),
         )
-        .style(|_| panel(BG, Some(BORDER2)))
+        .style(|_| panel(BG(), Some(BORDER2())))
         .width(Fill)
         .height(Fill)
         .into()
@@ -3713,7 +3743,7 @@ impl App {
         match t {
             RespTab::Headers => {
                 let n = o.response.as_ref().map(|r| r.headers.len()).unwrap_or(0);
-                (n > 0).then(|| text(format!("{n}")).size(9).color(ACCENT).into())
+                (n > 0).then(|| text(format!("{n}")).size(9).color(ACCENT()).into())
             }
             RespTab::Tests => {
                 let total = o.assertions.len() + o.tests.len();
@@ -3722,7 +3752,7 @@ impl App {
                 }
                 let passed = o.assertions.iter().filter(|a| a.passed).count()
                     + o.tests.iter().filter(|t| t.passed).count();
-                let c = if passed == total { GREEN } else { RED };
+                let c = if passed == total { GREEN() } else { RED() };
                 Some(text(format!("{passed}/{total}")).size(9).color(c).into())
             }
             _ => None,
@@ -3733,16 +3763,16 @@ impl App {
         let Some(o) = &tab.result else {
             return text("No response yet - press Send.")
                 .size(12)
-                .color(MUTED)
+                .color(MUTED())
                 .into();
         };
         if let Some(err) = &o.error {
-            return text(format!("Error: {err}")).size(12).color(RED).into();
+            return text(format!("Error: {err}")).size(12).color(RED()).into();
         }
         match tab.resp_tab {
             RespTab::Response => {
                 let Some(r) = &o.response else {
-                    return text("(no response)").size(12).color(MUTED).into();
+                    return text("(no response)").size(12).color(MUTED()).into();
                 };
                 const LARGE: usize = 10 * 1024 * 1024;
                 let body: Element<'a, Message> = if is_image_response(&r.headers) {
@@ -3750,15 +3780,15 @@ impl App {
                         column![
                             text(format!("Image response ({})", human_size(r.body.len())))
                                 .size(13)
-                                .color(SUBTEXT),
-                            button(text("Save to file").size(12).color(TEXT))
+                                .color(SUBTEXT()),
+                            button(text("Save to file").size(12).color(TEXT()))
                                 .style(|_, s| ghost_button(s))
                                 .padding(Padding::from([5, 12]))
                                 .on_press(Message::DownloadResponse),
                         ]
                         .spacing(10),
                     )
-                    .style(|_| rounded_panel(SURFACE0, BORDER1))
+                    .style(|_| rounded_panel(SURFACE0(), BORDER1()))
                     .padding(14)
                     .into()
                 } else if r.body.len() > LARGE
@@ -3772,13 +3802,13 @@ impl App {
                                 human_size(r.body.len())
                             ))
                             .size(13)
-                            .color(ORANGE),
+                            .color(ORANGE()),
                             row![
                                 button(text("View anyway").size(12).color(BLACK))
-                                    .style(|_, _| solid_button(ACCENT, BLACK))
+                                    .style(|_, _| solid_button(ACCENT(), BLACK))
                                     .padding(Padding::from([5, 12]))
                                     .on_press(Message::RevealLarge),
-                                button(text("Save to file").size(12).color(TEXT))
+                                button(text("Save to file").size(12).color(TEXT()))
                                     .style(|_, s| ghost_button(s))
                                     .padding(Padding::from([5, 12]))
                                     .on_press(Message::DownloadResponse),
@@ -3787,7 +3817,7 @@ impl App {
                         ]
                         .spacing(10),
                     )
-                    .style(|_| rounded_panel(SURFACE0, BORDER1))
+                    .style(|_| rounded_panel(SURFACE0(), BORDER1()))
                     .padding(14)
                     .into()
                 } else if tab.resp_format == RespFormat::Tree {
@@ -3795,14 +3825,14 @@ impl App {
                         Some(v) => scrollable(json_tree(&v, &tab.resp_expanded))
                             .height(Fill)
                             .into(),
-                        None => text("Response is not JSON.").size(12).color(MUTED).into(),
+                        None => text("Response is not JSON.").size(12).color(MUTED()).into(),
                     }
                 } else {
                     // Read-only, selectable, syntax-highlighted response body.
                     text_editor(&tab.resp_editor)
                         .font(MONO)
                         .height(Fill)
-                        .highlight(resp_syntax(&r.headers), iced::highlighter::Theme::Base16Mocha)
+                        .highlight(resp_syntax(&r.headers), highlight_theme())
                         .on_action(Message::RespEditorAction)
                         .into()
                 };
@@ -3812,14 +3842,14 @@ impl App {
                     let mut con = Column::new().spacing(2);
                     for line in &o.console {
                         con = con
-                            .push(text(format!("| {line}")).size(12).color(MUTED).font(MONO));
+                            .push(text(format!("| {line}")).size(12).color(MUTED()).font(MONO));
                     }
                     column![con, body].spacing(6).height(Fill).into()
                 }
             }
             RespTab::Headers => match &o.response {
                 Some(r) => scrollable(header_table(&r.headers)).height(Fill).into(),
-                None => text("(no response)").size(12).color(MUTED).into(),
+                None => text("(no response)").size(12).color(MUTED()).into(),
             },
             RespTab::Timeline => scrollable(code_block(&timeline_text(tab, o)))
                 .height(Fill)
@@ -3827,7 +3857,7 @@ impl App {
             RespTab::Tests => {
                 let mut col = Column::new().spacing(4);
                 if o.assertions.is_empty() && o.tests.is_empty() {
-                    col = col.push(text("No assertions or tests.").size(12).color(MUTED));
+                    col = col.push(text("No assertions or tests.").size(12).color(MUTED()));
                 }
                 for a in &o.assertions {
                     col = col.push(check_row(
@@ -3895,11 +3925,11 @@ fn kv_table<'a>(
             hspace(24.0),
             text(col1.to_string())
                 .size(11)
-                .color(MUTED)
+                .color(MUTED())
                 .width(Length::FillPortion(2)),
             text(col2.to_string())
                 .size(11)
-                .color(MUTED)
+                .color(MUTED())
                 .width(Length::FillPortion(3)),
             hspace(28.0),
         ]
@@ -3925,20 +3955,20 @@ fn kv_table<'a>(
             .padding(Padding::from([4, 6]))
             .style(cell_input)
             .width(Length::FillPortion(3));
-        let del = button(text("\u{2715}").size(12).color(MUTED))
-            .style(move |_, s| icon_button(s, RED))
+        let del = button(text("\u{2715}").size(12).color(MUTED()))
+            .style(move |_, s| icon_button(s, RED()))
             .padding(Padding::from([2, 6]))
             .on_press(Message::KvRemove(section, i));
         col = col.push(row![check, name_in, value_in, del].spacing(6).align_y(Center));
     }
     col = col.push(
         row![
-            button(text("+ Add").size(12).color(ACCENT))
-                .style(move |_, s| icon_button(s, ACCENT))
+            button(text("+ Add").size(12).color(ACCENT()))
+                .style(move |_, s| icon_button(s, ACCENT()))
                 .padding(Padding::from([4, 8]))
                 .on_press(Message::KvAdd(section)),
-            button(text("Bulk Edit").size(12).color(SUBTEXT))
-                .style(move |_, s| icon_button(s, SUBTEXT))
+            button(text("Bulk Edit").size(12).color(SUBTEXT()))
+                .style(move |_, s| icon_button(s, SUBTEXT()))
                 .padding(Padding::from([4, 8]))
                 .on_press(Message::ToggleBulk(section)),
         ]
@@ -3956,9 +3986,9 @@ fn vars_table<'a>(
     col = col.push(
         row![
             hspace(24.0),
-            text("Name").size(11).color(MUTED).width(Length::FillPortion(2)),
-            text("Value").size(11).color(MUTED).width(Length::FillPortion(3)),
-            text("Local").size(11).color(MUTED).width(Length::Fixed(48.0)),
+            text("Name").size(11).color(MUTED()).width(Length::FillPortion(2)),
+            text("Value").size(11).color(MUTED()).width(Length::FillPortion(3)),
+            text("Local").size(11).color(MUTED()).width(Length::Fixed(48.0)),
             hspace(28.0),
         ]
         .spacing(6)
@@ -3988,8 +4018,8 @@ fn vars_table<'a>(
             .size(14)
             .style(checkbox_style)
             .width(Length::Fixed(48.0));
-        let del = button(text("\u{2715}").size(12).color(MUTED))
-            .style(move |_, s| icon_button(s, RED))
+        let del = button(text("\u{2715}").size(12).color(MUTED()))
+            .style(move |_, s| icon_button(s, RED()))
             .padding(Padding::from([2, 6]))
             .on_press(Message::KvRemove(section, i));
         col = col.push(
@@ -4000,12 +4030,12 @@ fn vars_table<'a>(
     }
     col = col.push(
         row![
-            button(text("+ Add").size(12).color(ACCENT))
-                .style(move |_, s| icon_button(s, ACCENT))
+            button(text("+ Add").size(12).color(ACCENT()))
+                .style(move |_, s| icon_button(s, ACCENT()))
                 .padding(Padding::from([4, 8]))
                 .on_press(Message::KvAdd(section)),
-            button(text("Bulk Edit").size(12).color(SUBTEXT))
-                .style(move |_, s| icon_button(s, SUBTEXT))
+            button(text("Bulk Edit").size(12).color(SUBTEXT()))
+                .style(move |_, s| icon_button(s, SUBTEXT()))
                 .padding(Padding::from([4, 8]))
                 .on_press(Message::ToggleBulk(section)),
         ]
@@ -4021,8 +4051,8 @@ fn multipart_table<'a>(rows: Vec<(String, String, bool)>) -> Element<'a, Message
     col = col.push(
         row![
             hspace(24.0),
-            text("Name").size(11).color(MUTED).width(Length::FillPortion(2)),
-            text("Value (text or @file)").size(11).color(MUTED).width(Length::FillPortion(3)),
+            text("Name").size(11).color(MUTED()).width(Length::FillPortion(2)),
+            text("Value (text or @file)").size(11).color(MUTED()).width(Length::FillPortion(3)),
             hspace(56.0),
         ]
         .spacing(6)
@@ -4047,12 +4077,12 @@ fn multipart_table<'a>(rows: Vec<(String, String, bool)>) -> Element<'a, Message
             .padding(Padding::from([4, 6]))
             .style(cell_input)
             .width(Length::FillPortion(3));
-        let browse = button(text("\u{1F4C1}").size(12).color(SUBTEXT))
-            .style(move |_, s| icon_button(s, SUBTEXT))
+        let browse = button(text("\u{1F4C1}").size(12).color(SUBTEXT()))
+            .style(move |_, s| icon_button(s, SUBTEXT()))
             .padding(Padding::from([2, 6]))
             .on_press(Message::BrowseMultipartFile(i));
-        let del = button(text("\u{2715}").size(12).color(MUTED))
-            .style(move |_, s| icon_button(s, RED))
+        let del = button(text("\u{2715}").size(12).color(MUTED()))
+            .style(move |_, s| icon_button(s, RED()))
             .padding(Padding::from([2, 6]))
             .on_press(Message::KvRemove(section, i));
         col = col.push(
@@ -4062,8 +4092,8 @@ fn multipart_table<'a>(rows: Vec<(String, String, bool)>) -> Element<'a, Message
         );
     }
     col = col.push(
-        button(text("+ Add").size(12).color(ACCENT))
-            .style(move |_, s| icon_button(s, ACCENT))
+        button(text("+ Add").size(12).color(ACCENT()))
+            .style(move |_, s| icon_button(s, ACCENT()))
             .padding(Padding::from([4, 8]))
             .on_press(Message::KvAdd(section)),
     );
@@ -4077,9 +4107,9 @@ fn assert_table<'a>(rows: Vec<(String, String, bool)>) -> Element<'a, Message> {
     col = col.push(
         row![
             hspace(24.0),
-            text("Expression").size(11).color(MUTED).width(Length::FillPortion(3)),
-            text("Operator").size(11).color(MUTED).width(Length::Fixed(150.0)),
-            text("Value").size(11).color(MUTED).width(Length::FillPortion(3)),
+            text("Expression").size(11).color(MUTED()).width(Length::FillPortion(3)),
+            text("Operator").size(11).color(MUTED()).width(Length::Fixed(150.0)),
+            text("Value").size(11).color(MUTED()).width(Length::FillPortion(3)),
             hspace(28.0),
         ]
         .spacing(6)
@@ -4116,8 +4146,8 @@ fn assert_table<'a>(rows: Vec<(String, String, bool)>) -> Element<'a, Message> {
                 Message::KvValue(KvSection::Assert, i, combine_assert(&op_for_operand, &v))
             });
         }
-        let del = button(text("\u{2715}").size(12).color(MUTED))
-            .style(move |_, s| icon_button(s, RED))
+        let del = button(text("\u{2715}").size(12).color(MUTED()))
+            .style(move |_, s| icon_button(s, RED()))
             .padding(Padding::from([2, 6]))
             .on_press(Message::KvRemove(KvSection::Assert, i));
         col = col.push(
@@ -4127,8 +4157,8 @@ fn assert_table<'a>(rows: Vec<(String, String, bool)>) -> Element<'a, Message> {
         );
     }
     col = col.push(
-        button(text("+ Add").size(12).color(ACCENT))
-            .style(move |_, s| icon_button(s, ACCENT))
+        button(text("+ Add").size(12).color(ACCENT()))
+            .style(move |_, s| icon_button(s, ACCENT()))
             .padding(Padding::from([4, 8]))
             .on_press(Message::KvAdd(KvSection::Assert)),
     );
@@ -4153,10 +4183,10 @@ where
         return None;
     }
     let literal = |s: &str| -> Element<'static, Message> {
-        text(s.to_string()).size(12).font(MONO).color(SUBTEXT).into()
+        text(s.to_string()).size(12).font(MONO).color(SUBTEXT()).into()
     };
     let pill = |name: &str, value: Option<String>| -> Element<'static, Message> {
-        let color = if value.is_some() { ACCENT } else { RED };
+        let color = if value.is_some() { ACCENT() } else { RED() };
         let tip = match &value {
             Some(v) if v.is_empty() => format!("{name} = (empty)"),
             Some(v) => format!("{name} = {v}"),
@@ -4167,7 +4197,7 @@ where
         label.push_str("}}");
         tooltip(
             text(label).size(12).font(MONO).color(color),
-            container(text(tip).size(11).color(TEXT))
+            container(text(tip).size(11).color(TEXT()))
                 .style(|_| menu_panel())
                 .padding(6),
             tooltip::Position::Bottom,
@@ -4202,7 +4232,7 @@ where
         segments.push(literal(rest));
     }
 
-    let mut row = row![text("\u{21B3} ").size(12).color(MUTED)].align_y(Center);
+    let mut row = row![text("\u{21B3} ").size(12).color(MUTED())].align_y(Center);
     for seg in segments {
         row = row.push(seg);
     }
@@ -4219,10 +4249,10 @@ fn editor_box<'a>(
         text_editor(content)
             .font(MONO)
             .height(height)
-            .highlight(syntax, iced::highlighter::Theme::Base16Mocha)
+            .highlight(syntax, highlight_theme())
             .on_action(move |a| Message::EditField(field, a)),
     )
-    .style(|_| rounded_panel(INPUT_BG, BORDER1))
+    .style(|_| rounded_panel(INPUT_BG(), BORDER1()))
     .width(Fill)
     .height(height)
     .into()
@@ -4241,7 +4271,7 @@ fn body_syntax(body_kind: &str) -> &'static str {
 /// One labelled credential input row in the Auth tab.
 fn auth_field(label: &str, value: &str, f: AuthField) -> Element<'static, Message> {
     row![
-        text(label.to_string()).size(12).color(MUTED).width(150),
+        text(label.to_string()).size(12).color(MUTED()).width(150),
         text_input("", value)
             .on_input(move |v| Message::AuthEdit(f, v))
             .size(12)
@@ -4258,12 +4288,12 @@ fn auth_field(label: &str, value: &str, f: AuthField) -> Element<'static, Messag
 fn auth_view(auth: &Auth) -> Element<'static, Message> {
     let mut col = Column::new().spacing(8);
     match auth {
-        Auth::None => col = col.push(text("No authentication.").size(12).color(MUTED)),
+        Auth::None => col = col.push(text("No authentication.").size(12).color(MUTED())),
         Auth::Inherit => {
             col = col.push(
                 text("Inherits auth from the collection/folder.")
                     .size(12)
-                    .color(MUTED),
+                    .color(MUTED()),
             )
         }
         Auth::Basic { username, password } => {
@@ -4288,7 +4318,7 @@ fn auth_view(auth: &Auth) -> Element<'static, Message> {
                 .push(auth_field("Value", value, AuthField::ApiKeyValue))
                 .push(
                     row![
-                        text("Placement").size(12).color(MUTED).width(150),
+                        text("Placement").size(12).color(MUTED()).width(150),
                         dropdown(pairs(API_KEY_PLACEMENTS), pl, Length::Fixed(180.0), |s| {
                             Message::AuthEdit(AuthField::ApiKeyPlacement, s)
                         }),
@@ -4334,7 +4364,7 @@ fn auth_view(auth: &Auth) -> Element<'static, Message> {
             col = col
                 .push(
                     row![
-                        text("Grant Type").size(12).color(MUTED).width(150),
+                        text("Grant Type").size(12).color(MUTED()).width(150),
                         dropdown(
                             pairs(OAUTH2_GRANTS),
                             &o.grant_type,
@@ -4379,7 +4409,7 @@ fn setting_bool(label: &str, key: &'static str, on: bool) -> Element<'static, Me
 
 fn setting_num(label: &str, key: &'static str, value: &str) -> Element<'static, Message> {
     row![
-        text(label.to_string()).size(12).color(MUTED).width(180),
+        text(label.to_string()).size(12).color(MUTED()).width(180),
         text_input("", value)
             .on_input(move |v| Message::SettingText(key, v))
             .size(12)
@@ -4412,11 +4442,11 @@ fn header_table(headers: &[(String, String)]) -> Element<'static, Message> {
         row![
             text("Name")
                 .size(11)
-                .color(MUTED)
+                .color(MUTED())
                 .width(Length::FillPortion(2)),
             text("Value")
                 .size(11)
-                .color(MUTED)
+                .color(MUTED())
                 .width(Length::FillPortion(3)),
         ]
         .spacing(12),
@@ -4426,12 +4456,12 @@ fn header_table(headers: &[(String, String)]) -> Element<'static, Message> {
             row![
                 text(k.clone())
                     .size(12)
-                    .color(TEXT)
+                    .color(TEXT())
                     .font(MONO)
                     .width(Length::FillPortion(2)),
                 text(v.clone())
                     .size(12)
-                    .color(SUBTEXT)
+                    .color(SUBTEXT())
                     .font(MONO)
                     .width(Length::FillPortion(3)),
             ]
@@ -4444,13 +4474,13 @@ fn header_table(headers: &[(String, String)]) -> Element<'static, Message> {
 fn section(title: &str) -> Element<'static, Message> {
     text(title.to_string())
         .size(11)
-        .color(MUTED)
+        .color(MUTED())
         .font(BOLD)
         .into()
 }
 
 fn menu_row<'a>(label: &str, danger: bool, msg: Message) -> Element<'a, Message> {
-    button(text(label.to_string()).size(12).color(if danger { RED } else { TEXT }))
+    button(text(label.to_string()).size(12).color(if danger { RED() } else { TEXT() }))
         .style(move |_, s| menu_item(s, danger))
         .width(Fill)
         .padding(Padding::from([5, 8]))
@@ -4465,14 +4495,14 @@ fn menu_sep<'a>() -> Element<'a, Message> {
 }
 
 fn labeled<'a>(label: &str, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    column![text(label.to_string()).size(11).color(MUTED), control.into()]
+    column![text(label.to_string()).size(11).color(MUTED()), control.into()]
         .spacing(3)
         .into()
 }
 
 fn modal_error<'a>(error: &Option<String>) -> Element<'a, Message> {
     match error {
-        Some(e) => text(e.clone()).size(12).color(RED).into(),
+        Some(e) => text(e.clone()).size(12).color(RED()).into(),
         None => Space::new().into(),
     }
 }
@@ -4488,18 +4518,18 @@ fn modal_card_view<'a>(
             .size(13)
             .color(if danger { WHITE } else { BLACK }),
     )
-    .style(move |_, s| if danger { danger_button(s) } else { solid_button(ACCENT, BLACK) })
+    .style(move |_, s| if danger { danger_button(s) } else { solid_button(ACCENT(), BLACK) })
     .padding(Padding::from([6, 16]))
     .on_press(Message::ModalSubmit);
 
-    let cancel = button(text("Cancel").size(13).color(TEXT))
+    let cancel = button(text("Cancel").size(13).color(TEXT()))
         .style(|_, s| ghost_button(s))
         .padding(Padding::from([6, 14]))
         .on_press(Message::ModalCancel);
 
     container(
         column![
-            text(title.to_string()).size(15).color(TEXT).font(BOLD),
+            text(title.to_string()).size(15).color(TEXT()).font(BOLD),
             body,
             row![fill_x(), cancel, confirm_btn].spacing(8),
         ]
@@ -4512,8 +4542,8 @@ fn modal_card_view<'a>(
 }
 
 fn code_block(s: &str) -> Element<'static, Message> {
-    container(text(s.to_string()).size(12).color(TEXT).font(MONO))
-        .style(|_| rounded_panel(SURFACE0, BORDER1))
+    container(text(s.to_string()).size(12).color(TEXT()).font(MONO))
+        .style(|_| rounded_panel(SURFACE0(), BORDER1()))
         .width(Fill)
         .padding(8)
         .into()
@@ -4521,13 +4551,13 @@ fn code_block(s: &str) -> Element<'static, Message> {
 
 fn check_row(passed: bool, label: &str) -> Element<'static, Message> {
     let (mark, c) = if passed {
-        ("\u{2713}", GREEN)
+        ("\u{2713}", GREEN())
     } else {
-        ("\u{2717}", RED)
+        ("\u{2717}", RED())
     };
     row![
         text(mark).size(12).color(c),
-        text(label.to_string()).size(12).color(TEXT).font(MONO),
+        text(label.to_string()).size(12).color(TEXT()).font(MONO),
     ]
     .spacing(8)
     .into()
@@ -5321,8 +5351,8 @@ fn json_node<'a>(
             let head = format!("{chev} {label}  {{{}}}", map.len());
             out.push(indent(
                 depth,
-                button(text(head).size(12).color(ACCENT).font(MONO))
-                    .style(|_, s| icon_button(s, ACCENT))
+                button(text(head).size(12).color(ACCENT()).font(MONO))
+                    .style(|_, s| icon_button(s, ACCENT()))
                     .padding(Padding::from([1, 4]))
                     .on_press(Message::ToggleJsonNode(path.to_string()))
                     .into(),
@@ -5341,8 +5371,8 @@ fn json_node<'a>(
             let head = format!("{chev} {label}  [{}]", arr.len());
             out.push(indent(
                 depth,
-                button(text(head).size(12).color(ACCENT).font(MONO))
-                    .style(|_, s| icon_button(s, ACCENT))
+                button(text(head).size(12).color(ACCENT()).font(MONO))
+                    .style(|_, s| icon_button(s, ACCENT()))
                     .padding(Padding::from([1, 4]))
                     .on_press(Message::ToggleJsonNode(path.to_string()))
                     .into(),
@@ -5355,15 +5385,15 @@ fn json_node<'a>(
         }
         leaf => {
             let (val, color) = match leaf {
-                J::String(s) => (format!("\"{s}\""), GREEN),
-                J::Number(n) => (n.to_string(), ORANGE),
-                J::Bool(b) => (b.to_string(), BLUE),
-                _ => ("null".to_string(), MUTED),
+                J::String(s) => (format!("\"{s}\""), GREEN()),
+                J::Number(n) => (n.to_string(), ORANGE()),
+                J::Bool(b) => (b.to_string(), BLUE()),
+                _ => ("null".to_string(), MUTED()),
             };
             out.push(indent(
                 depth,
                 row![
-                    text(format!("{label}: ")).size(12).color(SUBTEXT).font(MONO),
+                    text(format!("{label}: ")).size(12).color(SUBTEXT()).font(MONO),
                     text(val).size(12).color(color).font(MONO),
                 ]
                 .into(),
