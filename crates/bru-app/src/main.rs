@@ -1,11 +1,12 @@
 //! bruno-rs — iced (wgpu) desktop app.
 //!
-//! Open a Bruno collection, browse its request tree, and **send** the selected
-//! request — the response (status, timing, assertions, body) renders in the
-//! detail pane. Sending is async via iced `Task::perform` over `bru-engine`, so
-//! the network never blocks the UI. (Folder open and request preview do small
-//! local file reads on the UI thread; the env picker and fully-async IO are
-//! tracked follow-ups.)
+//! Open a Bruno collection, browse its request tree, **edit** the selected
+//! request's raw `.bru` in place, **save** it (validated by `bru-lang` first),
+//! and **send** it — the response (status, timing, assertions, body) renders in
+//! the detail pane. Sending is async via iced `Task::perform` over `bru-engine`,
+//! so the network never blocks the UI. (Folder open, request preview, and Save
+//! do small local file reads/writes on the UI thread; the env picker and
+//! fully-async IO are tracked follow-ups.)
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -14,7 +15,7 @@ use std::path::{Path, PathBuf};
 use bru_core::{CollectionTree, Folder};
 use bru_engine::{base_vars, run_request, RunContext, RunOutcome};
 use bru_http::{HttpClient, SendOptions};
-use iced::widget::{button, column, container, row, scrollable, text, Column};
+use iced::widget::{button, column, container, row, scrollable, text, text_editor, Column};
 use iced::{Center, Element, Fill, Font, Padding, Task};
 
 fn main() -> iced::Result {
@@ -27,7 +28,10 @@ fn main() -> iced::Result {
 struct App {
     collection: Option<CollectionTree>,
     selected: Option<PathBuf>,
-    detail: Option<String>,
+    /// On-disk text of the selected request, used to detect unsaved edits.
+    on_disk: Option<String>,
+    /// Editable buffer for the selected request's raw `.bru`.
+    editor: text_editor::Content,
     result: Option<RunOutcome>,
     sending: bool,
     status: String,
@@ -37,6 +41,8 @@ struct App {
 enum Message {
     OpenFolder,
     Select(PathBuf),
+    Edit(text_editor::Action),
+    Save,
     Send,
     Sent(Box<RunOutcome>),
 }
@@ -57,7 +63,8 @@ impl App {
                 self.status = format!("Loaded \"{}\"", tree.name);
                 self.collection = Some(tree);
                 self.selected = None;
-                self.detail = None;
+                self.on_disk = None;
+                self.editor = text_editor::Content::new();
                 self.result = None;
             }
             Err(e) => self.status = format!("Failed to open {}: {e}", dir.display()),
@@ -73,9 +80,32 @@ impl App {
                 Task::none()
             }
             Message::Select(path) => {
-                self.detail = std::fs::read_to_string(&path).ok();
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                self.editor = text_editor::Content::with_text(&text);
+                self.on_disk = Some(text);
                 self.selected = Some(path);
                 self.result = None;
+                self.status.clear();
+                Task::none()
+            }
+            Message::Edit(action) => {
+                self.editor.perform(action);
+                // Editing dismisses any stale response so the editor is visible.
+                self.result = None;
+                Task::none()
+            }
+            Message::Save => {
+                let Some(path) = self.selected.clone() else {
+                    return Task::none();
+                };
+                let text = self.editor.text();
+                match validate_and_save(&path, &text) {
+                    Ok(()) => {
+                        self.on_disk = Some(text);
+                        self.status = "Saved".to_string();
+                    }
+                    Err(e) => self.status = format!("Not saved — {e}"),
+                }
                 Task::none()
             }
             Message::Send => {
@@ -119,34 +149,51 @@ impl App {
     }
 
     fn detail_view(&self) -> Element<'_, Message> {
-        let can_send = self.selected.is_some() && !self.sending;
+        let has_selection = self.selected.is_some();
+        let can_send = has_selection && !self.sending;
         let send_btn = button(text(if self.sending { "Sending…" } else { "Send" }))
             .on_press_maybe(can_send.then_some(Message::Send));
+        let save_btn = button(text("Save")).on_press_maybe(has_selection.then_some(Message::Save));
 
-        let title = self
+        let dirty = self.is_modified();
+        let base_title = self
             .selected
             .as_ref()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "No request selected".to_string());
-
-        let toolbar = row![text(title), send_btn].spacing(12).align_y(Center);
-
-        // Body pane shows the response (when present) else the raw .bru.
-        let body: Element<Message> = match &self.result {
-            Some(outcome) => self.response_view(outcome),
-            None => text(
-                self.detail
-                    .as_deref()
-                    .unwrap_or("Select a request to view its .bru."),
-            )
-            .font(Font::MONOSPACE)
-            .into(),
+        let title = if dirty {
+            format!("{base_title} •")
+        } else {
+            base_title
         };
 
-        column![toolbar, scrollable(body).height(Fill)]
-            .spacing(10)
-            .into()
+        let toolbar = row![text(title), save_btn, send_btn]
+            .spacing(12)
+            .align_y(Center);
+
+        // Body pane shows the response (after Send) else the editable raw .bru.
+        let body: Element<Message> = match &self.result {
+            Some(outcome) => scrollable(self.response_view(outcome)).height(Fill).into(),
+            None if has_selection => text_editor(&self.editor)
+                .font(Font::MONOSPACE)
+                .height(Fill)
+                .on_action(Message::Edit)
+                .into(),
+            None => text("Select a request to view and edit its .bru.").into(),
+        };
+
+        column![toolbar, body].spacing(10).into()
+    }
+
+    /// True when the editor buffer differs from the on-disk text.
+    /// Ignores a trailing newline difference, since `Content::text()` does not
+    /// emit the file's final newline.
+    fn is_modified(&self) -> bool {
+        match &self.on_disk {
+            Some(disk) => disk.trim_end_matches('\n') != self.editor.text().trim_end_matches('\n'),
+            None => false,
+        }
     }
 
     fn response_view<'a>(&self, outcome: &'a RunOutcome) -> Element<'a, Message> {
@@ -200,6 +247,15 @@ impl App {
             }
         }
     }
+}
+
+/// Validate `text` as a `.bru` file, then write it to `path`.
+///
+/// Parsing happens first: if it fails, the error is returned and the file on
+/// disk is left untouched. Only valid `.bru` text reaches `std::fs::write`.
+fn validate_and_save(path: &Path, text: &str) -> Result<(), String> {
+    bru_lang::parse(text).map_err(|e| format!("parse error: {e}"))?;
+    std::fs::write(path, text).map_err(|e| format!("write error: {e}"))
 }
 
 /// Re-read the request file at send time (so on-disk edits are picked up), build
@@ -291,4 +347,62 @@ fn indent(depth: u16, content: Element<'_, Message>) -> Element<'_, Message> {
         ..Padding::ZERO
     };
     container(content).padding(pad).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_and_save;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A unique temp path per call; no external deps. The file is created by the
+    /// code under test, and the guard removes it on drop.
+    struct TempFile(PathBuf);
+
+    impl TempFile {
+        fn new() -> Self {
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let name = format!("bru-app-test-{}-{n}.bru", std::process::id());
+            TempFile(std::env::temp_dir().join(name))
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    const VALID_BRU: &str =
+        "meta {\n  name: t\n  type: http\n}\n\nget {\n  url: https://example.com\n}\n";
+
+    #[test]
+    fn valid_text_is_written() {
+        let tmp = TempFile::new();
+        validate_and_save(&tmp.0, VALID_BRU).expect("valid .bru should save");
+        let on_disk = std::fs::read_to_string(&tmp.0).expect("file should exist");
+        assert_eq!(on_disk, VALID_BRU);
+    }
+
+    #[test]
+    fn invalid_text_errors_and_does_not_write() {
+        let tmp = TempFile::new();
+        // Bare word with no block opener — rejected by bru_lang::parse.
+        let err = validate_and_save(&tmp.0, "this is not valid bru\n")
+            .expect_err("invalid .bru should error");
+        assert!(err.contains("parse error"), "unexpected error: {err}");
+        assert!(!tmp.0.exists(), "file must not be created on parse failure");
+    }
+
+    #[test]
+    fn invalid_text_does_not_clobber_existing_file() {
+        let tmp = TempFile::new();
+        validate_and_save(&tmp.0, VALID_BRU).expect("seed valid file");
+        // A failing save must leave the previous good contents intact.
+        let _ = validate_and_save(&tmp.0, "garbage with no braces\n")
+            .expect_err("invalid .bru should error");
+        let on_disk = std::fs::read_to_string(&tmp.0).expect("file should still exist");
+        assert_eq!(on_disk, VALID_BRU, "existing file must be untouched");
+    }
 }
