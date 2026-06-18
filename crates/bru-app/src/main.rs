@@ -222,7 +222,11 @@ async fn send_request(path: PathBuf) -> Box<RunOutcome> {
         Ok(c) => c,
         Err(e) => return Box::new(RunOutcome::errored(name, format!("{e}"))),
     };
-    let mut ctx = RunContext { vars, client };
+    let mut ctx = RunContext {
+        vars,
+        client,
+        ..Default::default()
+    };
     Box::new(run_request(&file, &mut ctx).await)
 }
 

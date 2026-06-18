@@ -18,7 +18,7 @@ responses, and run collections headless in CI.
 | Collections / environments | ✅ folder tree, `bruno.json`, `environments/*.bru` |
 | Variables | ✅ `{{var}}` interpolation, collection/env/request scopes, dynamic `{{$guid}}`/`{{$timestamp}}`/`{{$randomInt}}` |
 | Send | ✅ GET/POST/… with query/path params, headers, JSON/text/xml/form bodies (async, rustls) |
-| Auth | ✅ none / basic / bearer / api-key · ⏳ oauth2 / digest / awsv4 / ntlm / wsse |
+| Auth | ✅ none / basic / bearer / api-key / **OAuth2** (`client_credentials` + `password` grants, auto token fetch + cache) · ⏳ OAuth2 browser grants / digest / awsv4 / ntlm / wsse |
 | Assertions | ✅ `res.status` / `res.body.*` / `res.headers.*` with `eq`/`neq`/`gt`/`contains`/… |
 | Post-response vars | ✅ capture `res.body.*` into variables for request chaining |
 | Scripting | ✅ pre/post/test JS in a QuickJS Safe-Mode sandbox — `bru.*` / `req` / `res` / `test` / `expect` + a `pm.*` Postman shim; time/memory/stack-limited |

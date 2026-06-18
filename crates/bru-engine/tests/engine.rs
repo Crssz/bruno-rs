@@ -64,6 +64,63 @@ async fn runs_request_interpolates_asserts_and_captures_var() {
     );
 }
 
+/// A two-request mock: first connection answers the OAuth2 token endpoint,
+/// second captures the actual API request (to inspect its Authorization header).
+fn oauth_mock(token: &'static str) -> (String, thread::JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let respond = |stream: &mut std::net::TcpStream, body: String| {
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        };
+        // 1) token endpoint
+        let (mut s1, _) = listener.accept().unwrap();
+        let _ = s1.read(&mut [0u8; 4096]);
+        respond(
+            &mut s1,
+            format!("{{\"access_token\":\"{token}\",\"token_type\":\"Bearer\"}}"),
+        );
+        // 2) actual API request
+        let (mut s2, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let n = s2.read(&mut buf).unwrap_or(0);
+        let api_req = String::from_utf8_lossy(&buf[..n]).into_owned();
+        respond(&mut s2, "{\"ok\":true}".to_string());
+        api_req
+    });
+    (format!("http://{addr}"), handle)
+}
+
+#[tokio::test]
+async fn oauth2_client_credentials_fetches_and_attaches_bearer() {
+    let (base, server) = oauth_mock("tok-123");
+    let src = "meta {\n  name: O\n  type: http\n}\n\n\
+        get {\n  url: {{base}}/api\n  auth: oauth2\n}\n\n\
+        auth:oauth2 {\n  grant_type: client_credentials\n  access_token_url: {{base}}/token\n  client_id: id\n  client_secret: sec\n  scope: read\n}\n";
+    let file = bru_lang::parse(src).unwrap();
+
+    let mut ctx = RunContext::default();
+    ctx.vars.insert("base".to_string(), base.clone());
+
+    let outcome = run_request(&file, &mut ctx).await;
+    let api_req = server.join().unwrap();
+
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(outcome.response.as_ref().unwrap().status, 200);
+    assert!(
+        api_req
+            .to_lowercase()
+            .contains("authorization: bearer tok-123"),
+        "API request missing bearer token:\n{api_req}"
+    );
+    assert_eq!(ctx.token_cache.len(), 1, "token should be cached");
+}
+
 #[tokio::test]
 async fn pre_and_post_scripts_run_and_share_vars() {
     let (base, server) = mock_server(r#"{"id":42,"ok":true}"#);

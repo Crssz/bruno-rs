@@ -49,8 +49,32 @@ pub enum ApiKeyPlacement {
     Query,
 }
 
-/// The request's auth, by mode. Schemes beyond these (digest/oauth/awsv4/…)
-/// land in later milestones; an unsupported mode projects to [`Auth::None`].
+/// OAuth 2.0 settings (non-interactive grants). Browser grants
+/// (authorization_code/implicit) are deferred.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OAuth2 {
+    /// `client_credentials` | `password`.
+    pub grant_type: String,
+    pub access_token_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub scope: String,
+    /// `password` grant only.
+    pub username: String,
+    pub password: String,
+    /// `body` (client creds in form body) | `basic_auth_header`.
+    pub credentials_placement: String,
+    /// Where the obtained token is placed on the request: `header` | `query`.
+    pub token_placement: String,
+    pub token_header_prefix: String,
+    pub token_query_key: String,
+}
+
+/// The request's auth, by mode. Schemes beyond these (digest/awsv4/ntlm/…) land
+/// in later milestones; an unsupported mode projects to [`Auth::None`].
+// OAuth2 carries more fields than the other variants; there is exactly one Auth
+// per request, so the size difference is not worth boxing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Auth {
     #[default]
@@ -69,6 +93,7 @@ pub enum Auth {
         value: String,
         placement: ApiKeyPlacement,
     },
+    OAuth2(OAuth2),
 }
 
 /// A typed HTTP request projected from a `.bru` file.
@@ -191,6 +216,29 @@ impl BruFile {
                     ApiKeyPlacement::Header
                 },
             },
+            "oauth2" => {
+                let with_default = |key: &str, default: &str| {
+                    let val = v("auth:oauth2", key);
+                    if val.is_empty() {
+                        default.to_string()
+                    } else {
+                        val
+                    }
+                };
+                Auth::OAuth2(OAuth2 {
+                    grant_type: v("auth:oauth2", "grant_type"),
+                    access_token_url: v("auth:oauth2", "access_token_url"),
+                    client_id: v("auth:oauth2", "client_id"),
+                    client_secret: v("auth:oauth2", "client_secret"),
+                    scope: v("auth:oauth2", "scope"),
+                    username: v("auth:oauth2", "username"),
+                    password: v("auth:oauth2", "password"),
+                    credentials_placement: with_default("credentials_placement", "body"),
+                    token_placement: with_default("token_placement", "header"),
+                    token_header_prefix: v("auth:oauth2", "token_header_prefix"),
+                    token_query_key: with_default("token_query_key", "access_token"),
+                })
+            }
             _ => Auth::None,
         }
     }

@@ -81,6 +81,7 @@ async fn run(args: RunArgs) -> ExitCode {
     let mut ctx = RunContext {
         vars: base_vars(&args.path, args.env.as_deref()),
         client,
+        ..Default::default()
     };
 
     let (mut passed, mut failed) = (0u32, 0u32);

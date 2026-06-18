@@ -5,6 +5,7 @@
 //! scripts. Scripts run in the `bru-script` QuickJS Safe-Mode sandbox.
 
 mod context;
+mod oauth;
 
 pub use bru_script::TestResult;
 pub use context::{base_vars, find_collection_root};
@@ -13,7 +14,7 @@ use std::collections::HashMap;
 
 use bru_core::{
     eval_response_expr, evaluate_assertions, interpolate, AssertOutcome, Auth, Body, BruFile,
-    KeyVal, Request, ResponseFacts,
+    KeyVal, OAuth2, Request, ResponseFacts,
 };
 use bru_http::{HttpClient, HttpResponse};
 use bru_script::{run_script, ScriptInput, ScriptRequest, ScriptResponse};
@@ -27,6 +28,8 @@ use bru_script::{run_script, ScriptInput, ScriptRequest, ScriptResponse};
 pub struct RunContext {
     pub vars: HashMap<String, String>,
     pub client: HttpClient,
+    /// OAuth2 access tokens fetched this run, keyed per credentials.
+    pub token_cache: HashMap<String, String>,
 }
 
 /// The result of running one request.
@@ -101,6 +104,22 @@ pub async fn run_request(file: &BruFile, ctx: &mut RunContext) -> RunOutcome {
     }
 
     interpolate_request(&mut req, &ctx.vars);
+
+    // Resolve OAuth2: fetch a token from the token endpoint and place it on the
+    // request (interactive grants are not supported and would project to None).
+    if let Auth::OAuth2(cfg) = req.auth.clone() {
+        match oauth::fetch_token(&ctx.client, &mut ctx.token_cache, &cfg).await {
+            Ok(token) => oauth::apply_token(&mut req, &cfg, &token),
+            Err(e) => {
+                let mut outcome = RunOutcome::errored(name, format!("oauth2: {e}"));
+                outcome.method = req.method;
+                outcome.url = req.url;
+                outcome.tests = tests;
+                outcome.console = console;
+                return outcome;
+            }
+        }
+    }
 
     let resp = match ctx.client.send(&req).await {
         Ok(resp) => resp,
@@ -256,6 +275,15 @@ fn interpolate_request(req: &mut Request, vars: &HashMap<String, String>) {
             value: i(&value),
             placement,
         },
+        Auth::OAuth2(cfg) => Auth::OAuth2(OAuth2 {
+            access_token_url: i(&cfg.access_token_url),
+            client_id: i(&cfg.client_id),
+            client_secret: i(&cfg.client_secret),
+            scope: i(&cfg.scope),
+            username: i(&cfg.username),
+            password: i(&cfg.password),
+            ..cfg
+        }),
         other => other,
     };
 }
