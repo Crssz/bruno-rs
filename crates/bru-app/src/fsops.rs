@@ -49,7 +49,7 @@ pub fn validate(name: &str, at_root: bool) -> Result<(), String> {
 
 /// `meta.name` of a `.bru` (or a folder via its `folder.bru`), falling back to
 /// the file/dir stem.
-fn display_name(path: &Path) -> String {
+pub fn display_name(path: &Path) -> String {
     let meta = if path.is_dir() {
         path.join("folder.bru")
     } else {

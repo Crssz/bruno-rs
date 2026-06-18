@@ -7,10 +7,6 @@ pub struct BruFile {
 }
 
 impl BruFile {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// First block with the given name, if any (block names are unique in
     /// practice for the singular blocks we query, e.g. `meta`).
     pub fn block(&self, name: &str) -> Option<&Block> {

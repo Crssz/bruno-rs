@@ -7,14 +7,6 @@ use std::collections::HashMap;
 use bru_core::{Auth, Body, KeyVal, OAuth2, Request};
 use bru_http::HttpClient;
 
-fn kv(name: &str, value: &str) -> KeyVal {
-    KeyVal {
-        name: name.to_string(),
-        value: value.to_string(),
-        enabled: true,
-    }
-}
-
 fn cache_key(cfg: &OAuth2) -> String {
     format!(
         "{}|{}|{}|{}|{}",
@@ -33,13 +25,13 @@ pub async fn fetch_token(
         return Ok(tok.clone());
     }
 
-    let mut form = vec![kv("grant_type", &cfg.grant_type)];
+    let mut form = vec![KeyVal::new("grant_type", &cfg.grant_type)];
     if !cfg.scope.is_empty() {
-        form.push(kv("scope", &cfg.scope));
+        form.push(KeyVal::new("scope", &cfg.scope));
     }
     if cfg.grant_type == "password" {
-        form.push(kv("username", &cfg.username));
-        form.push(kv("password", &cfg.password));
+        form.push(KeyVal::new("username", &cfg.username));
+        form.push(KeyVal::new("password", &cfg.password));
     }
 
     // Client credentials go either in the form body or as HTTP Basic auth.
@@ -49,8 +41,8 @@ pub async fn fetch_token(
             password: cfg.client_secret.clone(),
         }
     } else {
-        form.push(kv("client_id", &cfg.client_id));
-        form.push(kv("client_secret", &cfg.client_secret));
+        form.push(KeyVal::new("client_id", &cfg.client_id));
+        form.push(KeyVal::new("client_secret", &cfg.client_secret));
         Auth::None
     };
 
@@ -94,7 +86,7 @@ pub fn apply_token(req: &mut Request, cfg: &OAuth2, token: &str) {
         } else {
             &cfg.token_query_key
         };
-        req.query.push(kv(key, token));
+        req.query.push(KeyVal::new(key, token));
     } else {
         let prefix = if cfg.token_header_prefix.is_empty() {
             "Bearer"
@@ -106,7 +98,7 @@ pub fn apply_token(req: &mut Request, cfg: &OAuth2, token: &str) {
         } else {
             format!("{prefix} {token}")
         };
-        req.headers.push(kv("Authorization", &value));
+        req.headers.push(KeyVal::new("Authorization", &value));
     }
     req.auth = Auth::None;
 }

@@ -6,8 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-bru-core.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 # QuickJS (bundled C source, pre-generated bindings — no libclang on Windows).
 rquickjs = "0.12"

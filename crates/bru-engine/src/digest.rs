@@ -166,13 +166,9 @@ pub fn authorization_header(
 /// Escape a value for an RFC 7616 quoted-string: backslash-escape `\` and `"`,
 /// and drop CR/LF so it can't terminate or inject into the header line.
 fn quote(s: &str) -> String {
-    s.chars()
-        .filter(|c| *c != '\r' && *c != '\n')
-        .flat_map(|c| match c {
-            '\\' | '"' => vec!['\\', c],
-            _ => vec![c],
-        })
-        .collect()
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\r', '\n'], "")
 }
 
 /// Derive a client nonce from the system clock (no `rand` dependency): the

@@ -15,12 +15,6 @@ type HmacSha256 = Hmac<Sha256>;
 
 const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 
-/// One header to include in the signed canonical request.
-pub struct SignedHeader {
-    pub name: String,
-    pub value: String,
-}
-
 /// The headers SigV4 produces for a request.
 pub struct SignedHeaders {
     pub amz_date: String,
@@ -41,27 +35,19 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
-/// Lowercase + trim a header value's internal runs of whitespace are NOT
-/// collapsed here (the test-suite "vanilla" vectors do not require it); values
-/// are trimmed of surrounding whitespace per the spec's canonicalization.
-fn canon_header_value(v: &str) -> String {
-    v.trim().to_string()
-}
-
 /// Compute the SigV4 signed headers.
 ///
 /// - `amz_date` is `YYYYMMDDTHHMMSSZ` (and the date stamp `YYYYMMDD` is derived
 ///   from its first 8 chars).
-/// - `headers` must already include `host` (and may include any other headers
-///   that should be signed); `x-amz-date` is added to the signed set
-///   automatically, as is `x-amz-security-token` when `session_token` is set.
+/// - `host` is the signed `host` header; `x-amz-date` is added automatically, as
+///   is `x-amz-security-token` when `session_token` is set.
 /// - `payload` is the raw request body bytes (empty slice for no body).
 #[allow(clippy::too_many_arguments)]
 pub fn sign(
     method: &str,
     canonical_uri: &str,
     canonical_query: &str,
-    headers: &[SignedHeader],
+    host: &str,
     payload: &[u8],
     amz_date: &str,
     access_key_id: &str,
@@ -72,13 +58,9 @@ pub fn sign(
 ) -> SignedHeaders {
     let date_stamp = &amz_date[..8];
 
-    // 1. Canonical headers: lowercase name, trimmed value, sorted by name.
-    //    Always include host + x-amz-date; include x-amz-security-token when
-    //    a session token is present.
-    let mut canon: Vec<(String, String)> = headers
-        .iter()
-        .map(|h| (h.name.to_ascii_lowercase(), canon_header_value(&h.value)))
-        .collect();
+    // 1. Canonical headers: host + x-amz-date, sorted by name; add
+    //    x-amz-security-token when a session token is present.
+    let mut canon: Vec<(String, String)> = vec![("host".to_string(), host.trim().to_string())];
     canon.push(("x-amz-date".to_string(), amz_date.to_string()));
     if !session_token.is_empty() {
         canon.push((
@@ -157,14 +139,6 @@ pub fn amz_date_from_unix(secs: u64) -> String {
     let y = if m <= 2 { y + 1 } else { y };
 
     format!("{y:04}{m:02}{d:02}T{hour:02}{min:02}{sec:02}Z")
-}
-
-fn kv(name: &str, value: &str) -> KeyVal {
-    KeyVal {
-        name: name.to_string(),
-        value: value.to_string(),
-        enabled: true,
-    }
 }
 
 /// Serialize the request body to the bytes that will be signed/sent.
@@ -253,7 +227,7 @@ pub fn resolve(req: &mut Request, now_unix: u64) -> Result<(), String> {
     }
     let mut encoded: Vec<(String, String)> = q
         .iter()
-        .map(|(k, v)| (uri_encode(k, true), uri_encode(v, true)))
+        .map(|(k, v)| (uri_encode(k), uri_encode(v)))
         .collect();
     encoded.sort();
     let canonical_query = encoded
@@ -273,10 +247,6 @@ pub fn resolve(req: &mut Request, now_unix: u64) -> Result<(), String> {
         region
     };
 
-    let headers = [SignedHeader {
-        name: "host".to_string(),
-        value: host,
-    }];
     let payload = payload_bytes(&req.body);
     let amz_date = amz_date_from_unix(now_unix);
 
@@ -284,7 +254,7 @@ pub fn resolve(req: &mut Request, now_unix: u64) -> Result<(), String> {
         &req.method.to_uppercase(),
         &canonical_uri,
         &canonical_query,
-        &headers,
+        &host,
         &payload,
         &amz_date,
         &access_key_id,
@@ -294,10 +264,10 @@ pub fn resolve(req: &mut Request, now_unix: u64) -> Result<(), String> {
         &region,
     );
 
-    req.headers.push(kv("x-amz-date", &signed.amz_date));
-    req.headers.push(kv("Authorization", &signed.authorization));
+    req.headers.push(KeyVal::new("x-amz-date", &signed.amz_date));
+    req.headers.push(KeyVal::new("Authorization", &signed.authorization));
     if let Some(token) = signed.security_token {
-        req.headers.push(kv("x-amz-security-token", &token));
+        req.headers.push(KeyVal::new("x-amz-security-token", &token));
     }
     req.auth = Auth::None;
     Ok(())
@@ -341,16 +311,15 @@ fn url_parse(raw: &str) -> Result<ParsedUrl, String> {
     })
 }
 
-/// RFC 3986 unreserved-set URI encoding used by SigV4. When `encode_slash` is
-/// false, `/` is left literal (for path segments).
-fn uri_encode(s: &str, encode_slash: bool) -> String {
+/// RFC 3986 unreserved-set URI encoding used by SigV4 for query keys/values
+/// (`/` is encoded; the path arrives already percent-encoded from `url::Url`).
+fn uri_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
                 out.push(b as char);
             }
-            b'/' if !encode_slash => out.push('/'),
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -367,15 +336,11 @@ mod tests {
     /// example.amazonaws.com, GET /, no query, empty body.
     #[test]
     fn get_vanilla_known_answer() {
-        let headers = [SignedHeader {
-            name: "host".to_string(),
-            value: "example.amazonaws.com".to_string(),
-        }];
         let signed = sign(
             "GET",
             "/",
             "",
-            &headers,
+            "example.amazonaws.com",
             b"",
             "20150830T123600Z",
             "AKIDEXAMPLE",
@@ -402,9 +367,8 @@ mod tests {
 
     #[test]
     fn uri_encode_rules() {
-        assert_eq!(uri_encode("a b~c", true), "a%20b~c");
-        assert_eq!(uri_encode("/a b/c", false), "/a%20b/c");
-        assert_eq!(uri_encode("/a b/c", true), "%2Fa%20b%2Fc");
+        assert_eq!(uri_encode("a b~c"), "a%20b~c");
+        assert_eq!(uri_encode("/a b/c"), "%2Fa%20b%2Fc");
     }
 
     #[test]

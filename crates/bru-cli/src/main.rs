@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use bru_engine::{base_vars, run_request, RunContext, RunOutcome};
 use bru_http::{HttpClient, SendOptions};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 
 #[derive(Parser)]
 #[command(
@@ -14,18 +14,6 @@ use clap::{Parser, Subcommand};
     version,
     about = "Run Bruno API collections from the command line"
 )]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Run a request file or a whole collection directory.
-    Run(RunArgs),
-}
-
-#[derive(Parser)]
 struct RunArgs {
     /// Path to a `.bru` request file or a collection directory.
     path: PathBuf,
@@ -54,10 +42,7 @@ struct RunArgs {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match cli.command {
-        Command::Run(args) => run(args).await,
-    }
+    run(RunArgs::parse()).await
 }
 
 async fn run(args: RunArgs) -> ExitCode {
@@ -163,11 +148,8 @@ async fn run(args: RunArgs) -> ExitCode {
         }
     }
 
-    if multi {
-        println!("\n{iterations} iterations, {passed} passed, {failed} failed");
-    } else {
-        println!("\n{passed} passed, {failed} failed");
-    }
+    let prefix = if multi { format!("{iterations} iterations, ") } else { String::new() };
+    println!("\n{prefix}{passed} passed, {failed} failed");
     if failed == 0 {
         ExitCode::SUCCESS
     } else {
@@ -284,14 +266,8 @@ fn print_outcome(o: &RunOutcome) {
     }
     for a in &o.assertions {
         let mark = if a.passed { "PASS" } else { "FAIL" };
-        if a.passed {
-            println!("  [{mark}] {} {} {}", a.expr, a.operator, a.expected);
-        } else {
-            println!(
-                "  [{mark}] {} {} {}  (actual: {})",
-                a.expr, a.operator, a.expected, a.actual
-            );
-        }
+        let extra = if a.passed { String::new() } else { format!("  (actual: {})", a.actual) };
+        println!("  [{mark}] {} {} {}{extra}", a.expr, a.operator, a.expected);
     }
     for t in &o.tests {
         let mark = if t.passed { "PASS" } else { "FAIL" };

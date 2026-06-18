@@ -23,7 +23,7 @@ fn serialize_block(block: &Block) -> String {
                 format!(
                     "{} {{\n{}\n}}",
                     block.name,
-                    indent_string(&body.join("\n"), 1)
+                    indent_string(&body.join("\n"))
                 )
             }
         }
@@ -89,7 +89,7 @@ fn serialize_annotations(annotations: &[Annotation]) -> String {
         .map(|a| match &a.value {
             None => format!("@{}", a.name),
             Some(v) if v.contains('\n') => {
-                format!("@{}('''\n{}\n''')", a.name, indent_string(v, 1))
+                format!("@{}('''\n{}\n''')", a.name, indent_string(v))
             }
             Some(v) => {
                 let quote = if v.contains('\'') { '"' } else { '\'' };
@@ -100,15 +100,14 @@ fn serialize_annotations(annotations: &[Annotation]) -> String {
     format!("{}\n", lines.join("\n"))
 }
 
-/// Port of `utils.indentString`: prefix every line with `2 * levels` spaces,
-/// normalizing line endings to `\n`.
-pub(crate) fn indent_string(s: &str, levels: usize) -> String {
+/// Port of `utils.indentString`: prefix every line with 2 spaces, normalizing
+/// line endings to `\n`.
+pub(crate) fn indent_string(s: &str) -> String {
     if s.is_empty() {
         return String::new();
     }
-    let indent = "  ".repeat(levels);
     split_lines(s)
-        .map(|line| format!("{indent}{line}"))
+        .map(|line| format!("  {line}"))
         .collect::<Vec<_>>()
         .join("\n")
 }

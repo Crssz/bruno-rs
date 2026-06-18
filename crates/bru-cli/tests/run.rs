@@ -87,7 +87,7 @@ fn run_collection_reports_pass_and_exits_zero() {
     .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_bru"))
-        .args(["run", dir.to_str().unwrap()])
+        .args([dir.to_str().unwrap()])
         .output()
         .expect("run bru");
 
@@ -117,7 +117,7 @@ fn failed_assertion_exits_nonzero() {
     .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_bru"))
-        .args(["run", dir.to_str().unwrap()])
+        .args([dir.to_str().unwrap()])
         .output()
         .expect("run bru");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -154,12 +154,7 @@ fn json_data_runs_once_per_row() {
     std::fs::write(&data, r#"[{"id":1},{"id":2},{"id":3}]"#).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_bru"))
-        .args([
-            "run",
-            dir.to_str().unwrap(),
-            "--data",
-            data.to_str().unwrap(),
-        ])
+        .args([dir.to_str().unwrap(), "--data", data.to_str().unwrap()])
         .output()
         .expect("run bru");
 
@@ -186,12 +181,7 @@ fn csv_data_runs_once_per_row() {
     std::fs::write(&data, "id,name\n10,alice\n20,bob\n").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_bru"))
-        .args([
-            "run",
-            dir.to_str().unwrap(),
-            "--data",
-            data.to_str().unwrap(),
-        ])
+        .args([dir.to_str().unwrap(), "--data", data.to_str().unwrap()])
         .output()
         .expect("run bru");
 

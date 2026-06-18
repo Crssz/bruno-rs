@@ -114,7 +114,6 @@ fn navigate<'a>(mut cur: &'a Json, path: &str) -> Option<&'a Json> {
 fn json_to_string(v: &Json) -> String {
     match v {
         Json::String(s) => s.clone(),
-        Json::Null => "null".to_string(),
         other => other.to_string(),
     }
 }

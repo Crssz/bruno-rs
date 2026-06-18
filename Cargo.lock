@@ -528,7 +528,6 @@ version = "0.0.0"
 dependencies = [
  "bru-lang",
  "serde_json",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -562,18 +561,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "bru-import"
-version = "0.0.0"
-dependencies = [
- "bru-core",
-]
-
-[[package]]
 name = "bru-lang"
 version = "0.0.0"
 dependencies = [
  "bru-core",
- "indexmap",
  "thiserror 2.0.18",
 ]
 
@@ -581,10 +572,8 @@ dependencies = [
 name = "bru-script"
 version = "0.0.0"
 dependencies = [
- "bru-core",
  "rquickjs",
  "serde_json",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2118,8 +2107,6 @@ checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
- "serde",
- "serde_core",
 ]
 
 [[package]]

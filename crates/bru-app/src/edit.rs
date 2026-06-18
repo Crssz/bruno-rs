@@ -139,13 +139,9 @@ pub fn set_meta_tags(file: &mut BruFile, tags: Vec<String>) {
     } else if let Some(e) = entries.iter_mut().find(|e| e.key.name() == "tags") {
         e.value = Value::List(tags);
     } else {
-        entries.push(Entry {
-            annotations: Vec::new(),
-            disabled: false,
-            local: false,
-            key: Key::Bare("tags".to_string()),
-            value: Value::List(tags),
-        });
+        let mut e = new_entry("tags", "");
+        e.value = Value::List(tags);
+        entries.push(e);
     }
 }
 

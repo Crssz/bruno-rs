@@ -7,5 +7,4 @@ license.workspace = true
 
 [dependencies]
 bru-core.workspace = true
-indexmap.workspace = true
 thiserror.workspace = true

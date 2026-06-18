@@ -1084,7 +1084,7 @@ impl App {
             }
             Message::RenamePrompt(path, is_folder) => {
                 self.menu = None;
-                let name = display_name_of(&path);
+                let name = fsops::display_name(&path);
                 self.modal = Some(Modal::Rename { path, is_folder, name, error: None });
             }
             Message::ClonePrompt(path, is_folder) => {
@@ -1094,7 +1094,7 @@ impl App {
             }
             Message::DeletePrompt(path, is_folder) => {
                 self.menu = None;
-                let name = display_name_of(&path);
+                let name = fsops::display_name(&path);
                 self.modal = Some(Modal::Delete { path, is_folder, name });
             }
             Message::CopyItem(path, is_folder) => {
@@ -1374,7 +1374,7 @@ impl App {
                     if let Some(section) = self.tabs[i].bulk {
                         let text = self.tabs[i].bulk_editor.text();
                         let rows = parse_bulk(&text);
-                        apply_bulk(&mut self.tabs[i].file, section.block(), rows);
+                        edit::replace_block_entries(&mut self.tabs[i].file, section.block(), rows);
                         self.tabs[i].recompute_dirty();
                     }
                 }
@@ -4817,9 +4817,6 @@ fn parse_bulk(text: &str) -> Vec<(String, String, bool, bool)> {
         .collect()
 }
 
-fn apply_bulk(file: &mut BruFile, block: &str, rows: Vec<(String, String, bool, bool)>) {
-    edit::replace_block_entries(file, block, rows);
-}
 
 /// Project a dictionary block's entries to editable `(name, value, enabled)`
 /// rows directly (used by settings tabs, which have no method block to project).
@@ -5102,20 +5099,6 @@ fn file_stem(path: &Path) -> String {
 
 /// `meta.name` of a `.bru` (or folder via its `folder.bru`), falling back to the
 /// file/dir stem — used to seed Rename/Delete dialogs.
-fn display_name_of(path: &Path) -> String {
-    let meta = if path.is_dir() {
-        path.join("folder.bru")
-    } else {
-        path.to_path_buf()
-    };
-    std::fs::read_to_string(&meta)
-        .ok()
-        .and_then(|t| bru_lang::parse(&t).ok())
-        .and_then(|f| f.request_name().map(str::to_string))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| file_stem(path))
-}
-
 /// Open the OS file manager with `path` selected (Windows Explorer).
 fn reveal_in_explorer(path: &Path) {
     #[cfg(target_os = "windows")]

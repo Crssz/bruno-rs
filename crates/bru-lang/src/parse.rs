@@ -158,22 +158,22 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_list_block(&mut self, name: String) -> Result<Block, ParseError> {
+    /// Read list items until a line that is exactly `]` (blanks skipped, trailing
+    /// commas stripped). Shared by `name [` blocks and `key: [` values; `name` is
+    /// only used to label an unterminated-list error.
+    fn read_list_items(&mut self, name: &str) -> Result<Vec<String>, ParseError> {
         let mut items = Vec::new();
         loop {
             match self.peek_line() {
                 None => {
                     return Err(ParseError::UnterminatedList {
-                        name,
+                        name: name.to_string(),
                         line: self.line_no(),
                     })
                 }
                 Some(line) if line.trim() == "]" => {
                     self.advance_line();
-                    return Ok(Block {
-                        name,
-                        content: BlockContent::List(items),
-                    });
+                    return Ok(items);
                 }
                 Some(line) if line.trim().is_empty() => self.advance_line(),
                 Some(line) => {
@@ -187,6 +187,11 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    fn parse_list_block(&mut self, name: String) -> Result<Block, ParseError> {
+        let items = self.read_list_items(&name)?;
+        Ok(Block { name, content: BlockContent::List(items) })
     }
 
     fn parse_dict_block(&mut self, name: String) -> Result<Block, ParseError> {
@@ -311,31 +316,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_list_value(&mut self, block: &str) -> Result<Value, ParseError> {
-        let mut items = Vec::new();
-        loop {
-            match self.peek_line() {
-                None => {
-                    return Err(ParseError::UnterminatedList {
-                        name: block.to_string(),
-                        line: self.line_no(),
-                    })
-                }
-                Some(line) if line.trim() == "]" => {
-                    self.advance_line();
-                    return Ok(Value::List(items));
-                }
-                Some(line) if line.trim().is_empty() => self.advance_line(),
-                Some(line) => {
-                    // Bruno comma-separates list items; strip a trailing comma so
-                    // a multi-item list round-trips (and real env secret lists import).
-                    let item = line.trim().trim_end_matches(',').trim();
-                    if !item.is_empty() {
-                        items.push(item.to_string());
-                    }
-                    self.advance_line();
-                }
-            }
-        }
+        Ok(Value::List(self.read_list_items(block)?))
     }
 
     /// Capture a `''' ... '''` value verbatim (with optional trailing

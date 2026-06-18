@@ -380,7 +380,12 @@ fn script_input(
         request: ScriptRequest {
             method: req.method.clone(),
             url: req.url.clone(),
-            headers: enabled_pairs(&req.headers),
+            headers: req
+                .headers
+                .iter()
+                .filter(|k| k.enabled)
+                .map(|k| (k.name.clone(), k.value.clone()))
+                .collect(),
         },
         response,
         script_dir,
@@ -402,13 +407,6 @@ fn script_response(
             .unwrap_or_else(|| serde_json::Value::String(text.to_string())),
         response_time_ms: resp.duration_ms,
     }
-}
-
-fn enabled_pairs(kvs: &[KeyVal]) -> Vec<(String, String)> {
-    kvs.iter()
-        .filter(|k| k.enabled)
-        .map(|k| (k.name.clone(), k.value.clone()))
-        .collect()
 }
 
 /// Find and parse a `WWW-Authenticate: Digest ...` header from a response.

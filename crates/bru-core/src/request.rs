@@ -12,6 +12,13 @@ pub struct KeyVal {
     pub enabled: bool,
 }
 
+impl KeyVal {
+    /// An enabled row from name/value.
+    pub fn new(name: &str, value: &str) -> Self {
+        KeyVal { name: name.to_string(), value: value.to_string(), enabled: true }
+    }
+}
+
 /// A pre/post-request variable binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Var {
