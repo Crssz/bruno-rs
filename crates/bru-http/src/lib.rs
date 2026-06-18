@@ -3,12 +3,19 @@
 //! Pure transport: it consumes an already-interpolated [`Request`] and returns a
 //! raw [`HttpResponse`]. Variable resolution, scripting, and assertions live in
 //! `bru-engine`; auth schemes beyond basic/bearer/api-key arrive later.
+//!
+//! Build one [`HttpClient`] per run and reuse it — it owns a connection pool, so
+//! a collection run keeps connections alive across requests.
 
 use std::time::{Duration, Instant};
 
 use bru_core::{ApiKeyPlacement, Auth, Body, Request};
 use reqwest::{Method, Url};
 use thiserror::Error;
+
+/// Default cap on a (decoded) response body: 100 MiB. Protects against
+/// unbounded buffering and decompression bombs.
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 100 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum HttpError {
@@ -20,14 +27,20 @@ pub enum HttpError {
     Client(#[source] reqwest::Error),
     #[error("request failed: {0}")]
     Request(#[source] reqwest::Error),
+    #[error("response body exceeded the {0}-byte limit")]
+    BodyTooLarge(usize),
 }
 
-/// Transport-level options.
+/// Options used to construct an [`HttpClient`].
 #[derive(Debug, Clone)]
 pub struct SendOptions {
-    /// Skip TLS certificate verification (`--insecure`).
+    /// Skip TLS certificate verification (`--insecure`). Dangerous: disables
+    /// chain *and* hostname checks for every request this client makes.
     pub insecure: bool,
+    /// Per-request timeout. `Duration::ZERO` means no timeout.
     pub timeout: Duration,
+    /// Maximum decoded response body size before the request errors.
+    pub max_response_bytes: usize,
 }
 
 impl Default for SendOptions {
@@ -35,7 +48,98 @@ impl Default for SendOptions {
         Self {
             insecure: false,
             timeout: Duration::from_secs(30),
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         }
+    }
+}
+
+/// A reusable HTTP client (connection pool + TLS config).
+#[derive(Debug, Clone)]
+pub struct HttpClient {
+    inner: reqwest::Client,
+    max_response_bytes: usize,
+}
+
+impl Default for HttpClient {
+    fn default() -> Self {
+        Self {
+            inner: reqwest::Client::new(),
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+        }
+    }
+}
+
+impl HttpClient {
+    /// Build a client from options. Reuse the result across a run.
+    pub fn new(opts: &SendOptions) -> Result<Self, HttpError> {
+        let mut builder = reqwest::Client::builder().danger_accept_invalid_certs(opts.insecure);
+        // reqwest treats a zero Duration as an immediate deadline; only set a
+        // timeout when one was actually requested.
+        if !opts.timeout.is_zero() {
+            builder = builder.timeout(opts.timeout);
+        }
+        Ok(Self {
+            inner: builder.build().map_err(HttpError::Client)?,
+            max_response_bytes: opts.max_response_bytes,
+        })
+    }
+
+    /// Send `req` and return the response.
+    pub async fn send(&self, req: &Request) -> Result<HttpResponse, HttpError> {
+        let method = Method::from_bytes(req.method.to_uppercase().as_bytes())
+            .map_err(|_| HttpError::InvalidMethod(req.method.clone()))?;
+
+        let url = build_url(req)?;
+        let mut builder = self.inner.request(method, url);
+
+        let has_ct = req
+            .headers
+            .iter()
+            .any(|h| h.enabled && h.name.eq_ignore_ascii_case("content-type"));
+        for h in req.headers.iter().filter(|h| h.enabled) {
+            builder = builder.header(&h.name, &h.value);
+        }
+
+        builder = apply_auth(builder, &req.auth);
+        builder = apply_body(builder, &req.body, has_ct);
+
+        let started = Instant::now();
+        let resp = builder.send().await.map_err(HttpError::Request)?;
+        let status = resp.status();
+        let headers = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| {
+                // Preserve non-ASCII header bytes (lossily) rather than dropping them.
+                (
+                    k.to_string(),
+                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
+        let body = self.read_capped(resp).await?;
+        let duration_ms = started.elapsed().as_millis();
+
+        Ok(HttpResponse {
+            status: status.as_u16(),
+            status_text: status.canonical_reason().unwrap_or("").to_string(),
+            headers,
+            body,
+            duration_ms,
+        })
+    }
+
+    /// Stream the body, aborting if it exceeds the configured cap (enforced on
+    /// *decoded* bytes, so a decompression bomb can't blow past the limit).
+    async fn read_capped(&self, mut resp: reqwest::Response) -> Result<Vec<u8>, HttpError> {
+        let mut body = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(HttpError::Request)? {
+            if body.len() + chunk.len() > self.max_response_bytes {
+                return Err(HttpError::BodyTooLarge(self.max_response_bytes));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
     }
 }
 
@@ -58,47 +162,6 @@ impl HttpResponse {
     pub fn json(&self) -> Option<serde_json::Value> {
         serde_json::from_slice(&self.body).ok()
     }
-}
-
-/// Send `req` and return the response.
-pub async fn send(req: &Request, opts: &SendOptions) -> Result<HttpResponse, HttpError> {
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(opts.insecure)
-        .timeout(opts.timeout)
-        .build()
-        .map_err(HttpError::Client)?;
-
-    let method = Method::from_bytes(req.method.to_uppercase().as_bytes())
-        .map_err(|_| HttpError::InvalidMethod(req.method.clone()))?;
-
-    let url = build_url(req)?;
-    let mut builder = client.request(method, url);
-
-    for h in req.headers.iter().filter(|h| h.enabled) {
-        builder = builder.header(&h.name, &h.value);
-    }
-
-    builder = apply_auth(builder, &req.auth);
-    builder = apply_body(builder, &req.body);
-
-    let started = Instant::now();
-    let resp = builder.send().await.map_err(HttpError::Request)?;
-    let status = resp.status();
-    let headers = resp
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect();
-    let body = resp.bytes().await.map_err(HttpError::Request)?.to_vec();
-    let duration_ms = started.elapsed().as_millis();
-
-    Ok(HttpResponse {
-        status: status.as_u16(),
-        status_text: status.canonical_reason().unwrap_or("").to_string(),
-        headers,
-        body,
-        duration_ms,
-    })
 }
 
 /// Substitute `:path` params, then parse the URL and append enabled query params
@@ -170,23 +233,42 @@ fn apply_auth(builder: reqwest::RequestBuilder, auth: &Auth) -> reqwest::Request
     }
 }
 
-fn apply_body(builder: reqwest::RequestBuilder, body: &Body) -> reqwest::RequestBuilder {
+/// Apply the body. A default `Content-Type` is only added when the request did
+/// not already declare one (`has_ct`), so an explicit header is never duplicated.
+fn apply_body(
+    builder: reqwest::RequestBuilder,
+    body: &Body,
+    has_ct: bool,
+) -> reqwest::RequestBuilder {
     const CT: &str = "content-type";
+    let with_default_ct = |b: reqwest::RequestBuilder, ct: &str| {
+        if has_ct {
+            b
+        } else {
+            b.header(CT, ct)
+        }
+    };
     match body {
         Body::None => builder,
-        Body::Json(s) => builder.header(CT, "application/json").body(s.clone()),
-        Body::Text(s) => builder.header(CT, "text/plain").body(s.clone()),
-        Body::Xml(s) => builder.header(CT, "application/xml").body(s.clone()),
-        Body::Sparql(s) => builder
-            .header(CT, "application/sparql-query")
-            .body(s.clone()),
+        Body::Json(s) => with_default_ct(builder.body(s.clone()), "application/json"),
+        Body::Text(s) => with_default_ct(builder.body(s.clone()), "text/plain"),
+        Body::Xml(s) => with_default_ct(builder.body(s.clone()), "application/xml"),
+        Body::Sparql(s) => with_default_ct(builder.body(s.clone()), "application/sparql-query"),
         Body::FormUrlEncoded(fields) => {
             let pairs: Vec<(&str, &str)> = fields
                 .iter()
                 .filter(|f| f.enabled)
                 .map(|f| (f.name.as_str(), f.value.as_str()))
                 .collect();
-            builder.form(&pairs)
+            if has_ct {
+                // Encode manually so reqwest's `.form()` doesn't re-set Content-Type.
+                match serde_urlencoded::to_string(&pairs) {
+                    Ok(encoded) => builder.body(encoded),
+                    Err(_) => builder.form(&pairs),
+                }
+            } else {
+                builder.form(&pairs)
+            }
         }
     }
 }

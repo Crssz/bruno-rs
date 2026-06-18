@@ -2,4 +2,5 @@
 /reference
 **/*.rs.bk
 *.pdb
+*.log
 .DS_Store

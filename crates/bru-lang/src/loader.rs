@@ -10,10 +10,14 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+/// Maximum folder nesting depth walked, to bound recursion on a pathological
+/// (or malicious) directory tree.
+const MAX_DEPTH: usize = 64;
+
 /// Load the collection rooted at `dir`.
 pub fn load_collection(dir: &Path) -> io::Result<CollectionTree> {
     let name = collection_name(dir).unwrap_or_else(|| dir_name(dir));
-    let root = load_folder(dir, name.clone())?;
+    let root = load_folder(dir, name.clone(), 0)?;
     Ok(CollectionTree { name, root })
 }
 
@@ -36,7 +40,7 @@ fn dir_name(dir: &Path) -> String {
         .unwrap_or_else(|| dir.display().to_string())
 }
 
-fn load_folder(dir: &Path, name: String) -> io::Result<Folder> {
+fn load_folder(dir: &Path, name: String, depth: usize) -> io::Result<Folder> {
     let mut folders = Vec::new();
     let mut requests = Vec::new();
 
@@ -50,8 +54,15 @@ fn load_folder(dir: &Path, name: String) -> io::Result<Folder> {
             if dname == "environments" || dname.starts_with('.') || dname == "node_modules" {
                 continue;
             }
+            if depth >= MAX_DEPTH {
+                eprintln!(
+                    "warning: skipping {} (max folder depth {MAX_DEPTH} reached)",
+                    path.display()
+                );
+                continue;
+            }
             let sub_name = folder_name(&path).unwrap_or(dname);
-            folders.push(load_folder(&path, sub_name)?);
+            folders.push(load_folder(&path, sub_name, depth + 1)?);
         } else if is_request_file(&path) {
             requests.push(load_request(&path));
         }

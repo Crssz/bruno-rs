@@ -77,3 +77,17 @@ fn empty_input_and_single_block() {
     assert_eq!(round_trip("").unwrap(), "");
     rt("meta {\n  type: collection\n}\n");
 }
+
+#[test]
+fn unterminated_multiline_errors_without_swallowing_next_block() {
+    // A stray unterminated ''' must NOT capture across blocks to a later ''';
+    // it must fail loudly instead of silently corrupting the file.
+    let src =
+        "headers {\n  A: '''oops\n  B: plain\n}\n\nvars:pre-request {\n  token: '''secret'''\n}\n";
+    assert!(parse(src).is_err());
+}
+
+#[test]
+fn trailing_text_after_multiline_errors() {
+    assert!(parse("meta {\n  k: '''a'''junk'''\n}\n").is_err());
+}

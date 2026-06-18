@@ -3,7 +3,9 @@
 //! Open a Bruno collection, browse its request tree, and **send** the selected
 //! request — the response (status, timing, assertions, body) renders in the
 //! detail pane. Sending is async via iced `Task::perform` over `bru-engine`, so
-//! the UI never blocks on the network.
+//! the network never blocks the UI. (Folder open and request preview do small
+//! local file reads on the UI thread; the env picker and fully-async IO are
+//! tracked follow-ups.)
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -11,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use bru_core::{CollectionTree, Folder};
 use bru_engine::{base_vars, run_request, RunContext, RunOutcome};
-use bru_http::SendOptions;
+use bru_http::{HttpClient, SendOptions};
 use iced::widget::{button, column, container, row, scrollable, text, Column};
 use iced::{Center, Element, Fill, Font, Padding, Task};
 
@@ -77,26 +79,13 @@ impl App {
                 Task::none()
             }
             Message::Send => {
-                let (Some(path), Some(text)) = (self.selected.clone(), self.detail.clone()) else {
+                let Some(path) = self.selected.clone() else {
                     return Task::none();
                 };
                 self.sending = true;
                 self.result = None;
                 self.status = "Sending…".to_string();
-                let vars = base_vars(&path, None);
-                let options = SendOptions::default();
-                Task::perform(
-                    async move {
-                        match bru_lang::parse(&text) {
-                            Ok(file) => {
-                                let mut ctx = RunContext { vars, options };
-                                Box::new(run_request(&file, &mut ctx).await)
-                            }
-                            Err(e) => Box::new(RunOutcome::errored("request", format!("{e}"))),
-                        }
-                    },
-                    Message::Sent,
-                )
+                Task::perform(send_request(path), Message::Sent)
             }
             Message::Sent(outcome) => {
                 self.sending = false;
@@ -199,6 +188,30 @@ impl App {
             }
         }
     }
+}
+
+/// Re-read the request file at send time (so on-disk edits are picked up), build
+/// a one-off client, run it, and box the outcome for the `Sent` message.
+async fn send_request(path: PathBuf) -> Box<RunOutcome> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "request".to_string());
+    let vars = base_vars(&path, None);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => return Box::new(RunOutcome::errored(name, format!("read error: {e}"))),
+    };
+    let file = match bru_lang::parse(&text) {
+        Ok(f) => f,
+        Err(e) => return Box::new(RunOutcome::errored(name, format!("parse error: {e}"))),
+    };
+    let client = match HttpClient::new(&SendOptions::default()) {
+        Ok(c) => c,
+        Err(e) => return Box::new(RunOutcome::errored(name, format!("{e}"))),
+    };
+    let mut ctx = RunContext { vars, client };
+    Box::new(run_request(&file, &mut ctx).await)
 }
 
 fn summarize(outcome: &RunOutcome) -> String {

@@ -224,7 +224,12 @@ fn method_dict_value<'a>(block: &'a crate::model::Block, key: &str) -> Option<&'
 /// `outdentString`). Turns stored block text into the real body payload.
 fn outdent(s: &str) -> String {
     s.split('\n')
-        .map(|line| line.strip_prefix("  ").unwrap_or(line))
+        .map(|line| {
+            // Normalize CRLF: drop a trailing '\r' so bodies don't carry stray
+            // carriage returns (common when a .bru is authored on Windows).
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            line.strip_prefix("  ").unwrap_or(line)
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }

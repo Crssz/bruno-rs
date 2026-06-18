@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use bru_engine::{base_vars, run_request, RunContext, RunOutcome};
-use bru_http::SendOptions;
+use bru_http::{HttpClient, SendOptions};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -61,12 +61,26 @@ async fn run(args: RunArgs) -> ExitCode {
         }
     };
 
+    if args.insecure {
+        eprintln!(
+            "WARNING: TLS certificate verification is DISABLED for all requests (--insecure)."
+        );
+    }
+    let options = SendOptions {
+        insecure: args.insecure,
+        timeout: Duration::from_secs(args.timeout),
+        ..SendOptions::default()
+    };
+    let client = match HttpClient::new(&options) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let mut ctx = RunContext {
         vars: base_vars(&args.path, args.env.as_deref()),
-        options: SendOptions {
-            insecure: args.insecure,
-            timeout: Duration::from_secs(args.timeout),
-        },
+        client,
     };
 
     let (mut passed, mut failed) = (0u32, 0u32);
@@ -153,6 +167,18 @@ fn print_outcome(o: &RunOutcome) {
         }
     }
     for (k, v) in &o.vars_set {
-        println!("  set var {k} = {v}");
+        println!("  set var {k} = {}", redact(k, v));
+    }
+}
+
+/// Mask values captured into secret-looking variable names so tokens don't land
+/// in CI logs or shell history.
+fn redact(name: &str, value: &str) -> String {
+    const SECRETISH: &[&str] = &["token", "secret", "password", "passwd", "key", "auth"];
+    let lower = name.to_lowercase();
+    if SECRETISH.iter().any(|s| lower.contains(s)) {
+        "***".to_string()
+    } else {
+        value.to_string()
     }
 }

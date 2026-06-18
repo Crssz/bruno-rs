@@ -86,6 +86,22 @@ fn assertion_operators_and_json_paths() {
 }
 
 #[test]
+fn eq_is_string_comparison_not_numeric_coercion() {
+    let body = serde_json::json!({"v": "1e3", "nan": "NaN"});
+    let f = facts(200, &[], &body);
+    let a = |expr: &str, value: &str| Assertion {
+        expr: expr.to_string(),
+        value: value.to_string(),
+        enabled: true,
+    };
+    // "1e3" must NOT equal "1000" (no numeric coercion on eq).
+    assert!(!evaluate_assertions(&[a("res.body.v", "1000")], &f)[0].passed);
+    assert!(evaluate_assertions(&[a("res.body.v", "1e3")], &f)[0].passed);
+    // "NaN" eq "NaN" must pass (string equality), not fail.
+    assert!(evaluate_assertions(&[a("res.body.nan", "NaN")], &f)[0].passed);
+}
+
+#[test]
 fn response_expr_resolves_nested_and_indexed() {
     let body = serde_json::json!({"data": {"items": [{"id": 7}]}});
     let f = facts(201, &[], &body);

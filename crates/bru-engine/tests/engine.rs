@@ -65,6 +65,24 @@ async fn runs_request_interpolates_asserts_and_captures_var() {
 }
 
 #[tokio::test]
+async fn content_type_not_duplicated_when_header_present() {
+    let (base, server) = mock_server(r#"{"ok":true}"#);
+    let src = "meta {\n  name: C\n  type: http\n}\n\n\
+        post {\n  url: URL\n  body: json\n  auth: none\n}\n\n\
+        headers {\n  content-type: application/json\n}\n\n\
+        body:json {\n  {\n    \"a\": 1\n  }\n}\n";
+    let file = bru_lang::parse(&src.replace("URL", &format!("{base}/c"))).unwrap();
+
+    let mut ctx = RunContext::default();
+    let outcome = run_request(&file, &mut ctx).await;
+    let sent = server.join().unwrap();
+
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    let count = sent.to_lowercase().matches("content-type:").count();
+    assert_eq!(count, 1, "expected exactly one content-type:\n{sent}");
+}
+
+#[tokio::test]
 async fn failed_assertion_marks_outcome_failed() {
     let (base, server) = mock_server(r#"{"status":"error"}"#);
     let src = "meta {\n  name: X\n  type: http\n}\n\nget {\n  url: URL\n  auth: none\n}\n\nassert {\n  res.status: 404\n}\n";

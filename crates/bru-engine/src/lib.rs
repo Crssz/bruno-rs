@@ -14,14 +14,17 @@ use bru_core::{
     eval_response_expr, evaluate_assertions, interpolate, AssertOutcome, Auth, Body, BruFile,
     Request, ResponseFacts,
 };
-use bru_http::{send, HttpResponse, SendOptions};
+use bru_http::{HttpClient, HttpResponse};
 
-/// Mutable run state: the merged variable map (env → collection → request →
-/// runtime, highest last) plus transport options.
+/// Mutable run state: the merged variable map plus a reusable HTTP client.
+///
+/// Variable precedence, lowest to highest: collection vars → environment vars →
+/// request pre-request vars → runtime/post-response captures (each inserted later
+/// overrides earlier ones in `vars`).
 #[derive(Debug, Clone, Default)]
 pub struct RunContext {
     pub vars: HashMap<String, String>,
-    pub options: SendOptions,
+    pub client: HttpClient,
 }
 
 /// The result of running one request.
@@ -74,7 +77,9 @@ pub async fn run_request(file: &BruFile, ctx: &mut RunContext) -> RunOutcome {
         };
     };
 
-    // Pre-request vars feed interpolation of this very request.
+    // Pre-request vars feed interpolation of this very request. The `local`
+    // (@) flag is preserved on the model but is a no-op here in M1: nothing is
+    // persisted back to environment files, so every var is already run-scoped.
     for v in &req.vars_pre {
         if v.enabled {
             ctx.vars.insert(v.name.clone(), v.value.clone());
@@ -82,7 +87,7 @@ pub async fn run_request(file: &BruFile, ctx: &mut RunContext) -> RunOutcome {
     }
     interpolate_request(&mut req, &ctx.vars);
 
-    match send(&req, &ctx.options).await {
+    match ctx.client.send(&req).await {
         Ok(resp) => {
             let json = resp.json();
             let text = resp.text();

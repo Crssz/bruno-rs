@@ -167,8 +167,11 @@ fn compare(actual: Option<&str>, operator: &str, expected: &str) -> bool {
         return false;
     };
     match operator {
-        "eq" => values_equal(actual, expected),
-        "neq" => !values_equal(actual, expected),
+        // String comparison: `res.status` etc. already stringify cleanly, and
+        // string `eq` avoids numeric-coercion surprises (`1e3` == `1000`,
+        // `NaN` != `NaN`). Use gt/gte/lt/lte for numeric ordering.
+        "eq" => actual == expected,
+        "neq" => actual != expected,
         "contains" => actual.contains(expected),
         "notContains" => !actual.contains(expected),
         "gt" | "gte" | "lt" | "lte" => match (actual.parse::<f64>(), expected.parse::<f64>()) {
@@ -181,14 +184,5 @@ fn compare(actual: Option<&str>, operator: &str, expected: &str) -> bool {
             _ => false,
         },
         _ => false,
-    }
-}
-
-/// Equality that compares numerically when both sides parse as numbers, else as
-/// strings (so `200` == `200` and `ok` == `ok`).
-fn values_equal(a: &str, b: &str) -> bool {
-    match (a.parse::<f64>(), b.parse::<f64>()) {
-        (Ok(x), Ok(y)) => x == y,
-        _ => a == b,
     }
 }

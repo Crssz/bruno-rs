@@ -38,6 +38,8 @@ pub enum ParseError {
     UnterminatedQuotedKey { line: usize },
     #[error("line {line}: unterminated ''' block")]
     UnterminatedMultiline { line: usize },
+    #[error("line {line}: unexpected text after ''' value: `{got}`")]
+    UnexpectedTrailing { line: usize, got: String },
 }
 
 /// Parse `.bru` text into a [`BruFile`].
@@ -337,16 +339,21 @@ impl<'a> Parser<'a> {
         // Byte offset of the opening ''' in the source.
         let open_off = line_start + (line.len() - vtrim.len());
         let inner_start = open_off + 3;
-        let close_rel =
-            self.input[inner_start..]
-                .find("'''")
-                .ok_or(ParseError::UnterminatedMultiline {
-                    line: self.line_no(),
-                })?;
+        // Bound the closing-''' search to THIS block: never search past the
+        // block's `}` line. Otherwise a single unterminated ''' would silently
+        // swallow everything up to the next ''' anywhere later in the file.
+        let region = &self.input[inner_start..];
+        let limit = block_close_offset(region);
+        let close_rel = region[..limit]
+            .find("'''")
+            .ok_or(ParseError::UnterminatedMultiline {
+                line: self.line_no(),
+            })?;
         let inner = self.input[inner_start..inner_start + close_rel].to_string();
         let after_close = inner_start + close_rel + 3;
 
-        // Whatever remains on the closing line after ''' may hold an @contentType.
+        // Whatever remains on the closing line after ''' may hold an @contentType;
+        // anything else is malformed and must not be silently dropped.
         let tail_end = self.input[after_close..]
             .find('\n')
             .map(|i| after_close + i)
@@ -356,6 +363,12 @@ impl<'a> Parser<'a> {
             .strip_prefix("@contentType(")
             .and_then(|t| t.strip_suffix(')'))
             .map(|t| t.to_string());
+        if content_type.is_none() && !tail.is_empty() {
+            return Err(ParseError::UnexpectedTrailing {
+                line: self.line_no(),
+                got: tail.to_string(),
+            });
+        }
 
         // Advance the cursor past the closing line.
         self.pos = tail_end;
@@ -367,6 +380,26 @@ impl<'a> Parser<'a> {
             text: inner,
             content_type,
         })
+    }
+}
+
+/// Byte offset within `region` of the first line that is exactly `}` (a block
+/// closer at column 0), or `region.len()` if there is none. Used to bound a
+/// `'''` value's closing search to its own block.
+fn block_close_offset(region: &str) -> usize {
+    let mut pos = 0;
+    loop {
+        let line_end = region[pos..]
+            .find('\n')
+            .map(|i| pos + i)
+            .unwrap_or(region.len());
+        if &region[pos..line_end] == "}" {
+            return pos;
+        }
+        if line_end >= region.len() {
+            return region.len();
+        }
+        pos = line_end + 1;
     }
 }
 
