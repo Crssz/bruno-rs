@@ -1,7 +1,5 @@
 //! The lossless `.bru` document model. See the crate docs for the design rationale.
 
-use indexmap::IndexMap;
-
 /// A parsed `.bru` file: an ordered sequence of named blocks.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BruFile {
@@ -31,7 +29,41 @@ impl BruFile {
             _ => None,
         }
     }
+
+    /// The request's display name (`meta.name`), if present.
+    pub fn request_name(&self) -> Option<&str> {
+        self.dict_value("meta", "name")
+    }
+
+    /// The request's `meta.seq` ordering hint, if parseable.
+    pub fn seq(&self) -> Option<i64> {
+        self.dict_value("meta", "seq")?.trim().parse().ok()
+    }
+
+    /// The HTTP method, derived from the method block (`get`/`post`/… or a custom
+    /// `http { method: ... }`). Returns uppercase for display.
+    pub fn request_method(&self) -> Option<String> {
+        for b in &self.blocks {
+            if HTTP_VERBS.contains(&b.name.as_str()) {
+                return Some(b.name.to_uppercase());
+            }
+            if b.name == "http" {
+                if let BlockContent::Dict(entries) = &b.content {
+                    if let Some(m) = entries.iter().find(|e| e.key.name() == "method") {
+                        return Some(m.value.as_inline().to_uppercase());
+                    }
+                }
+                return Some("HTTP".to_string());
+            }
+        }
+        None
+    }
 }
+
+/// Standard HTTP verbs that appear as method block names.
+pub const HTTP_VERBS: &[&str] = &[
+    "get", "post", "put", "patch", "delete", "head", "options", "trace", "connect",
+];
 
 /// One top-level block, e.g. `meta { ... }`, `headers { ... }`, `body:json { ... }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,8 +149,3 @@ pub struct Annotation {
     /// `None` for a bare flag annotation (`@name`); `Some` for `@name(value)`.
     pub value: Option<String>,
 }
-
-/// A reusable ordered string map for the future semantic layer. Re-exported so
-/// downstream crates depend on one `indexmap` version. (Not used by the lossless
-/// model itself, which preserves order via `Vec`.)
-pub type OrderedMap = IndexMap<String, String>;

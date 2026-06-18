@@ -18,6 +18,8 @@
 //! this model in later milestones (when `bru-http`/`bru-app` need it); it is a
 //! *view*, never the serialization source of truth.
 
+mod collection;
 mod model;
 
-pub use model::{Annotation, Block, BlockContent, BruFile, Entry, Key, Value};
+pub use collection::{CollectionTree, Folder, RequestItem};
+pub use model::{Annotation, Block, BlockContent, BruFile, Entry, Key, Value, HTTP_VERBS};
