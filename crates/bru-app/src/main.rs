@@ -103,6 +103,9 @@ struct App {
     /// hover preview. Recomputed on collection load / env change / env save so
     /// `view()` (which runs on every mouse move) never touches disk.
     vars: HashMap<String, String>,
+    /// Current git branch of the open collection (read from `.git/HEAD` on load),
+    /// shown as a chip in the top bar. None when the collection isn't a git repo.
+    git_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -629,6 +632,9 @@ enum Message {
     MoveItem(PathBuf, i32),
     OpenSettings(PathBuf, TabKind),
     GenerateCode(PathBuf),
+    /// Generate code for the active tab's in-memory request (includes unsaved
+    /// edits; works for never-saved draft tabs). Fired by the URL-bar `</>` icon.
+    GenerateCodeActive,
     CopyText(String),
 
     // ── variable value popover ──
@@ -737,6 +743,7 @@ impl App {
                 self.status = format!("Loaded \"{}\"", tree.name);
                 self.collection = Some(tree);
                 self.envs = scan_envs(&dir);
+                self.git_branch = git_branch(&dir);
                 self.collection_dir = Some(dir);
                 self.selected_env = None;
                 self.collapsed.clear();
@@ -1234,6 +1241,16 @@ impl App {
                     .and_then(|t| bru_lang::parse(&t).ok())
                     .and_then(|f| f.to_request());
                 match req {
+                    Some(r) => self.modal = Some(Modal::Code { code: gen_curl(&r) }),
+                    None => self.status = "Not an HTTP request".to_string(),
+                }
+            }
+            Message::GenerateCodeActive => {
+                match self
+                    .active
+                    .and_then(|i| self.tabs.get(i))
+                    .and_then(|t| t.file.to_request())
+                {
                     Some(r) => self.modal = Some(Modal::Code { code: gen_curl(&r) }),
                     None => self.status = "Not an HTTP request".to_string(),
                 }
@@ -2323,7 +2340,11 @@ impl App {
         if self.console_open {
             center = center.push(self.console_panel());
         }
-        let body = column![self.top_bar(), row![self.sidebar(), center].height(Fill)];
+        let body = column![
+            self.top_bar(),
+            row![self.sidebar(), center].height(Fill),
+            self.status_bar(),
+        ];
         let base = container(body)
             .style(|_| panel(BG(), None))
             .width(Fill)
@@ -3198,12 +3219,59 @@ impl App {
             }
         });
 
+        // Git branch chip (only when the collection lives in a repo).
+        let branch: Element<'_, Message> = match &self.git_branch {
+            Some(b) => row![
+                text("\u{2387}").size(12).color(MUTED()),
+                text(b.clone()).size(12).color(SUBTEXT()),
+            ]
+            .spacing(3)
+            .align_y(Center)
+            .into(),
+            None => Space::new().into(),
+        };
+
+        // Collection-scoped run / settings icons (only with a collection open).
+        let coll_actions: Element<'_, Message> = match &self.collection_dir {
+            Some(dir) => row![
+                tooltip(
+                    button(text("\u{26A1}").size(14).color(SUBTEXT()))
+                        .style(|_, s| icon_button(s, SUBTEXT()))
+                        .padding(Padding::from([2, 6]))
+                        .on_press(Message::RunFolder(dir.clone())),
+                    container(text("Run collection").size(11))
+                        .style(|_| menu_panel())
+                        .padding(4),
+                    tooltip::Position::Bottom,
+                ),
+                tooltip(
+                    button(text("\u{2699}").size(14).color(SUBTEXT()))
+                        .style(|_, s| icon_button(s, SUBTEXT()))
+                        .padding(Padding::from([2, 6]))
+                        .on_press(Message::OpenSettings(
+                            dir.join("collection.bru"),
+                            TabKind::CollectionSettings,
+                        )),
+                    container(text("Collection settings").size(11))
+                        .style(|_| menu_panel())
+                        .padding(4),
+                    tooltip::Position::Bottom,
+                ),
+            ]
+            .spacing(2)
+            .align_y(Center)
+            .into(),
+            None => Space::new().into(),
+        };
+
         container(
             row![
                 button(text("Open Collection").size(13))
                     .style(|_, s| ghost_button(s))
                     .on_press(Message::OpenFolder),
                 text(name).size(13).color(ACCENT()).font(BOLD),
+                branch,
+                coll_actions,
                 fill_x(),
                 checkbox(self.developer_mode)
                     .label("Dev Mode")
@@ -3213,10 +3281,16 @@ impl App {
                     .style(checkbox_style),
                 text("Env:").size(12).color(MUTED()),
                 env_selector,
-                button(text("\u{2699}").size(14).color(SUBTEXT()))
-                    .style(|_, s| icon_button(s, SUBTEXT()))
-                    .padding(Padding::from([2, 6]))
-                    .on_press(Message::OpenEnvEditor),
+                tooltip(
+                    button(text("\u{2699}").size(14).color(SUBTEXT()))
+                        .style(|_, s| icon_button(s, SUBTEXT()))
+                        .padding(Padding::from([2, 6]))
+                        .on_press(Message::OpenEnvEditor),
+                    container(text("Manage environments").size(11))
+                        .style(|_| menu_panel())
+                        .padding(4),
+                    tooltip::Position::Bottom,
+                ),
                 button(text("Console").size(12).color(if self.console_open {
                     ACCENT()
                 } else {
@@ -3252,6 +3326,37 @@ impl App {
             .spacing(12)
             .align_y(Center)
             .padding(Padding::from([6, 12])),
+        )
+        .style(|_| panel(MANTLE(), Some(BORDER1())))
+        .width(Fill)
+        .into()
+    }
+
+    /// The bottom status bar: quick actions (Search / Cookies / Dev Tools) on the
+    /// right and the app version, mirroring Bruno's footer.
+    fn status_bar(&self) -> Element<'_, Message> {
+        let foot_btn = |label: &str, active: bool, msg: Message| {
+            button(text(label.to_string()).size(11).color(if active {
+                ACCENT()
+            } else {
+                SUBTEXT()
+            }))
+            .style(|_, s| icon_button(s, SUBTEXT()))
+            .padding(Padding::from([2, 8]))
+            .on_press(msg)
+        };
+        container(
+            row![
+                fill_x(),
+                foot_btn("Search", false, Message::OpenPalette),
+                foot_btn("Dev Tools", self.console_open, Message::ToggleConsole),
+                text(concat!("v", env!("CARGO_PKG_VERSION")))
+                    .size(11)
+                    .color(MUTED()),
+            ]
+            .spacing(14)
+            .align_y(Center)
+            .padding(Padding::from([3, 12])),
         )
         .style(|_| panel(MANTLE(), Some(BORDER1())))
         .width(Fill)
@@ -3690,18 +3795,34 @@ impl App {
             .width(Fill);
 
         let send = button(
-            text(if tab.sending { "Sending..." } else { "Send" })
-                .size(13)
-                .color(BLACK),
+            text(if tab.sending {
+                "Sending..."
+            } else {
+                "Send \u{2192}"
+            })
+            .size(13)
+            .color(BLACK),
         )
         .style(|_, _| solid_button(ACCENT(), BLACK))
         .padding(Padding::from([6, 16]))
         .on_press_maybe(can_send.then_some(Message::Send));
 
+        let code_btn = tooltip(
+            button(text("</>").size(13).color(SUBTEXT()))
+                .style(|_, s| icon_button(s, SUBTEXT()))
+                .padding(Padding::from([6, 8]))
+                .on_press(Message::GenerateCodeActive),
+            container(text("Generate code (curl)").size(11))
+                .style(|_| menu_panel())
+                .padding(4),
+            tooltip::Position::Bottom,
+        );
+
         let bar = container(
             row![
                 method_dd,
                 url_input,
+                code_btn,
                 button(text("Save").size(13).color(TEXT()))
                     .style(|_, s| ghost_button(s))
                     .padding(Padding::from([6, 12]))
@@ -3733,10 +3854,7 @@ impl App {
     }
 
     fn req_tab_strip(&self, tab: &Tab, req: Option<&Request>) -> Element<'_, Message> {
-        let mut r = row![]
-            .spacing(2)
-            .padding(Padding::from([0, 8]))
-            .align_y(Center);
+        let mut tabs = row![].spacing(2).align_y(Center);
         for t in ReqTab::ALL {
             // Hide the Examples tab unless the request actually has examples.
             if t == ReqTab::Examples && example_count(&tab.file) == 0 {
@@ -3752,7 +3870,7 @@ impl App {
             if let Some(ind) = self.tab_indicator(t, tab, req) {
                 label = label.push(ind);
             }
-            r = r.push(
+            tabs = tabs.push(
                 button(label)
                     .style(move |_, _| tab_button(active))
                     .padding(Padding::from([6, 10]))
@@ -3760,8 +3878,18 @@ impl App {
             );
         }
 
-        // Right-aligned mode selector for Body / Auth, like Bruno.
-        r = r.push(fill_x());
+        // The tab strip scrolls horizontally when it can't fit (Bruno's ">>"
+        // overflow); the Body/Auth mode selector stays pinned on the right.
+        let scroller = container(
+            scrollable(tabs).direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::new().width(3).scroller_width(3),
+            )),
+        )
+        .width(Fill);
+        let mut r = row![scroller]
+            .spacing(2)
+            .padding(Padding::from([0, 8]))
+            .align_y(Center);
         if tab.req_tab == ReqTab::Body {
             let mode = req.map(|x| body_mode_value(&x.body)).unwrap_or("none");
             r = r.push(dropdown(
@@ -5835,6 +5963,35 @@ fn summarize(outcome: &RunOutcome) -> String {
         ),
         None => "No response".to_string(),
     }
+}
+
+/// Best-effort current git branch for `dir` (or an ancestor), read straight from
+/// `.git/HEAD` — no git dependency. Returns the branch name (`main`), a short
+/// commit hash for a detached HEAD, or `None` when `dir` isn't inside a repo.
+fn git_branch(dir: &Path) -> Option<String> {
+    let mut cur = Some(dir);
+    while let Some(d) = cur {
+        let git = d.join(".git");
+        let head = if git.is_dir() {
+            std::fs::read_to_string(git.join("HEAD")).ok()
+        } else if git.is_file() {
+            // Worktree/submodule: the `.git` file points at the real gitdir.
+            let line = std::fs::read_to_string(&git).ok()?;
+            let gd = line.trim().strip_prefix("gitdir:")?.trim();
+            std::fs::read_to_string(d.join(gd).join("HEAD")).ok()
+        } else {
+            None
+        };
+        if let Some(h) = head {
+            let h = h.trim();
+            return Some(match h.strip_prefix("ref: refs/heads/") {
+                Some(b) => b.to_string(),
+                None => h.chars().take(7).collect(),
+            });
+        }
+        cur = d.parent();
+    }
+    None
 }
 
 /// Generate a `curl` command for a projected request (single-quote escaped).
