@@ -69,6 +69,8 @@ struct App {
     cursor: Point,
     /// The open right-click context menu, if any.
     menu: Option<MenuState>,
+    /// The open `{{variable}}` value popover (copy button), if any.
+    var_popup: Option<VarPopup>,
     /// The open modal dialog, if any.
     modal: Option<Modal>,
     /// Sidebar filter text.
@@ -316,6 +318,14 @@ impl Tab {
 struct MenuState {
     target: MenuTarget,
     at: Point,
+}
+
+/// A click-opened popover for a `{{variable}}` pill: shows the resolved value
+/// and a Copy button. Anchored at the cursor like the context menu.
+#[derive(Debug, Clone)]
+struct VarPopup {
+    name: String,
+    value: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -583,6 +593,11 @@ enum Message {
     OpenSettings(PathBuf, TabKind),
     GenerateCode(PathBuf),
     CopyText(String),
+
+    // ── variable value popover ──
+    OpenVarPopup(String, Option<String>),
+    CloseVarPopup,
+    CopyVarValue(String),
 
     // ── tab management ──
     CloseOthers(usize),
@@ -1144,6 +1159,15 @@ impl App {
                 }
             }
             Message::CopyText(s) => return iced::clipboard::write(s),
+            Message::OpenVarPopup(name, value) => {
+                self.menu = None;
+                self.var_popup = Some(VarPopup { name, value });
+            }
+            Message::CloseVarPopup => self.var_popup = None,
+            Message::CopyVarValue(v) => {
+                self.var_popup = None;
+                return iced::clipboard::write(v);
+            }
 
             // ── tab management (bulk close keeps dirty tabs to avoid data loss) ──
             Message::CloseOthers(i) => {
@@ -2013,6 +2037,10 @@ impl App {
         };
         // Esc closes the topmost overlay (menu > modal > runner > env editor).
         if key == Key::Named(Named::Escape) {
+            if self.var_popup.is_some() {
+                self.var_popup = None;
+                return Task::none();
+            }
             if self.menu.is_some() {
                 self.menu = None;
                 return Task::none();
@@ -2152,6 +2180,9 @@ impl App {
         let mut layers = stack![base];
         if let Some(menu) = &self.menu {
             layers = layers.push(self.menu_overlay(menu));
+        }
+        if let Some(vp) = &self.var_popup {
+            layers = layers.push(self.var_popup_overlay(vp));
         }
         if let Some(modal) = &self.modal {
             layers = layers.push(self.modal_overlay(modal));
@@ -2336,6 +2367,44 @@ impl App {
             positioned,
         ]
         .into()
+    }
+
+    /// The `{{variable}}` value popover: the resolved value plus a Copy button,
+    /// anchored at the cursor. Click-opened (unlike the hover tooltip) so its
+    /// Copy button is actually reachable.
+    fn var_popup_overlay<'a>(&'a self, vp: &'a VarPopup) -> Element<'a, Message> {
+        let mut label = String::from("{{");
+        label.push_str(&vp.name);
+        label.push_str("}}");
+        let value_line: Element<'a, Message> = match &vp.value {
+            Some(v) if v.is_empty() => text("(empty)").size(12).color(MUTED()).into(),
+            Some(v) => text(v.clone()).size(12).font(MONO).color(TEXT()).into(),
+            None => text("not set").size(12).color(RED()).into(),
+        };
+        let mut col = column![
+            text(label).size(12).font(MONO).color(ACCENT()),
+            value_line,
+        ]
+        .spacing(8);
+        if let Some(v) = vp.value.clone() {
+            col = col.push(
+                button(text("Copy").size(12).color(TEXT()))
+                    .style(|_, s| ghost_button(s))
+                    .padding(Padding::from([4, 12]))
+                    .on_press(Message::CopyVarValue(v)),
+            );
+        }
+        let panel = container(col)
+            .style(|_| menu_panel())
+            .padding(10)
+            .width(Length::Fixed(340.0));
+        let x = self.cursor.x.max(0.0);
+        let y = self.cursor.y.max(0.0);
+        let positioned = column![
+            Space::new().height(y),
+            row![Space::new().width(x), panel],
+        ];
+        stack![self.dismiss_layer(Message::CloseVarPopup), positioned].into()
     }
 
     /// The list of menu rows for a given right-click target.
@@ -3538,25 +3607,63 @@ impl App {
         .into()
     }
 
+    /// A strip of clickable `{{var}}` pills for the distinct variables in `raw`,
+    /// shown under the body editor (where inline per-token hover isn't possible).
+    /// `None` when there are no variables. Resolution mirrors the URL preview:
+    /// request pre-request vars override the cached environment map.
+    fn var_strip(&self, tab: &Tab, raw: &str) -> Option<Element<'static, Message>> {
+        let names = distinct_vars(raw);
+        if names.is_empty() {
+            return None;
+        }
+        let pre = tab.file.to_request().map(|r| r.vars_pre).unwrap_or_default();
+        let lookup = |name: &str| -> Option<String> {
+            if let Some(v) = pre.iter().find(|v| v.enabled && v.name == name) {
+                return Some(v.value.clone());
+            }
+            self.vars.get(name).cloned()
+        };
+        let mut row = row![text("\u{21B3} ").size(12).color(MUTED())]
+            .spacing(6)
+            .align_y(Center);
+        for n in &names {
+            row = row.push(var_pill(n, lookup(n)));
+        }
+        Some(container(row).padding(Padding::from([4, 10])).into())
+    }
+
     fn body_view<'a>(&'a self, tab: &'a Tab, body: &Body) -> Element<'a, Message> {
         match body {
             Body::None => text("No body").size(12).color(MUTED()).into(),
-            Body::Json(_) | Body::Text(_) | Body::Xml(_) | Body::Sparql(_) => editor_box(
-                &tab.editors.body,
-                EditorField::Body,
-                body_syntax(&tab.editors.body_kind),
-                Fill,
-            ),
-            Body::GraphQl { .. } => column![
-                section("Query"),
-                editor_box(&tab.editors.gql_query, EditorField::GqlQuery, "js", Fill),
-                vspace(12.0),
-                section("Variables"),
-                editor_box(&tab.editors.gql_vars, EditorField::GqlVars, "json", Fill),
-            ]
-            .spacing(4)
-            .height(Fill)
-            .into(),
+            Body::Json(_) | Body::Text(_) | Body::Xml(_) | Body::Sparql(_) => {
+                let editor = editor_box(
+                    &tab.editors.body,
+                    EditorField::Body,
+                    body_syntax(&tab.editors.body_kind),
+                    Fill,
+                );
+                match self.var_strip(tab, &tab.editors.body.text()) {
+                    Some(strip) => column![editor, strip].spacing(2).height(Fill).into(),
+                    None => editor,
+                }
+            }
+            Body::GraphQl { .. } => {
+                let mut col = column![
+                    section("Query"),
+                    editor_box(&tab.editors.gql_query, EditorField::GqlQuery, "js", Fill),
+                    vspace(12.0),
+                    section("Variables"),
+                    editor_box(&tab.editors.gql_vars, EditorField::GqlVars, "json", Fill),
+                ]
+                .spacing(4)
+                .height(Fill);
+                let combined =
+                    format!("{} {}", tab.editors.gql_query.text(), tab.editors.gql_vars.text());
+                if let Some(strip) = self.var_strip(tab, &combined) {
+                    col = col.push(strip);
+                }
+                col.into()
+            }
             Body::FormUrlEncoded(fields) => {
                 self.kv_or_bulk(tab, KvSection::Form, "Name", "Value", kv_rows(fields))
             }
@@ -4170,11 +4277,53 @@ fn assert_table<'a>(rows: Vec<(String, String, bool)>) -> Element<'a, Message> {
 /// Settings tabs), where `Fill` would collapse to nothing.
 const FIXED_EDITOR: Length = Length::Fixed(220.0);
 
+/// A single `{{name}}` pill: hovering shows the resolved value (quick glance),
+/// clicking opens a popover with a Copy button. Gold when resolved, red when
+/// unset. Self-contained (owned), so it lives `'static`.
+fn var_pill(name: &str, value: Option<String>) -> Element<'static, Message> {
+    let color = if value.is_some() { ACCENT() } else { RED() };
+    let tip = match &value {
+        Some(v) if v.is_empty() => format!("{name} = (empty)"),
+        Some(v) => format!("{name} = {v}"),
+        None => format!("{name}  —  not set"),
+    };
+    let mut label = String::from("{{");
+    label.push_str(name);
+    label.push_str("}}");
+    let btn = button(text(label).size(12).font(MONO).color(color))
+        .style(move |_, s| icon_button(s, color))
+        .padding(Padding::from([0, 2]))
+        .on_press(Message::OpenVarPopup(name.to_string(), value));
+    tooltip(
+        btn,
+        container(text(tip).size(11).color(TEXT()))
+            .style(|_| menu_panel())
+            .padding(6),
+        tooltip::Position::Bottom,
+    )
+    .into()
+}
+
+/// Distinct `{{name}}` tokens in `raw`, in first-seen order.
+fn distinct_vars(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = raw;
+    while let Some(open) = rest.find("{{") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else { break };
+        let name = after[..close].trim().to_string();
+        if !name.is_empty() && !out.contains(&name) {
+            out.push(name);
+        }
+        rest = &after[close + 2..];
+    }
+    out
+}
+
 /// Render a `{{var}}`-bearing string as an inline preview: literal text plus a
-/// hoverable pill for each `{{name}}` token whose tooltip shows the resolved
-/// value (or "not set"). Returns `None` when the string has no balanced token,
-/// so callers can hide the preview entirely. `lookup` resolves a variable name
-/// against the current environment + request scope.
+/// pill for each `{{name}}` token (hover = value, click = copy popover).
+/// Returns `None` when the string has no balanced token, so callers can hide
+/// the preview entirely. `lookup` resolves a variable against env + request.
 fn var_preview<F>(raw: &str, lookup: F) -> Option<Element<'static, Message>>
 where
     F: Fn(&str) -> Option<String>,
@@ -4184,25 +4333,6 @@ where
     }
     let literal = |s: &str| -> Element<'static, Message> {
         text(s.to_string()).size(12).font(MONO).color(SUBTEXT()).into()
-    };
-    let pill = |name: &str, value: Option<String>| -> Element<'static, Message> {
-        let color = if value.is_some() { ACCENT() } else { RED() };
-        let tip = match &value {
-            Some(v) if v.is_empty() => format!("{name} = (empty)"),
-            Some(v) => format!("{name} = {v}"),
-            None => format!("{name}  —  not set"),
-        };
-        let mut label = String::from("{{");
-        label.push_str(name);
-        label.push_str("}}");
-        tooltip(
-            text(label).size(12).font(MONO).color(color),
-            container(text(tip).size(11).color(TEXT()))
-                .style(|_| menu_panel())
-                .padding(6),
-            tooltip::Position::Bottom,
-        )
-        .into()
     };
 
     let mut segments: Vec<Element<'static, Message>> = Vec::new();
@@ -4221,7 +4351,7 @@ where
             segments.push(literal(before));
         }
         let name = after[..close].trim();
-        segments.push(pill(name, lookup(name)));
+        segments.push(var_pill(name, lookup(name)));
         resolved_any = true;
         rest = &after[close + 2..];
     }
