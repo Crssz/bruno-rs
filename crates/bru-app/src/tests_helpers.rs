@@ -753,15 +753,17 @@ fn find_folder_found_and_missing() {
 #[test]
 fn folder_matches_name_request_descendant() {
     let root = sample_tree();
+    // With an empty content index, folder_matches_idx falls back to name matching.
+    let app = App::default();
     // Matches own name.
-    assert!(folder_matches(&root, "root"));
+    assert!(app.folder_matches_idx(&root, "root"));
     // Matches a request name.
-    assert!(folder_matches(&root, "r1"));
+    assert!(app.folder_matches_idx(&root, "r1"));
     // Matches a descendant folder/request.
-    assert!(folder_matches(&root, "r2"));
-    assert!(folder_matches(&root, "sub"));
+    assert!(app.folder_matches_idx(&root, "r2"));
+    assert!(app.folder_matches_idx(&root, "sub"));
     // No match.
-    assert!(!folder_matches(&root, "zzz"));
+    assert!(!app.folder_matches_idx(&root, "zzz"));
 }
 
 // ── gen_curl: each auth / body / method / query combination ──────────────────
@@ -1057,6 +1059,28 @@ fn git_branch_reads_head_ref_and_detached() {
 fn git_branch_none_outside_repo() {
     let td = TempDir::new("nogit");
     assert_eq!(git_branch(&td.0), None);
+}
+
+#[test]
+fn req_matches_name_and_indexed_content() {
+    let req = bru_core::RequestItem {
+        name: "Search Repos".to_string(),
+        path: PathBuf::from("/c/search.bru"),
+        method: Some("GET".to_string()),
+        seq: None,
+    };
+    let mut app = App::default();
+    app.search_index.insert(
+        req.path.clone(),
+        "get {\n  url: https://api.github.com/search/repositories\n}".to_lowercase(),
+    );
+    // Name match.
+    assert!(app.req_matches(&req, "repos"));
+    // Content match (URL host / path not in the name).
+    assert!(app.req_matches(&req, "github.com"));
+    assert!(app.req_matches(&req, "repositories"));
+    // No match anywhere.
+    assert!(!app.req_matches(&req, "graphql"));
 }
 
 #[test]

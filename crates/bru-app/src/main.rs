@@ -114,6 +114,12 @@ struct App {
     /// Current git branch of the open collection (read from `.git/HEAD` on load),
     /// shown as a chip in the top bar. None when the collection isn't a git repo.
     git_branch: Option<String>,
+    /// Lowercased raw `.bru` text per request path, built on collection load, so
+    /// the sidebar filter can match request *content* (URL / headers / body), not
+    /// just names — without touching disk in `view()`.
+    search_index: HashMap<PathBuf, String>,
+    /// "Eye" toggle: reveal secret/masked values in the env manager.
+    reveal_secrets: bool,
     /// Cookies observed from response `Set-Cookie` headers this session, shown in
     /// the Cookies manager. (A viewer: a fresh client is built per send, so these
     /// aren't auto-replayed — see the Cookies overlay note.)
@@ -769,6 +775,7 @@ enum Message {
     PrefTimeout(String),
     PrefInsecure(bool),
     ToggleTheme(bool),
+    ToggleRevealSecrets,
 
     // ── keyboard ──
     Key(iced::keyboard::Event),
@@ -805,6 +812,7 @@ impl App {
                 self.tabs.clear();
                 self.active = None;
                 self.refresh_vars();
+                self.build_search_index();
             }
             Err(e) => self.status = format!("Failed to open {}: {e}", dir.display()),
         }
@@ -1883,6 +1891,7 @@ impl App {
                 theme::set_light(light);
                 save_prefs(&self.prefs);
             }
+            Message::ToggleRevealSecrets => self.reveal_secrets = !self.reveal_secrets,
 
             // ── keyboard ──
             Message::Key(event) => return self.handle_key(event),
@@ -2123,6 +2132,7 @@ impl App {
             self.envs = scan_envs(&dir);
         }
         self.refresh_vars();
+        self.build_search_index();
     }
 
     /// Recompute the cached variable map used for the URL hover preview: global
@@ -3478,7 +3488,7 @@ impl App {
                     .padding(Padding::from([4, 6]))
                     .style(cell_input)
                     .width(Length::FillPortion(3));
-                if r.secret {
+                if r.secret && !self.reveal_secrets {
                     value_in = value_in.secure(true);
                 }
                 let secret = checkbox(r.secret)
@@ -3684,6 +3694,28 @@ impl App {
                 .on_press(Message::ToggleConsole),
                 tooltip(
                     button(
+                        text(if self.reveal_secrets {
+                            "\u{1F441}"
+                        } else {
+                            "\u{2298}"
+                        })
+                        .size(14)
+                        .color(if self.reveal_secrets {
+                            ACCENT()
+                        } else {
+                            SUBTEXT()
+                        })
+                    )
+                    .style(|_, s| icon_button(s, SUBTEXT()))
+                    .padding(Padding::from([2, 6]))
+                    .on_press(Message::ToggleRevealSecrets),
+                    container(text("Reveal secret values").size(11))
+                        .style(|_| menu_panel())
+                        .padding(4),
+                    tooltip::Position::Bottom,
+                ),
+                tooltip(
+                    button(
                         text(if theme::is_light() {
                             "\u{263E}"
                         } else {
@@ -3856,6 +3888,48 @@ impl App {
             .into()
     }
 
+    /// Rebuild the content-search index: lowercased raw text of every request in
+    /// the open collection, keyed by path. Called on collection load / reload.
+    fn build_search_index(&mut self) {
+        self.search_index.clear();
+        let Some(tree) = &self.collection else { return };
+        let mut stack = vec![&tree.root];
+        let mut paths = Vec::new();
+        while let Some(f) = stack.pop() {
+            for r in &f.requests {
+                paths.push(r.path.clone());
+            }
+            for sub in &f.folders {
+                stack.push(sub);
+            }
+        }
+        for p in paths {
+            if let Ok(text) = std::fs::read_to_string(&p) {
+                self.search_index.insert(p, text.to_lowercase());
+            }
+        }
+    }
+
+    /// Whether a request matches the (lowercased) query, by name or by indexed
+    /// content (URL / headers / body).
+    fn req_matches(&self, req: &bru_core::RequestItem, query: &str) -> bool {
+        req.name.to_lowercase().contains(query)
+            || self
+                .search_index
+                .get(&req.path)
+                .is_some_and(|h| h.contains(query))
+    }
+
+    /// Whether a folder (or any descendant request) matches the query.
+    fn folder_matches_idx(&self, folder: &Folder, query: &str) -> bool {
+        folder.name.to_lowercase().contains(query)
+            || folder.requests.iter().any(|r| self.req_matches(r, query))
+            || folder
+                .folders
+                .iter()
+                .any(|f| self.folder_matches_idx(f, query))
+    }
+
     fn collect_rows<'a>(
         &'a self,
         folder: &'a Folder,
@@ -3868,7 +3942,7 @@ impl App {
         let mut folders: Vec<&Folder> = folder.folders.iter().collect();
         folders.sort_by_key(|f| f.name.to_lowercase());
         for sub in folders {
-            if !query.is_empty() && !folder_matches(sub, query) {
+            if !query.is_empty() && !self.folder_matches_idx(sub, query) {
                 continue;
             }
             // A query forces folders open so matches are visible.
@@ -3904,7 +3978,7 @@ impl App {
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
         for req in reqs {
-            if !query.is_empty() && !req.name.to_lowercase().contains(query) {
+            if !query.is_empty() && !self.req_matches(req, query) {
                 continue;
             }
             let method = req.method.clone().unwrap_or_default();
@@ -6195,15 +6269,6 @@ fn collect_folder_requests(folder: &Folder, out: &mut Vec<PathBuf>) {
 }
 
 /// Whether a folder, or any descendant, matches the sidebar filter.
-fn folder_matches(folder: &Folder, query: &str) -> bool {
-    folder.name.to_lowercase().contains(query)
-        || folder
-            .requests
-            .iter()
-            .any(|r| r.name.to_lowercase().contains(query))
-        || folder.folders.iter().any(|f| folder_matches(f, query))
-}
-
 fn short_method(m: &str) -> String {
     let m = m.to_uppercase();
     match m.as_str() {
