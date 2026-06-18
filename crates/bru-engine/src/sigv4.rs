@@ -178,6 +178,22 @@ fn payload_bytes(body: &Body) -> Vec<u8> {
             .collect::<Vec<_>>()
             .join("&")
             .into_bytes(),
+        // Must match the bytes bru-http actually sends for a GraphQL body.
+        Body::GraphQl { query, variables } => {
+            let vars: serde_json::Value = if variables.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(variables).unwrap_or_else(|_| serde_json::json!({}))
+            };
+            let payload = serde_json::json!({ "query": query, "variables": vars });
+            serde_json::to_string(&payload)
+                .unwrap_or_default()
+                .into_bytes()
+        }
+        // SigV4 over multipart is unsupported: the boundary is generated at send
+        // time, so the exact signed bytes aren't known here. Signs an empty
+        // payload (a rare combination — multipart uploads to SigV4 endpoints).
+        Body::MultipartForm(_) => Vec::new(),
     }
 }
 
