@@ -47,6 +47,12 @@ pub struct SendOptions {
     pub timeout: Duration,
     /// Maximum decoded response body size before the request errors.
     pub max_response_bytes: usize,
+    /// Whether the client follows 3xx redirects. When `false`, redirects are
+    /// surfaced to the caller as-is (policy `none`).
+    pub follow_redirects: bool,
+    /// Maximum number of redirect hops to follow (ignored when
+    /// `follow_redirects` is `false`).
+    pub max_redirects: usize,
 }
 
 impl Default for SendOptions {
@@ -55,6 +61,8 @@ impl Default for SendOptions {
             insecure: false,
             timeout: Duration::from_secs(30),
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+            follow_redirects: true,
+            max_redirects: 10,
         }
     }
 }
@@ -78,7 +86,17 @@ impl Default for HttpClient {
 impl HttpClient {
     /// Build a client from options. Reuse the result across a run.
     pub fn new(opts: &SendOptions) -> Result<Self, HttpError> {
-        let mut builder = reqwest::Client::builder().danger_accept_invalid_certs(opts.insecure);
+        // A per-client cookie store lets session cookies (Set-Cookie) carry across
+        // requests in a run/collection-runner, like Bruno's cookie jar.
+        let redirect = if opts.follow_redirects {
+            reqwest::redirect::Policy::limited(opts.max_redirects)
+        } else {
+            reqwest::redirect::Policy::none()
+        };
+        let mut builder = reqwest::Client::builder()
+            .danger_accept_invalid_certs(opts.insecure)
+            .redirect(redirect)
+            .cookie_store(true);
         // reqwest treats a zero Duration as an immediate deadline; only set a
         // timeout when one was actually requested.
         if !opts.timeout.is_zero() {
@@ -98,6 +116,11 @@ impl HttpClient {
         let url = build_url(req)?;
         let mut builder = self.inner.request(method, url);
 
+        // A per-request timeout overrides the client-level one for this send.
+        if let Some(ms) = req.settings.timeout_ms {
+            builder = builder.timeout(Duration::from_millis(ms));
+        }
+
         let has_ct = req
             .headers
             .iter()
@@ -112,6 +135,8 @@ impl HttpClient {
         if let Body::MultipartForm(fields) = &req.body {
             let form = build_multipart_form(fields).await?;
             builder = builder.multipart(form);
+        } else if let Body::File(items) = &req.body {
+            builder = apply_file_body(builder, items, has_ct).await?;
         } else {
             builder = apply_body(builder, &req.body, has_ct);
         }
@@ -177,33 +202,45 @@ impl HttpResponse {
     }
 }
 
-/// Substitute `:path` params, then parse the URL and append enabled query params
-/// (and an api-key credential placed in the query).
-fn build_url(req: &Request) -> Result<Url, HttpError> {
+/// Substitute `:path` params and append enabled query params — the URL the
+/// request actually targets, *excluding* any auth-specific api-key. Shared so
+/// the engine can finalize `req.url` before signing (SigV4/Digest must sign the
+/// substituted path + query, not the raw `:name` template).
+pub fn resolve_url(req: &Request) -> Result<String, HttpError> {
+    Ok(resolve_base_url(req)?.to_string())
+}
+
+fn resolve_base_url(req: &Request) -> Result<Url, HttpError> {
     let mut raw = req.url.clone();
     for p in req.path_params.iter().filter(|p| p.enabled) {
         raw = replace_path_param(&raw, &p.name, &p.value);
     }
-
-    let mut url =
-        Url::parse(&raw).map_err(|e| HttpError::InvalidUrl(raw.clone(), e.to_string()))?;
+    let mut url = Url::parse(&raw).map_err(|e| HttpError::InvalidUrl(raw.clone(), e.to_string()))?;
     {
         let mut pairs = url.query_pairs_mut();
         for q in req.query.iter().filter(|q| q.enabled) {
             pairs.append_pair(&q.name, &q.value);
         }
-        if let Auth::ApiKey {
-            key,
-            value,
-            placement: ApiKeyPlacement::Query,
-        } = &req.auth
-        {
-            pairs.append_pair(key, value);
-        }
     }
-    // Url leaves a trailing `?` when no pairs were added; normalize it away.
     if url.query() == Some("") {
         url.set_query(None);
+    }
+    Ok(url)
+}
+
+/// The final wire URL: the resolved base plus a query-placed api-key credential.
+fn build_url(req: &Request) -> Result<Url, HttpError> {
+    let mut url = resolve_base_url(req)?;
+    if let Auth::ApiKey {
+        key,
+        value,
+        placement: ApiKeyPlacement::Query,
+    } = &req.auth
+    {
+        url.query_pairs_mut().append_pair(key, value);
+        if url.query() == Some("") {
+            url.set_query(None);
+        }
     }
     Ok(url)
 }
@@ -295,9 +332,42 @@ fn apply_body(
             let body = serde_json::to_string(&payload).unwrap_or_default();
             with_default_ct(builder.body(body), "application/json")
         }
-        // Multipart is built asynchronously in `send`; nothing to do here.
-        Body::MultipartForm(_) => builder,
+        // Multipart and file bodies are built asynchronously in `send`.
+        Body::MultipartForm(_) | Body::File(_) => builder,
     }
+}
+
+/// Send the selected `body:file` entry's bytes as the request body. Falls back to
+/// the first entry if none is marked selected; an empty/missing file sends no body.
+async fn apply_file_body(
+    builder: reqwest::RequestBuilder,
+    items: &[bru_core::FileBodyItem],
+    has_ct: bool,
+) -> Result<reqwest::RequestBuilder, HttpError> {
+    let Some(item) = items.iter().find(|i| i.selected).or_else(|| items.first()) else {
+        return Ok(builder);
+    };
+    if item.path.trim().is_empty() {
+        return Ok(builder);
+    }
+    let meta = tokio::fs::metadata(&item.path)
+        .await
+        .map_err(|e| HttpError::FileRead(item.path.clone(), e.to_string()))?;
+    if meta.len() > DEFAULT_MAX_RESPONSE_BYTES as u64 {
+        return Err(HttpError::FileTooLarge(item.path.clone(), DEFAULT_MAX_RESPONSE_BYTES));
+    }
+    let bytes = tokio::fs::read(&item.path)
+        .await
+        .map_err(|e| HttpError::FileRead(item.path.clone(), e.to_string()))?;
+    let mut b = builder.body(bytes);
+    if !has_ct {
+        if let Some(ct) = &item.content_type {
+            if !ct.is_empty() {
+                b = b.header("content-type", ct);
+            }
+        }
+    }
+    Ok(b)
 }
 
 /// Build a `reqwest::multipart::Form` from the enabled fields, reading any file
@@ -349,4 +419,23 @@ async fn build_multipart_form(
         form = form.part(f.name.clone(), part);
     }
     Ok(form)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bru_core::{KeyVal, Request};
+
+    #[test]
+    fn resolve_url_substitutes_path_and_appends_query() {
+        let req = Request {
+            method: "GET".to_string(),
+            url: "https://api.test/users/:id".to_string(),
+            path_params: vec![KeyVal { name: "id".into(), value: "123".into(), enabled: true }],
+            query: vec![KeyVal { name: "x".into(), value: "1".into(), enabled: true }],
+            ..Default::default()
+        };
+        // SigV4/Digest sign this exact string, so it must match the wire URL.
+        assert_eq!(resolve_url(&req).unwrap(), "https://api.test/users/123?x=1");
+    }
 }

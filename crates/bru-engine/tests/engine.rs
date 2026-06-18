@@ -385,3 +385,77 @@ async fn awsv4_signs_request_before_send() {
         "unexpected security-token header:\n{sent}"
     );
 }
+
+#[tokio::test]
+async fn settings_block_projects_into_request() {
+    let src = "meta {\n  name: S\n  type: http\n}\n\n\
+        get {\n  url: https://api.test/x\n  auth: none\n}\n\n\
+        settings {\n  followRedirects: false\n  maxRedirects: 3\n  timeout: 5000\n  encodeUrl: true\n}\n";
+    let file = bru_lang::parse(src).unwrap();
+    let req = file.to_request().expect("request projects");
+    assert_eq!(req.settings.follow_redirects, Some(false));
+    assert_eq!(req.settings.max_redirects, Some(3));
+    assert_eq!(req.settings.timeout_ms, Some(5000));
+    assert_eq!(req.settings.encode_url, Some(true));
+}
+
+#[tokio::test]
+async fn settings_disables_redirect_following() {
+    // Destination server: a one-shot 200 that should NEVER be reached when
+    // followRedirects is off. It signals on `tx` if it ever accepts a connection.
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let dest_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let dest_addr = dest_listener.local_addr().unwrap();
+    // Intentionally not joined: with the redirect suppressed, `accept()` blocks
+    // forever, so the thread is abandoned and reaped on process exit.
+    thread::spawn(move || {
+        if let Ok((mut s, _)) = dest_listener.accept() {
+            let _ = tx.send(());
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            let body = "{\"reached\":true}";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = s.write_all(resp.as_bytes());
+        }
+    });
+
+    // Redirect server: replies 302 pointing at the destination.
+    let redir_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let redir_addr = redir_listener.local_addr().unwrap();
+    let location = format!("http://{dest_addr}/dest");
+    let redir = thread::spawn(move || {
+        let (mut s, _) = redir_listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = s.read(&mut buf);
+        let resp = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let _ = s.write_all(resp.as_bytes());
+        let _ = s.flush();
+    });
+
+    let src = "meta {\n  name: R\n  type: http\n}\n\n\
+        get {\n  url: URL\n  auth: none\n}\n\n\
+        settings {\n  followRedirects: false\n}\n";
+    let file =
+        bru_lang::parse(&src.replace("URL", &format!("http://{redir_addr}/start"))).unwrap();
+
+    let mut ctx = RunContext::default();
+    let outcome = run_request(&file, &mut ctx).await;
+    redir.join().unwrap();
+
+    assert!(outcome.error.is_none(), "error: {:?}", outcome.error);
+    assert_eq!(
+        outcome.response.as_ref().unwrap().status,
+        302,
+        "302 must be surfaced, not followed, when followRedirects:false"
+    );
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(400)).is_err(),
+        "destination was contacted — redirect was followed despite followRedirects:false"
+    );
+}

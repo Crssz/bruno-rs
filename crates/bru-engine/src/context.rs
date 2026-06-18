@@ -34,7 +34,10 @@ pub fn base_vars(path: &Path, env: Option<&str>) -> HashMap<String, String> {
     vars
 }
 
-/// Walk up from `path` to the directory containing `bruno.json`.
+/// Walk up from `path` to the collection root — the directory containing a
+/// `bruno.json`, or (for irregular collections the GUI still opens) a
+/// `collection.bru` or an `environments/` dir, so collection + env vars resolve
+/// for any folder the app can load.
 pub fn find_collection_root(path: &Path) -> Option<PathBuf> {
     let mut dir = if path.is_dir() {
         Some(path)
@@ -42,7 +45,10 @@ pub fn find_collection_root(path: &Path) -> Option<PathBuf> {
         path.parent()
     };
     while let Some(d) = dir {
-        if d.join("bruno.json").is_file() {
+        if d.join("bruno.json").is_file()
+            || d.join("collection.bru").is_file()
+            || d.join("environments").is_dir()
+        {
             return Some(d.to_path_buf());
         }
         dir = d.parent();

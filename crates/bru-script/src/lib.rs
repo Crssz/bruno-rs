@@ -8,12 +8,14 @@
 //! or `require()` — exactly Bruno's default Safe Mode.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use rquickjs::{CatchResultExt, Context, Runtime, Value};
+use rquickjs::{CatchResultExt, Context, Ctx, Function, Runtime, Value};
 use serde_json::json;
 
 const PRELUDE: &str = include_str!("prelude.js");
+const REQUIRE_JS: &str = include_str!("require.js");
 
 /// Read state back as JSON, resiliently: each field is stringified independently
 /// with a BigInt-safe replacer and a try/catch, so a script poisoning one field
@@ -64,12 +66,18 @@ pub struct ScriptResponse {
 }
 
 /// Everything a script run starts from.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ScriptInput {
     pub vars: HashMap<String, String>,
     pub request: ScriptRequest,
     /// `None` for pre-request scripts (no response yet).
     pub response: Option<ScriptResponse>,
+    /// Directory of the request `.bru`, used to resolve `require('./x')` paths.
+    /// `None` disables relative resolution (require errors if attempted).
+    pub script_dir: Option<PathBuf>,
+    /// Enable CommonJS `require()` of local files (Bruno's Developer Mode). When
+    /// `false` (Safe Mode default) `require` is not defined at all.
+    pub allow_require: bool,
 }
 
 /// One `test(name, fn)` result.
@@ -142,13 +150,23 @@ fn run_in_context(
         .catch(ctx)
         .map_err(|e| format!("prelude error: {e}"))?;
 
-    // A thrown error from the user script is captured (not fatal); test failures
-    // are recorded inside `__tests` by the prelude's `test()`.
-    let script_error = ctx
-        .eval::<Value, _>(source)
-        .catch(ctx)
-        .err()
-        .map(|e| e.to_string());
+    // Developer Mode: install CommonJS `require()` for local files. Safe Mode
+    // (the default) skips this, so `require` stays undefined.
+    if input.allow_require {
+        install_require(ctx, input.script_dir.as_deref())?;
+    }
+
+    // Evaluate the user script as an async unit (`promise: true`) so top-level
+    // `await` is valid — matching how Bruno wraps scripts. `finish()` pumps the
+    // job queue until the resulting promise settles. A syntax error surfaces from
+    // `eval_promise`; a runtime throw/rejection surfaces from `finish`. Both are
+    // captured (non-fatal); test failures are recorded in `__tests` by `test()`.
+    let script_error = match ctx.eval_promise(source).catch(ctx) {
+        Ok(promise) => promise.finish::<Value>().catch(ctx).err().map(|e| e.to_string()),
+        Err(e) => Some(e.to_string()),
+    };
+    // Drain any microtasks the script scheduled but did not await.
+    while ctx.execute_pending_job() {}
 
     let readback: String = ctx
         .eval::<String, _>(READBACK)
@@ -158,6 +176,86 @@ fn run_in_context(
     let mut outcome = parse_readback(&readback);
     outcome.error = script_error;
     Ok(outcome)
+}
+
+/// Install the Developer-Mode `require()`: a Rust loader host fn plus the JS shim
+/// ([require.js]) that builds the CommonJS module wrapper on top of it.
+fn install_require(ctx: &Ctx<'_>, script_dir: Option<&Path>) -> Result<(), String> {
+    let g = ctx.globals();
+    let dir = script_dir
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    g.set("__scriptDir", dir)
+        .map_err(|e| format!("inject __scriptDir: {e}"))?;
+
+    let loader = Function::new(
+        ctx.clone(),
+        |ctx: Ctx<'_>, from: String, spec: String| -> rquickjs::Result<String> {
+            match load_module(&from, &spec) {
+                Ok(json_str) => Ok(json_str),
+                Err(msg) => {
+                    let s = rquickjs::String::from_str(ctx.clone(), &msg)?;
+                    Err(ctx.throw(s.into()))
+                }
+            }
+        },
+    )
+    .map_err(|e| format!("define require loader: {e}"))?;
+    g.set("__bru_load_module", loader)
+        .map_err(|e| format!("inject require loader: {e}"))?;
+
+    ctx.eval::<Value, _>(REQUIRE_JS)
+        .catch(ctx)
+        .map_err(|e| format!("require shim error: {e}"))?;
+    Ok(())
+}
+
+/// Resolve and read a module for `require(spec)` issued from directory `from`.
+/// Returns a JSON string `{path, dir, source, json}`. Only relative (`./`,`../`)
+/// or absolute paths are honoured — bare specifiers (npm packages) are rejected,
+/// since there is no `node_modules` resolution in this sandbox.
+fn load_module(from: &str, spec: &str) -> Result<String, String> {
+    let is_abs = Path::new(spec).is_absolute();
+    if !(spec.starts_with("./") || spec.starts_with("../") || is_abs) {
+        return Err(format!(
+            "Cannot find module '{spec}': only relative ('./', '../') or absolute paths are supported (no npm packages)"
+        ));
+    }
+    if from.is_empty() && !is_abs {
+        return Err(format!(
+            "Cannot resolve '{spec}': the request's directory is unknown"
+        ));
+    }
+    let joined = Path::new(from).join(spec);
+    let resolved =
+        resolve_file(&joined).ok_or_else(|| format!("Cannot find module '{spec}' from '{from}'"))?;
+    let source = std::fs::read_to_string(&resolved)
+        .map_err(|e| format!("Cannot read module '{}': {e}", resolved.display()))?;
+    let is_json = resolved.extension().and_then(|e| e.to_str()) == Some("json");
+    let dir = resolved
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let path = resolved.to_string_lossy().into_owned();
+    Ok(json!({ "path": path, "dir": dir, "source": source, "json": is_json }).to_string())
+}
+
+/// Node-style file resolution: exact path, then `.js`/`.json` appended, then
+/// `index.js` in a directory. Canonicalizes so the cache key is stable.
+fn resolve_file(p: &Path) -> Option<PathBuf> {
+    let canon = |c: PathBuf| c.is_file().then(|| std::fs::canonicalize(&c).unwrap_or(c));
+    if let Some(hit) = canon(p.to_path_buf()) {
+        return Some(hit);
+    }
+    for ext in ["js", "json"] {
+        let mut s = p.as_os_str().to_os_string();
+        s.push(".");
+        s.push(ext);
+        if let Some(hit) = canon(PathBuf::from(s)) {
+            return Some(hit);
+        }
+    }
+    canon(p.join("index.js"))
 }
 
 fn request_json(req: &ScriptRequest) -> serde_json::Value {
@@ -262,6 +360,8 @@ mod tests {
                 headers: vec![("accept".into(), "application/json".into())],
             },
             response,
+            script_dir: None,
+            allow_require: false,
         }
     }
 
@@ -341,6 +441,63 @@ mod tests {
         assert!(out.error.is_none(), "{:?}", out.error);
         assert_eq!(out.tests.len(), 1);
         assert!(out.tests[0].passed);
+    }
+
+    #[test]
+    fn top_level_await_is_supported() {
+        // The exact shape that produced `expecting ';'` before async evaluation.
+        let src = "const v = await Promise.resolve('hi'); bru.setVar('out', v);";
+        let out = run_script(src, &input(&[], None));
+        assert!(out.error.is_none(), "{:?}", out.error);
+        assert_eq!(out.vars.get("out").map(String::as_str), Some("hi"));
+    }
+
+    #[test]
+    fn require_is_absent_in_safe_mode() {
+        let out = run_script("var h = require('./hook');", &input(&[], None));
+        assert!(out
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("require is not defined"));
+    }
+
+    #[test]
+    fn require_loads_local_module_in_dev_mode() {
+        // Write a throwaway module next to a fake request dir.
+        let dir = std::env::temp_dir().join(format!("bru-req-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let hook = dir.join("hook.js");
+        std::fs::write(
+            &hook,
+            "async function useOAPISetVar(){ bru.setVar('hooked', 'yes'); return 1; }\nmodule.exports = { useOAPISetVar };",
+        )
+        .unwrap();
+
+        let mut inp = input(&[], None);
+        inp.script_dir = Some(dir.clone());
+        inp.allow_require = true;
+        let src = "const { useOAPISetVar } = require('./hook');\nawait useOAPISetVar();";
+        let out = run_script(src, &inp);
+
+        let _ = std::fs::remove_file(&hook);
+        let _ = std::fs::remove_dir(&dir);
+
+        assert!(out.error.is_none(), "{:?}", out.error);
+        assert_eq!(out.vars.get("hooked").map(String::as_str), Some("yes"));
+    }
+
+    #[test]
+    fn require_rejects_bare_specifier() {
+        let mut inp = input(&[], None);
+        inp.allow_require = true;
+        inp.script_dir = Some(std::env::temp_dir());
+        let out = run_script("require('lodash');", &inp);
+        assert!(
+            out.error.as_deref().unwrap_or("").contains("npm packages"),
+            "{:?}",
+            out.error
+        );
     }
 
     #[test]

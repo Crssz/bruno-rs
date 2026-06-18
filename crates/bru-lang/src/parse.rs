@@ -177,7 +177,12 @@ impl<'a> Parser<'a> {
                 }
                 Some(line) if line.trim().is_empty() => self.advance_line(),
                 Some(line) => {
-                    items.push(line.trim().to_string());
+                    // Bruno comma-separates list items; strip a trailing comma so
+                    // a multi-item list round-trips (and real env secret lists import).
+                    let item = line.trim().trim_end_matches(',').trim();
+                    if !item.is_empty() {
+                        items.push(item.to_string());
+                    }
                     self.advance_line();
                 }
             }
@@ -321,7 +326,12 @@ impl<'a> Parser<'a> {
                 }
                 Some(line) if line.trim().is_empty() => self.advance_line(),
                 Some(line) => {
-                    items.push(line.trim().to_string());
+                    // Bruno comma-separates list items; strip a trailing comma so
+                    // a multi-item list round-trips (and real env secret lists import).
+                    let item = line.trim().trim_end_matches(',').trim();
+                    if !item.is_empty() {
+                        items.push(item.to_string());
+                    }
                     self.advance_line();
                 }
             }

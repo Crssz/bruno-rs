@@ -47,6 +47,16 @@ pub enum MultipartValue {
     File(String),
 }
 
+/// One entry of a binary `body:file` block. Bruno allows several candidate files
+/// with one `selected`; the selected entry's bytes are sent as the request body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileBodyItem {
+    pub path: String,
+    pub content_type: Option<String>,
+    /// The active file (Bruno's `~` prefix marks the non-selected ones).
+    pub selected: bool,
+}
+
 /// The request body, by mode.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Body {
@@ -62,6 +72,8 @@ pub enum Body {
         variables: String,
     },
     MultipartForm(Vec<MultipartField>),
+    /// Binary file body (`body:file`). The selected entry is sent.
+    File(Vec<FileBodyItem>),
 }
 
 /// Where an API-key credential is placed.
@@ -134,6 +146,18 @@ pub enum Auth {
     },
 }
 
+/// Per-request transport overrides projected from the `settings` block. `None`
+/// means "inherit the run-level default" so the engine only diverges from its
+/// shared client when a request explicitly opts in.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RequestSettings {
+    pub follow_redirects: Option<bool>,
+    pub max_redirects: Option<u32>,
+    /// Request timeout in milliseconds (Bruno stores `timeout` in ms).
+    pub timeout_ms: Option<u64>,
+    pub encode_url: Option<bool>,
+}
+
 /// A typed HTTP request projected from a `.bru` file.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Request {
@@ -147,6 +171,7 @@ pub struct Request {
     pub vars_pre: Vec<Var>,
     pub vars_post: Vec<Var>,
     pub assertions: Vec<Assertion>,
+    pub settings: RequestSettings,
 }
 
 impl BruFile {
@@ -170,7 +195,33 @@ impl BruFile {
             vars_pre: self.vars("vars:pre-request"),
             vars_post: self.vars("vars:post-response"),
             assertions: self.assertions(),
+            settings: self.project_settings(),
         })
+    }
+
+    /// Project the `settings` dict block into typed transport overrides. Absent
+    /// keys stay `None` (inherit the run default).
+    fn project_settings(&self) -> RequestSettings {
+        let get = |key: &str| -> Option<String> {
+            match self.block("settings").map(|b| &b.content) {
+                Some(BlockContent::Dict(entries)) => entries
+                    .iter()
+                    .find(|e| !e.disabled && e.key.name() == key)
+                    .map(|e| e.value.as_inline().trim().to_string()),
+                _ => None,
+            }
+        };
+        let bool_of = |s: String| match s.as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        };
+        RequestSettings {
+            follow_redirects: get("followRedirects").and_then(bool_of),
+            max_redirects: get("maxRedirects").and_then(|s| s.parse().ok()),
+            timeout_ms: get("timeout").and_then(|s| s.parse().ok()),
+            encode_url: get("encodeUrl").and_then(bool_of),
+        }
     }
 
     fn method_block(&self) -> Option<&crate::model::Block> {
@@ -235,7 +286,15 @@ impl BruFile {
                 variables: text("body:graphql:vars"),
             },
             "multipartForm" => Body::MultipartForm(self.multipart_fields("body:multipart-form")),
+            "file" => Body::File(self.file_body_items("body:file")),
             _ => Body::None,
+        }
+    }
+
+    fn file_body_items(&self, block: &str) -> Vec<FileBodyItem> {
+        match self.block(block).map(|b| &b.content) {
+            Some(BlockContent::Dict(entries)) => entries.iter().map(parse_file_body_item).collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -248,7 +307,10 @@ impl BruFile {
         }
     }
 
-    fn project_auth(&self, mode: &str) -> Auth {
+    /// Project the auth for a given `mode` from the per-mode `auth:*` blocks.
+    /// Public so callers (e.g. collection/folder settings, whose mode lives in a
+    /// top-level `auth { mode }` block rather than the method block) can reuse it.
+    pub fn project_auth(&self, mode: &str) -> Auth {
         let v = |block: &str, key: &str| self.dict_value(block, key).unwrap_or("").to_string();
         match mode {
             "inherit" => Auth::Inherit,
@@ -357,22 +419,14 @@ fn parse_multipart_field(e: &crate::model::Entry) -> MultipartField {
     let enabled = !e.disabled;
     let raw = e.value.as_inline().trim();
 
-    if let Some(rest) = raw.strip_prefix("@file(") {
-        if let Some(end) = rest.find(')') {
-            let path = rest[..end].trim().to_string();
-            // Anything after the `)` may carry an `@contentType(...)` decorator.
-            let trailing = rest[end + 1..].trim();
-            let content_type = trailing
-                .strip_prefix("@contentType(")
-                .and_then(|s| s.strip_suffix(')'))
-                .map(|ct| ct.trim().to_string());
-            return MultipartField {
-                name,
-                value: MultipartValue::File(path),
-                content_type,
-                enabled,
-            };
-        }
+    if raw.starts_with("@file(") {
+        let (path, content_type) = parse_file_ref(raw);
+        return MultipartField {
+            name,
+            value: MultipartValue::File(path),
+            content_type,
+            enabled,
+        };
     }
 
     MultipartField {
@@ -381,6 +435,43 @@ fn parse_multipart_field(e: &crate::model::Entry) -> MultipartField {
         content_type: None,
         enabled,
     }
+}
+
+/// Parse a `body:file` entry (`file: @file(path) @contentType(ct)`, `~` = not
+/// selected) into a [`FileBodyItem`].
+fn parse_file_body_item(e: &crate::model::Entry) -> FileBodyItem {
+    let selected = !e.disabled;
+    let raw = e.value.as_inline().trim();
+    let (path, content_type) = parse_file_ref(raw);
+    FileBodyItem {
+        path,
+        content_type,
+        selected,
+    }
+}
+
+/// Extract `(path, content_type)` from an `@file(path) [@contentType(ct)]` value.
+/// The path may itself contain parentheses (e.g. `file (1).pdf`), so the closing
+/// `)` of `@file(...)` is the last one *before* any `@contentType(` marker — not
+/// merely the first `)`.
+fn parse_file_ref(raw: &str) -> (String, Option<String>) {
+    let Some(rest) = raw.strip_prefix("@file(") else {
+        return (raw.to_string(), None);
+    };
+    let (file_part, content_type) = match rest.rfind("@contentType(") {
+        Some(m) => {
+            let ct = rest[m..]
+                .strip_prefix("@contentType(")
+                .and_then(|s| s.strip_suffix(')'))
+                .map(|c| c.trim().to_string());
+            (&rest[..m], ct)
+        }
+        None => (rest, None),
+    };
+    // `file_part` ends with the `@file(` closing paren (plus optional whitespace).
+    let trimmed = file_part.trim_end();
+    let path = trimmed.strip_suffix(')').unwrap_or(trimmed).trim().to_string();
+    (path, content_type)
 }
 
 /// Strip up to two leading spaces from each line — the inverse of the 2-space
@@ -396,4 +487,29 @@ fn outdent(s: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_file_ref;
+
+    #[test]
+    fn file_ref_keeps_parens_in_path() {
+        // Parens inside the path must survive (Windows `file (1).pdf`).
+        assert_eq!(
+            parse_file_ref("@file(C:\\a\\report (final).pdf)"),
+            ("C:\\a\\report (final).pdf".to_string(), None)
+        );
+        assert_eq!(
+            parse_file_ref("@file(/tmp/x (1).bin) @contentType(application/octet-stream)"),
+            (
+                "/tmp/x (1).bin".to_string(),
+                Some("application/octet-stream".to_string())
+            )
+        );
+        assert_eq!(
+            parse_file_ref("@file(/tmp/plain.txt)"),
+            ("/tmp/plain.txt".to_string(), None)
+        );
+    }
 }

@@ -46,6 +46,10 @@ struct RunArgs {
     /// count wins). Defaults to 1.
     #[arg(long)]
     iterations: Option<usize>,
+    /// Developer Mode: let scripts `require()` local `.js` files (relative to the
+    /// request). Off by default (Safe Mode — scripts have no filesystem access).
+    #[arg(long)]
+    developer: bool,
 }
 
 #[tokio::main]
@@ -125,10 +129,14 @@ async fn run(args: RunArgs) -> ExitCode {
         let mut ctx = RunContext {
             vars,
             client: client.clone(),
+            send_options: options.clone(),
+            developer_mode: args.developer,
             ..Default::default()
         };
 
         for target in &targets {
+            // Resolve each request's `require('./x')` relative to its own folder.
+            ctx.script_dir = target.parent().map(Path::to_path_buf);
             let text = match std::fs::read_to_string(target) {
                 Ok(t) => t,
                 Err(e) => {

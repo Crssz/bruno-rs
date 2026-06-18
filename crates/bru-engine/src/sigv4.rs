@@ -197,9 +197,18 @@ fn payload_bytes(body: &Body) -> Vec<u8> {
                 .into_bytes()
         }
         // SigV4 over multipart is unsupported: the boundary is generated at send
-        // time, so the exact signed bytes aren't known here. Signs an empty
-        // payload (a rare combination — multipart uploads to SigV4 endpoints).
+        // time, so the exact signed bytes aren't known here. Signs empty (rare).
         Body::MultipartForm(_) => Vec::new(),
+        // For a file body, sign the exact bytes bru-http will send (the selected
+        // file), so the signature matches; a read failure signs empty and the
+        // send surfaces the error.
+        Body::File(items) => items
+            .iter()
+            .find(|i| i.selected)
+            .or_else(|| items.first())
+            .filter(|i| !i.path.trim().is_empty())
+            .and_then(|i| std::fs::read(&i.path).ok())
+            .unwrap_or_default(),
     }
 }
 
