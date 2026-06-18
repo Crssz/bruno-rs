@@ -376,6 +376,11 @@ enum Modal {
         name: String,
         error: Option<String>,
     },
+    NewCollection {
+        parent: PathBuf,
+        name: String,
+        error: Option<String>,
+    },
     Rename {
         path: PathBuf,
         is_folder: bool,
@@ -639,6 +644,7 @@ enum Message {
     NewDraft,
     NewRequestPrompt(PathBuf),
     NewFolderPrompt(PathBuf),
+    NewCollectionPrompt,
     RenamePrompt(PathBuf, bool),
     ClonePrompt(PathBuf, bool),
     DeletePrompt(PathBuf, bool),
@@ -1191,6 +1197,17 @@ impl App {
                     name: String::new(),
                     error: None,
                 });
+            }
+            Message::NewCollectionPrompt => {
+                self.menu = None;
+                // Pick the parent folder first, then ask for the collection name.
+                if let Some(parent) = rfd::FileDialog::new().pick_folder() {
+                    self.modal = Some(Modal::NewCollection {
+                        parent,
+                        name: String::new(),
+                        error: None,
+                    });
+                }
             }
             Message::RenamePrompt(path, is_folder) => {
                 self.menu = None;
@@ -2057,6 +2074,7 @@ impl App {
         match &mut self.modal {
             Some(Modal::NewRequest { name, .. })
             | Some(Modal::NewFolder { name, .. })
+            | Some(Modal::NewCollection { name, .. })
             | Some(Modal::Rename { name, .. })
             | Some(Modal::Clone { name, .. })
             | Some(Modal::SaveExample { name }) => *name = v,
@@ -2097,6 +2115,18 @@ impl App {
                     Ok(_) => self.reload_tree(),
                     Err(e) => {
                         self.modal = Some(Modal::NewFolder {
+                            parent,
+                            name,
+                            error: Some(e),
+                        })
+                    }
+                }
+            }
+            Modal::NewCollection { parent, name, .. } => {
+                match fsops::create_collection(&parent, &name) {
+                    Ok(dir) => self.load(dir),
+                    Err(e) => {
+                        self.modal = Some(Modal::NewCollection {
                             parent,
                             name,
                             error: Some(e),
@@ -2827,7 +2857,14 @@ impl App {
                 ));
             }
             MenuTarget::Collection => {
+                v.push(menu_row(
+                    "New Collection",
+                    false,
+                    Message::NewCollectionPrompt,
+                ));
+                v.push(menu_row("Open Collection", false, Message::OpenFolder));
                 if let Some(dir) = self.collection_dir.clone() {
+                    v.push(menu_sep());
                     v.push(menu_row(
                         "New Request",
                         false,
@@ -2965,6 +3002,31 @@ impl App {
                             .padding(8)
                             .style(input_style)
                     ),
+                    modal_error(error),
+                ]
+                .spacing(10)
+                .into(),
+                "Create",
+                false,
+            ),
+            Modal::NewCollection {
+                parent,
+                name,
+                error,
+            } => modal_card_view(
+                "New Collection",
+                column![
+                    labeled(
+                        "Name",
+                        text_input("Collection name", name)
+                            .on_input(Message::ModalName)
+                            .on_submit(Message::ModalSubmit)
+                            .padding(8)
+                            .style(input_style)
+                    ),
+                    text(format!("Location: {}", parent.display()))
+                        .size(11)
+                        .color(MUTED()),
                     modal_error(error),
                 ]
                 .spacing(10)
@@ -3424,6 +3486,9 @@ impl App {
                 button(text("Open Collection").size(13))
                     .style(|_, s| ghost_button(s))
                     .on_press(Message::OpenFolder),
+                button(text("New").size(13))
+                    .style(|_, s| ghost_button(s))
+                    .on_press(Message::NewCollectionPrompt),
                 text(name).size(13).color(ACCENT()).font(BOLD),
                 branch,
                 coll_actions,
@@ -3590,6 +3655,10 @@ impl App {
                                 .on_press_maybe(
                                     self.collection_dir.clone().map(Message::NewRequestPrompt),
                                 ),
+                            button(text("\u{22EE}").size(14).color(SUBTEXT()))
+                                .style(|_, s| icon_button(s, SUBTEXT()))
+                                .padding(Padding::from([0, 6]))
+                                .on_press(Message::OpenMenu(MenuTarget::Collection)),
                         ]
                         .align_y(Center),
                     )

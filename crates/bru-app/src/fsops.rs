@@ -135,6 +135,30 @@ pub fn new_folder(parent: &Path, name: &str, at_root: bool) -> Result<PathBuf, S
     Ok(dir)
 }
 
+/// Scaffold a brand-new empty collection at `parent/<sanitized name>`: writes a
+/// `bruno.json` (the marker the loader recognises) and an `environments/` dir.
+/// Returns the new collection directory. Errors if the target already exists.
+pub fn create_collection(parent: &Path, name: &str) -> Result<PathBuf, String> {
+    let n = name.trim();
+    if n.is_empty() {
+        return Err("Name cannot be empty".to_string());
+    }
+    if sanitize(n).is_empty() {
+        return Err("Name has no usable characters".to_string());
+    }
+    let dir = parent.join(sanitize(n));
+    if dir.exists() {
+        return Err(format!("\"{}\" already exists", dir.display()));
+    }
+    std::fs::create_dir_all(dir.join("environments")).map_err(|e| e.to_string())?;
+    let esc = n.replace('\\', "\\\\").replace('"', "\\\"");
+    let json = format!(
+        "{{\n  \"version\": \"1\",\n  \"name\": \"{esc}\",\n  \"type\": \"collection\",\n  \"ignore\": [\n    \"node_modules\",\n    \".git\"\n  ]\n}}\n"
+    );
+    std::fs::write(dir.join("bruno.json"), json).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
 /// Rename a request file or folder, updating its `meta.name` too. Returns the
 /// new path.
 /// Whether `a` and `b` are the same on-disk object. A case-only rename
@@ -592,6 +616,23 @@ mod tests {
         assert!(c.join("Inner.bru").exists());
         delete(&f, true).unwrap();
         assert!(!f.exists());
+    }
+
+    #[test]
+    fn create_collection_scaffolds_marker_and_envs() {
+        let d = TempDir::new("newcoll");
+        let c = create_collection(&d.0, "My API").unwrap();
+        assert!(c.join("bruno.json").exists());
+        assert!(c.join("environments").is_dir());
+        let json = std::fs::read_to_string(c.join("bruno.json")).unwrap();
+        assert!(json.contains("\"name\": \"My API\""));
+        // The loader recognises the scaffolded collection and reads its name.
+        let tree = bru_lang::load_collection(&c).unwrap();
+        assert_eq!(tree.name, "My API");
+        // A second create at the same name errors instead of clobbering.
+        assert!(create_collection(&d.0, "My API").is_err());
+        // Empty / unusable names are rejected.
+        assert!(create_collection(&d.0, "   ").is_err());
     }
 
     // ── sanitize edge cases ─────────────────────────────────────────────────
