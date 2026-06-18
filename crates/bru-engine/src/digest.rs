@@ -112,9 +112,7 @@ fn sha256_hex(input: &str) -> String {
 /// never matched and auth silently failed.
 fn hash_hex(algorithm: Option<&str>, input: &str) -> String {
     match algorithm {
-        Some(a)
-            if a.eq_ignore_ascii_case("SHA-256") || a.eq_ignore_ascii_case("SHA-256-sess") =>
-        {
+        Some(a) if a.eq_ignore_ascii_case("SHA-256") || a.eq_ignore_ascii_case("SHA-256-sess") => {
             sha256_hex(input)
         }
         _ => md5_hex(input),
@@ -132,7 +130,10 @@ pub fn authorization_header(
     cnonce: &str,
 ) -> String {
     let alg = challenge.algorithm.as_deref();
-    let base_ha1 = hash_hex(alg, &format!("{}:{}:{}", username, challenge.realm, password));
+    let base_ha1 = hash_hex(
+        alg,
+        &format!("{}:{}:{}", username, challenge.realm, password),
+    );
     // Any `*-sess` algorithm (MD5-sess / SHA-256-sess) derives HA1 from a
     // per-session hash that folds in the cnonce.
     let sess = alg

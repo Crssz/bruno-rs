@@ -297,7 +297,15 @@ fn print_outcome(o: &RunOutcome) {
 /// in CI logs or shell history.
 fn redact(name: &str, value: &str) -> String {
     const SECRETISH: &[&str] = &[
-        "token", "secret", "password", "passwd", "key", "auth", "bearer", "jwt", "cookie",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "key",
+        "auth",
+        "bearer",
+        "jwt",
+        "cookie",
         "credential",
     ];
     let lower = name.to_lowercase();
