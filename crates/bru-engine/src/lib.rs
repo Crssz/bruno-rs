@@ -107,6 +107,21 @@ pub async fn run_request(file: &BruFile, ctx: &mut RunContext) -> RunOutcome {
 
     interpolate_request(&mut req, &ctx.vars);
 
+    // Validate GraphQL variables up front: a typo would otherwise be silently
+    // dropped to `{}` by the body serializer, sending a variable-less request.
+    if let Body::GraphQl { variables, .. } = &req.body {
+        if !variables.trim().is_empty()
+            && serde_json::from_str::<serde_json::Value>(variables).is_err()
+        {
+            let mut outcome = RunOutcome::errored(name, "graphql variables are not valid JSON");
+            outcome.method = req.method;
+            outcome.url = req.url;
+            outcome.tests = tests;
+            outcome.console = console;
+            return outcome;
+        }
+    }
+
     // Resolve OAuth2: fetch a token from the token endpoint and place it on the
     // request (interactive grants are not supported and would project to None).
     if let Auth::OAuth2(cfg) = req.auth.clone() {

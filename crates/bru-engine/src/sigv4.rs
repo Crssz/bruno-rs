@@ -9,6 +9,7 @@
 use bru_core::{Auth, Body, KeyVal, Request};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
+use url::Url;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -171,13 +172,18 @@ fn payload_bytes(body: &Body) -> Vec<u8> {
     match body {
         Body::None => Vec::new(),
         Body::Json(s) | Body::Text(s) | Body::Xml(s) | Body::Sparql(s) => s.clone().into_bytes(),
-        Body::FormUrlEncoded(fields) => fields
-            .iter()
-            .filter(|f| f.enabled)
-            .map(|f| format!("{}={}", form_encode(&f.name), form_encode(&f.value)))
-            .collect::<Vec<_>>()
-            .join("&")
-            .into_bytes(),
+        Body::FormUrlEncoded(fields) => {
+            // Encode with the same serializer bru-http uses (serde_urlencoded), so
+            // the signed payload is byte-identical to what is sent on the wire.
+            let pairs: Vec<(&str, &str)> = fields
+                .iter()
+                .filter(|f| f.enabled)
+                .map(|f| (f.name.as_str(), f.value.as_str()))
+                .collect();
+            serde_urlencoded::to_string(&pairs)
+                .unwrap_or_default()
+                .into_bytes()
+        }
         // Must match the bytes bru-http actually sends for a GraphQL body.
         Body::GraphQl { query, variables } => {
             let vars: serde_json::Value = if variables.trim().is_empty() {
@@ -214,6 +220,13 @@ pub fn resolve(req: &mut Request, now_unix: u64) -> Result<(), String> {
     else {
         return Ok(());
     };
+
+    // The multipart boundary is generated at send time, so the exact signed bytes
+    // aren't knowable here. Rather than emit a guaranteed-to-be-rejected signature
+    // over an empty payload, fail clearly.
+    if matches!(req.body, Body::MultipartForm(_)) {
+        return Err("awsv4: signing multipart bodies is not supported".to_string());
+    }
 
     let url = url_parse(&req.url)?;
     let host = url.host.clone();
@@ -281,8 +294,9 @@ pub fn resolve(req: &mut Request, now_unix: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// A minimal split URL: host (for the `Host` header), path, and query pairs.
-/// Avoids pulling `url`/`reqwest` types into this pure-computation module.
+/// A split URL: host (for the `Host` header), the already-percent-encoded path
+/// (matching what reqwest puts on the wire), and the *decoded* query pairs (so
+/// SigV4 re-encodes each exactly once).
 struct ParsedUrl {
     host: String,
     path: String,
@@ -290,60 +304,32 @@ struct ParsedUrl {
 }
 
 fn url_parse(raw: &str) -> Result<ParsedUrl, String> {
-    // scheme://host/path?query
-    let after_scheme = raw.split_once("://").map(|(_, rest)| rest).unwrap_or(raw);
-    let (authority_path, query) = match after_scheme.split_once('?') {
-        Some((ap, q)) => (ap, Some(q)),
-        None => (after_scheme, None),
+    // Parse with the same crate reqwest uses so path encoding, query decoding,
+    // and host/port handling match the bytes actually sent on the wire.
+    let u = Url::parse(raw).map_err(|e| format!("awsv4: cannot parse URL `{raw}`: {e}"))?;
+    let host_str = u
+        .host_str()
+        .ok_or_else(|| format!("awsv4: URL has no host: `{raw}`"))?;
+    // The Host header omits the port when it is the scheme default (matching
+    // reqwest/hyper); a non-default explicit port is kept.
+    let default_port = match u.scheme() {
+        "https" => Some(443),
+        "http" => Some(80),
+        _ => None,
     };
-    let (authority, path) = match authority_path.find('/') {
-        Some(idx) => (&authority_path[..idx], &authority_path[idx..]),
-        None => (authority_path, ""),
+    let host = match u.port() {
+        Some(p) if Some(p) != default_port => format!("{host_str}:{p}"),
+        _ => host_str.to_string(),
     };
-    if authority.is_empty() {
-        return Err(format!("awsv4: cannot parse host from URL `{raw}`"));
-    }
-    // Host excludes any userinfo and port (Host header keeps the port; for SigV4
-    // the canonical host header is what reqwest sends, i.e. host[:port]).
-    let host = authority
-        .rsplit_once('@')
-        .map(|(_, h)| h)
-        .unwrap_or(authority)
-        .to_string();
-
-    let query_pairs = query
-        .map(|q| {
-            q.split('&')
-                .filter(|s| !s.is_empty())
-                .map(|pair| match pair.split_once('=') {
-                    Some((k, v)) => (k.to_string(), v.to_string()),
-                    None => (pair.to_string(), String::new()),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
+    let query_pairs = u
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
     Ok(ParsedUrl {
         host,
-        path: path.to_string(),
+        path: u.path().to_string(),
         query_pairs,
     })
-}
-
-/// `application/x-www-form-urlencoded` encoding for a form body field: space →
-/// `+`, unreserved bytes literal, everything else percent-encoded.
-fn form_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(b as char);
-            }
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 /// RFC 3986 unreserved-set URI encoding used by SigV4. When `encode_slash` is
@@ -403,5 +389,31 @@ mod tests {
     fn amz_date_formats_known_instant() {
         // 2015-08-30T12:36:00Z == 1440938160 seconds since epoch.
         assert_eq!(amz_date_from_unix(1_440_938_160), "20150830T123600Z");
+    }
+
+    #[test]
+    fn uri_encode_rules() {
+        assert_eq!(uri_encode("a b~c", true), "a%20b~c");
+        assert_eq!(uri_encode("/a b/c", false), "/a%20b/c");
+        assert_eq!(uri_encode("/a b/c", true), "%2Fa%20b%2Fc");
+    }
+
+    #[test]
+    fn url_parse_decodes_query_keeps_encoded_path_strips_default_port() {
+        let p = url_parse("https://h.example.com:443/a%20b?x=%20y&z=1").unwrap();
+        assert_eq!(p.host, "h.example.com"); // default 443 dropped, like hyper
+        assert_eq!(p.path, "/a%20b"); // encoded path == wire bytes
+        assert_eq!(
+            p.query_pairs,
+            vec![
+                ("x".to_string(), " y".to_string()), // query decoded (single-encode later)
+                ("z".to_string(), "1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn url_parse_keeps_non_default_port() {
+        assert_eq!(url_parse("http://h:8080/").unwrap().host, "h:8080");
     }
 }

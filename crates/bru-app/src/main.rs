@@ -80,12 +80,18 @@ impl App {
                 Task::none()
             }
             Message::Select(path) => {
-                let text = std::fs::read_to_string(&path).unwrap_or_default();
-                self.editor = text_editor::Content::with_text(&text);
-                self.on_disk = Some(text);
-                self.selected = Some(path);
-                self.result = None;
-                self.status.clear();
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => {
+                        self.editor = text_editor::Content::with_text(&text);
+                        self.on_disk = Some(text);
+                        self.selected = Some(path);
+                        self.result = None;
+                        self.status.clear();
+                    }
+                    // Don't blank the editor on a transient read error — keep the
+                    // current selection and surface the failure.
+                    Err(e) => self.status = format!("Failed to read {}: {e}", path.display()),
+                }
                 Task::none()
             }
             Message::Edit(action) => {

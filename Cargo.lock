@@ -525,8 +525,10 @@ dependencies = [
  "hmac",
  "md-5",
  "serde_json",
+ "serde_urlencoded",
  "sha2",
  "tokio",
+ "url",
 ]
 
 [[package]]

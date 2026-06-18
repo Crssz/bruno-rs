@@ -108,7 +108,18 @@ pub fn authorization_header(
     uri: &str,
     cnonce: &str,
 ) -> String {
-    let ha1 = md5_hex(&format!("{}:{}:{}", username, challenge.realm, password));
+    let base_ha1 = md5_hex(&format!("{}:{}:{}", username, challenge.realm, password));
+    // `algorithm=MD5-sess` derives HA1 from a per-session hash.
+    let sess = challenge
+        .algorithm
+        .as_deref()
+        .map(|a| a.eq_ignore_ascii_case("MD5-sess"))
+        .unwrap_or(false);
+    let ha1 = if sess {
+        md5_hex(&format!("{base_ha1}:{}:{cnonce}", challenge.nonce))
+    } else {
+        base_ha1
+    };
     let ha2 = md5_hex(&format!("{}:{}", method, uri));
 
     // RFC 7616: qop may be a comma-separated list; we support `auth`.
@@ -129,25 +140,39 @@ pub fn authorization_header(
         md5_hex(&format!("{ha1}:{}:{ha2}", challenge.nonce))
     };
 
+    // Quoted-string values (some echoed from the server's challenge) must be
+    // escaped so a hostile/buggy challenge can't break or inject into the header.
     let mut parts = vec![
-        format!("username=\"{username}\""),
-        format!("realm=\"{}\"", challenge.realm),
-        format!("nonce=\"{}\"", challenge.nonce),
-        format!("uri=\"{uri}\""),
+        format!("username=\"{}\"", quote(username)),
+        format!("realm=\"{}\"", quote(&challenge.realm)),
+        format!("nonce=\"{}\"", quote(&challenge.nonce)),
+        format!("uri=\"{}\"", quote(uri)),
         format!("response=\"{response}\""),
     ];
     if let Some(algorithm) = &challenge.algorithm {
-        parts.push(format!("algorithm={algorithm}"));
+        parts.push(format!("algorithm={}", quote(algorithm)));
     }
     if qop_auth {
         parts.push("qop=auth".to_string());
         parts.push(format!("nc={nc}"));
-        parts.push(format!("cnonce=\"{cnonce}\""));
+        parts.push(format!("cnonce=\"{}\"", quote(cnonce)));
     }
     if let Some(opaque) = &challenge.opaque {
-        parts.push(format!("opaque=\"{opaque}\""));
+        parts.push(format!("opaque=\"{}\"", quote(opaque)));
     }
     format!("Digest {}", parts.join(", "))
+}
+
+/// Escape a value for an RFC 7616 quoted-string: backslash-escape `\` and `"`,
+/// and drop CR/LF so it can't terminate or inject into the header line.
+fn quote(s: &str) -> String {
+    s.chars()
+        .filter(|c| *c != '\r' && *c != '\n')
+        .flat_map(|c| match c {
+            '\\' | '"' => vec!['\\', c],
+            _ => vec![c],
+        })
+        .collect()
 }
 
 /// Derive a client nonce from the system clock (no `rand` dependency): the

@@ -17,14 +17,15 @@ responses, and run collections headless in CI.
 | `.bru` parse/serialize | ✅ byte-stable round-trip over a real-Bruno fixture corpus |
 | Collections / environments | ✅ folder tree, `bruno.json`, `environments/*.bru` |
 | Variables | ✅ `{{var}}` interpolation, collection/env/request scopes, dynamic `{{$guid}}`/`{{$timestamp}}`/`{{$randomInt}}` |
-| Send | ✅ GET/POST/… with query/path params, headers, JSON/text/xml/form bodies (async, rustls) |
-| Auth | ✅ none / basic / bearer / api-key / **OAuth2** (`client_credentials` + `password` grants, auto token fetch + cache) · ⏳ OAuth2 browser grants / digest / awsv4 / ntlm / wsse |
+| Send | ✅ query/path params, headers; JSON/text/xml/form/**GraphQL**/**multipart** (file uploads) bodies (async, rustls) |
+| Auth | ✅ none / basic / bearer / api-key / **OAuth2** (`client_credentials`+`password`) / **Digest** / **AWS SigV4** · ⏳ OAuth2 browser grants / ntlm / wsse |
 | Assertions | ✅ `res.status` / `res.body.*` / `res.headers.*` with `eq`/`neq`/`gt`/`contains`/… |
 | Post-response vars | ✅ capture `res.body.*` into variables for request chaining |
 | Scripting | ✅ pre/post/test JS in a QuickJS Safe-Mode sandbox — `bru.*` / `req` / `res` / `test` / `expect` + a `pm.*` Postman shim; time/memory/stack-limited |
-| GUI | ✅ tree + send + response (status/timing/assertions/tests/console/body) |
-| CLI | ✅ `bru run <file-or-dir> [--env] [--insecure]` with pass/fail exit codes |
-| Postman import, collection runner, full auth (OAuth2/digest/…) | ⏳ planned |
+| Collection runner | ✅ `bru run <dir>`; **data-driven** via `--data <json\|csv>` (one iteration per row, row fields as vars) |
+| GUI | ✅ tree + **editable raw `.bru`** (validated Save) + send + response (status/timing/assertions/tests/console/body) |
+| CLI | ✅ `bru run <file-or-dir> [--env] [--insecure] [--data] [--iterations]` with pass/fail exit codes |
+| Postman import, GUI structured editors, NTLM/WSSE auth | ⏳ planned |
 
 ## Build & run
 

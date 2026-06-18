@@ -31,6 +31,8 @@ pub enum HttpError {
     BodyTooLarge(usize),
     #[error("failed to read multipart file `{0}`: {1}")]
     FileRead(String, String),
+    #[error("multipart file `{0}` exceeds the {1}-byte upload limit")]
+    FileTooLarge(String, usize),
     #[error("invalid multipart content-type: {0}")]
     InvalidMultipart(String),
 }
@@ -317,6 +319,17 @@ async fn build_multipart_form(
                 part
             }
             MultipartValue::File(path) => {
+                // Cap the file size before buffering it, so a multipart field
+                // pointing at a huge (or special) file can't OOM the run.
+                let meta = tokio::fs::metadata(path)
+                    .await
+                    .map_err(|e| HttpError::FileRead(path.clone(), e.to_string()))?;
+                if meta.len() > DEFAULT_MAX_RESPONSE_BYTES as u64 {
+                    return Err(HttpError::FileTooLarge(
+                        path.clone(),
+                        DEFAULT_MAX_RESPONSE_BYTES,
+                    ));
+                }
                 let bytes = tokio::fs::read(path)
                     .await
                     .map_err(|e| HttpError::FileRead(path.clone(), e.to_string()))?;
