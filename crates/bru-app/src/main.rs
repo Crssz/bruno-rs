@@ -106,6 +106,20 @@ struct App {
     /// Current git branch of the open collection (read from `.git/HEAD` on load),
     /// shown as a chip in the top bar. None when the collection isn't a git repo.
     git_branch: Option<String>,
+    /// Cookies observed from response `Set-Cookie` headers this session, shown in
+    /// the Cookies manager. (A viewer: a fresh client is built per send, so these
+    /// aren't auto-replayed — see the Cookies overlay note.)
+    cookies: Vec<CookieEntry>,
+    cookies_open: bool,
+}
+
+/// One stored cookie, keyed by (domain, path, name) for upsert.
+#[derive(Debug, Clone)]
+struct CookieEntry {
+    domain: String,
+    path: String,
+    name: String,
+    value: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -253,6 +267,8 @@ struct Tab {
     resp_editor: text_editor::Content,
     /// Expanded JSON-tree node paths (for the Tree view).
     resp_expanded: HashSet<String>,
+    /// JSONPath filter applied to the response body (empty = show full body).
+    resp_filter: String,
     /// Edit buffer for adding a tag in the Settings tab.
     tag_input: String,
     /// The KV section currently in raw "bulk edit" mode, if any.
@@ -341,6 +357,8 @@ enum MenuTarget {
     Folder(PathBuf),
     Collection,
     Tab(usize),
+    /// The response-actions kebab (Copy / Save / Clear / …).
+    Response,
 }
 
 /// A modal dialog. Text/selection state lives inline so the view is pure.
@@ -673,6 +691,7 @@ enum Message {
     BrowseFileBody,
     FileBodyContentType(String),
     RespEditorAction(text_editor::Action),
+    RespFilter(String),
     ToggleJsonNode(String),
     SaveExamplePrompt,
     TagInput(String),
@@ -709,6 +728,12 @@ enum Message {
     ToggleConsole,
     ClearConsole,
     DevtoolsTab(DevTab),
+
+    // ── cookies ──
+    OpenCookies,
+    CloseCookies,
+    DeleteCookie(usize),
+    ClearCookies,
 
     // ── preferences ──
     OpenPrefs,
@@ -808,6 +833,7 @@ impl App {
             resp_format: RespFormat::Pretty,
             resp_editor: text_editor::Content::new(),
             resp_expanded: HashSet::new(),
+            resp_filter: String::new(),
             tag_input: String::new(),
             bulk: None,
             bulk_editor: text_editor::Content::new(),
@@ -1088,6 +1114,17 @@ impl App {
                 if self.network.len() > 500 {
                     let drop = self.network.len() - 500;
                     self.network.drain(0..drop);
+                }
+                // Capture Set-Cookie headers into the cookie viewer.
+                if let Some(resp) = outcome.response.as_ref() {
+                    let host = host_of(&outcome.url);
+                    for (k, v) in &resp.headers {
+                        if k.eq_ignore_ascii_case("set-cookie") {
+                            if let Some(c) = parse_set_cookie(v, &host) {
+                                upsert_cookie(&mut self.cookies, c);
+                            }
+                        }
+                    }
                 }
                 if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
                     tab.sending = false;
@@ -1417,6 +1454,11 @@ impl App {
                     }
                 }
             }
+            Message::RespFilter(q) => {
+                if let Some(i) = self.active {
+                    self.tabs[i].resp_filter = q;
+                }
+            }
             Message::SaveExamplePrompt => {
                 if let Some(i) = self.active {
                     let n = example_count(&self.tabs[i].file) + 1;
@@ -1724,6 +1766,19 @@ impl App {
                 self.devtools_tab = t;
                 self.console_open = true;
             }
+
+            // ── cookies ──
+            Message::OpenCookies => {
+                self.menu = None;
+                self.cookies_open = true;
+            }
+            Message::CloseCookies => self.cookies_open = false,
+            Message::DeleteCookie(i) => {
+                if i < self.cookies.len() {
+                    self.cookies.remove(i);
+                }
+            }
+            Message::ClearCookies => self.cookies.clear(),
 
             // ── preferences ──
             Message::OpenPrefs => {
@@ -2368,6 +2423,9 @@ impl App {
         if let Some(r) = &self.runner {
             layers = layers.push(self.runner_overlay(r));
         }
+        if self.cookies_open {
+            layers = layers.push(self.cookies_overlay());
+        }
         layers.into()
     }
 
@@ -2453,6 +2511,82 @@ impl App {
                     .style(|_| scrim()),
             )
             .on_press(Message::RunnerClose),
+        );
+        stack![backdrop, container(opaque(card)).center(Fill).padding(40)].into()
+    }
+
+    /// The Cookies manager overlay: cookies captured from response `Set-Cookie`
+    /// headers this session, with per-row delete and Clear All.
+    fn cookies_overlay(&self) -> Element<'_, Message> {
+        let header = row![
+            text("Cookies").size(15).color(TEXT()).font(BOLD),
+            fill_x(),
+            button(text("Clear All").size(11).color(SUBTEXT()))
+                .style(|_, s| icon_button(s, SUBTEXT()))
+                .padding(Padding::from([2, 8]))
+                .on_press(Message::ClearCookies),
+            button(text("\u{00D7}").size(13).color(MUTED()))
+                .style(|_, s| icon_button(s, MUTED()))
+                .padding(Padding::from([2, 6]))
+                .on_press(Message::CloseCookies),
+        ]
+        .spacing(8)
+        .align_y(Center);
+
+        let mut list = Column::new().spacing(4);
+        if self.cookies.is_empty() {
+            list = list.push(
+                text("No cookies yet \u{2014} send a request that returns Set-Cookie.")
+                    .size(12)
+                    .color(MUTED()),
+            );
+        }
+        for (i, c) in self.cookies.iter().enumerate() {
+            list = list.push(
+                row![
+                    text(c.domain.clone())
+                        .size(12)
+                        .color(SUBTEXT())
+                        .font(MONO)
+                        .width(Length::FillPortion(2)),
+                    text(c.name.clone())
+                        .size(12)
+                        .color(ACCENT())
+                        .width(Length::FillPortion(2)),
+                    text(c.value.clone())
+                        .size(12)
+                        .color(TEXT())
+                        .font(MONO)
+                        .width(Length::FillPortion(3)),
+                    button(text("\u{00D7}").size(12).color(MUTED()))
+                        .style(|_, s| icon_button(s, MUTED()))
+                        .padding(Padding::from([0, 6]))
+                        .on_press(Message::DeleteCookie(i)),
+                ]
+                .spacing(10)
+                .align_y(Center),
+            );
+        }
+
+        let card = container(
+            column![
+                header,
+                container(scrollable(list).height(Fill)).height(Fill)
+            ]
+            .spacing(12),
+        )
+        .style(|_| modal_card())
+        .width(Length::Fixed(680.0))
+        .height(Length::Fixed(440.0))
+        .padding(16);
+        let backdrop = opaque(
+            mouse_area(
+                container(Space::new())
+                    .width(Fill)
+                    .height(Fill)
+                    .style(|_| scrim()),
+            )
+            .on_press(Message::CloseCookies),
         );
         stack![backdrop, container(opaque(card)).center(Fill).padding(40)].into()
     }
@@ -2750,6 +2884,27 @@ impl App {
                     v.push(menu_row("Clone", false, Message::CloneTab(i)));
                     v.push(menu_row("Copy Path", false, Message::CopyTabPath(i)));
                 }
+            }
+            MenuTarget::Response => {
+                let html = self
+                    .active
+                    .and_then(|i| self.tabs.get(i))
+                    .and_then(|t| t.result.as_ref())
+                    .and_then(|o| o.response.as_ref())
+                    .map(|r| is_html_response(&r.headers))
+                    .unwrap_or(false);
+                v.push(menu_row("Copy", false, Message::CopyResponse));
+                v.push(menu_row("Save to File", false, Message::DownloadResponse));
+                v.push(menu_row(
+                    "Save as Example",
+                    false,
+                    Message::SaveExamplePrompt,
+                ));
+                if html {
+                    v.push(menu_row("Open in Browser", false, Message::OpenInBrowser));
+                }
+                v.push(menu_sep());
+                v.push(menu_row("Clear", true, Message::ClearResponse));
             }
         }
         v
@@ -3349,6 +3504,7 @@ impl App {
             row![
                 fill_x(),
                 foot_btn("Search", false, Message::OpenPalette),
+                foot_btn("Cookies", self.cookies_open, Message::OpenCookies),
                 foot_btn("Dev Tools", self.console_open, Message::ToggleConsole),
                 text(concat!("v", env!("CARGO_PKG_VERSION")))
                     .size(11)
@@ -4307,6 +4463,20 @@ impl App {
         ));
         if let Some(r) = tab.result.as_ref().and_then(|o| o.response.as_ref()) {
             if tab.resp_tab == RespTab::Response && !is_image_response(&r.headers) {
+                // JSONPath filter: funnel input that extracts from the JSON body.
+                strip = strip.push(tooltip(
+                    text_input("\u{2315} $.path filter", &tab.resp_filter)
+                        .on_input(Message::RespFilter)
+                        .font(MONO)
+                        .size(12)
+                        .padding(Padding::from([2, 6]))
+                        .width(Length::Fixed(180.0))
+                        .style(input_style),
+                    container(text("Filter JSON by path, e.g. $.items[0].name").size(11))
+                        .style(|_| menu_panel())
+                        .padding(4),
+                    tooltip::Position::Bottom,
+                ));
                 let fmt = match tab.resp_format {
                     RespFormat::Pretty => "pretty",
                     RespFormat::Tree => "tree",
@@ -4320,37 +4490,12 @@ impl App {
                     Message::RespFormatChanged,
                 ));
             }
-            if is_html_response(&r.headers) {
-                strip = strip.push(
-                    button(text("Browser").size(12).color(SUBTEXT()))
-                        .style(|_, s| icon_button(s, SUBTEXT()))
-                        .padding(Padding::from([2, 6]))
-                        .on_press(Message::OpenInBrowser),
-                );
-            }
+            // Response actions collapse into a single kebab (⋯) menu.
             strip = strip.push(
-                button(text("Copy").size(12).color(SUBTEXT()))
+                button(text("\u{22EF}").size(15).color(SUBTEXT()))
                     .style(|_, s| icon_button(s, SUBTEXT()))
-                    .padding(Padding::from([2, 6]))
-                    .on_press(Message::CopyResponse),
-            );
-            strip = strip.push(
-                button(text("Save").size(12).color(SUBTEXT()))
-                    .style(|_, s| icon_button(s, SUBTEXT()))
-                    .padding(Padding::from([2, 6]))
-                    .on_press(Message::DownloadResponse),
-            );
-            strip = strip.push(
-                button(text("Clear").size(12).color(SUBTEXT()))
-                    .style(|_, s| icon_button(s, SUBTEXT()))
-                    .padding(Padding::from([2, 6]))
-                    .on_press(Message::ClearResponse),
-            );
-            strip = strip.push(
-                button(text("Save Example").size(12).color(SUBTEXT()))
-                    .style(|_, s| icon_button(s, SUBTEXT()))
-                    .padding(Padding::from([2, 6]))
-                    .on_press(Message::SaveExamplePrompt),
+                    .padding(Padding::from([2, 8]))
+                    .on_press(Message::OpenMenu(MenuTarget::Response)),
             );
             strip = strip.push(
                 row![
@@ -4475,6 +4620,29 @@ impl App {
                     .style(|_| rounded_panel(SURFACE0(), BORDER1()))
                     .padding(14)
                     .into()
+                } else if !tab.resp_filter.trim().is_empty() {
+                    // JSONPath filter active: show the extracted value.
+                    let q = tab.resp_filter.trim();
+                    match r.json() {
+                        Some(v) => match json_path(&v, q) {
+                            Some(fv) => scrollable(
+                                text(serde_json::to_string_pretty(&fv).unwrap_or_default())
+                                    .size(12)
+                                    .font(MONO)
+                                    .color(TEXT()),
+                            )
+                            .height(Fill)
+                            .into(),
+                            None => text(format!("No match for `{q}`"))
+                                .size(12)
+                                .color(MUTED())
+                                .into(),
+                        },
+                        None => text("Filter needs a JSON response.")
+                            .size(12)
+                            .color(MUTED())
+                            .into(),
+                    }
                 } else if tab.resp_format == RespFormat::Tree {
                     match r.json() {
                         Some(v) => scrollable(json_tree(&v, &tab.resp_expanded))
@@ -5992,6 +6160,145 @@ fn git_branch(dir: &Path) -> Option<String> {
         cur = d.parent();
     }
     None
+}
+
+/// Extract the host from a URL string without pulling in the `url` crate:
+/// strips scheme, path, userinfo, and port.
+fn host_of(u: &str) -> String {
+    let s = u.split("://").nth(1).unwrap_or(u);
+    let s = s.split('/').next().unwrap_or(s);
+    let s = s.rsplit('@').next().unwrap_or(s);
+    s.split(':').next().unwrap_or(s).to_string()
+}
+
+/// Parse a single `Set-Cookie` header value into a [`CookieEntry`], defaulting
+/// the domain to the responding host. Returns None if there's no `name=value`.
+fn parse_set_cookie(header: &str, host: &str) -> Option<CookieEntry> {
+    let mut parts = header.split(';');
+    let (name, value) = parts.next()?.trim().split_once('=')?;
+    let mut domain = host.to_string();
+    let mut path = "/".to_string();
+    for attr in parts {
+        if let Some((k, v)) = attr.trim().split_once('=') {
+            match k.trim().to_ascii_lowercase().as_str() {
+                "domain" => domain = v.trim().trim_start_matches('.').to_string(),
+                "path" => path = v.trim().to_string(),
+                _ => {}
+            }
+        }
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(CookieEntry {
+        domain,
+        path,
+        name: name.to_string(),
+        value: value.trim().to_string(),
+    })
+}
+
+/// Insert or replace a cookie, keyed by (domain, path, name) like a real jar.
+fn upsert_cookie(jar: &mut Vec<CookieEntry>, c: CookieEntry) {
+    if let Some(e) = jar
+        .iter_mut()
+        .find(|e| e.domain == c.domain && e.path == c.path && e.name == c.name)
+    {
+        e.value = c.value;
+    } else {
+        jar.push(c);
+    }
+}
+
+/// One step of a JSONPath query.
+enum PathStep {
+    Key(String),
+    Index(usize),
+    Wild,
+}
+
+/// Tokenize a JSONPath-ish query (`$.a.b[0].c[*]`) into steps. Supports `.key`,
+/// `["key"]`, `[index]`, `[*]`, and `.*`.
+fn json_path_tokens(q: &str) -> Vec<PathStep> {
+    fn flush(buf: &mut String, steps: &mut Vec<PathStep>) {
+        let s = buf.trim();
+        if !s.is_empty() {
+            steps.push(if s == "*" {
+                PathStep::Wild
+            } else {
+                PathStep::Key(s.to_string())
+            });
+        }
+        buf.clear();
+    }
+    let mut steps = Vec::new();
+    let mut buf = String::new();
+    let mut chars = q.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '.' => flush(&mut buf, &mut steps),
+            '[' => {
+                flush(&mut buf, &mut steps);
+                let mut inner = String::new();
+                for d in chars.by_ref() {
+                    if d == ']' {
+                        break;
+                    }
+                    inner.push(d);
+                }
+                let inner = inner.trim().trim_matches(|c| c == '"' || c == '\'');
+                if inner == "*" {
+                    steps.push(PathStep::Wild);
+                } else if let Ok(i) = inner.parse::<usize>() {
+                    steps.push(PathStep::Index(i));
+                } else if !inner.is_empty() {
+                    steps.push(PathStep::Key(inner.to_string()));
+                }
+            }
+            _ => buf.push(c),
+        }
+    }
+    flush(&mut buf, &mut steps);
+    steps
+}
+
+/// Apply a small JSONPath subset to `v`. Returns the matched value (an array
+/// when a wildcard fans out to several), or None on a miss.
+fn json_path(v: &serde_json::Value, query: &str) -> Option<serde_json::Value> {
+    use serde_json::Value as J;
+    let q = query.trim();
+    let q = q.strip_prefix('$').unwrap_or(q);
+    let mut cur: Vec<J> = vec![v.clone()];
+    for step in json_path_tokens(q) {
+        let mut next = Vec::new();
+        for node in &cur {
+            match (&step, node) {
+                (PathStep::Key(k), J::Object(m)) => {
+                    if let Some(child) = m.get(k) {
+                        next.push(child.clone());
+                    }
+                }
+                (PathStep::Index(i), J::Array(a)) => {
+                    if let Some(child) = a.get(*i) {
+                        next.push(child.clone());
+                    }
+                }
+                (PathStep::Wild, J::Array(a)) => next.extend(a.iter().cloned()),
+                (PathStep::Wild, J::Object(m)) => next.extend(m.values().cloned()),
+                _ => {}
+            }
+        }
+        cur = next;
+        if cur.is_empty() {
+            return None;
+        }
+    }
+    match cur.len() {
+        0 => None,
+        1 => cur.into_iter().next(),
+        _ => Some(J::Array(cur)),
+    }
 }
 
 /// Generate a `curl` command for a projected request (single-quote escaped).

@@ -985,3 +985,76 @@ fn gen_curl_single_quote_escaping() {
     // Single quotes are escaped with the '\'' idiom.
     assert!(c.contains("'\\''"));
 }
+
+// ── new helpers (Wave 1/2) ───────────────────────────────────────────────────
+
+#[test]
+fn host_of_strips_scheme_path_port_userinfo() {
+    assert_eq!(
+        host_of("https://api.github.com/search?q=1"),
+        "api.github.com"
+    );
+    assert_eq!(host_of("http://user:pw@example.com:8080/x"), "example.com");
+    assert_eq!(host_of("nohost"), "nohost");
+}
+
+#[test]
+fn parse_set_cookie_name_value_and_attrs() {
+    let c = parse_set_cookie("sid=abc; Path=/api; Domain=.example.com; HttpOnly", "h.com")
+        .expect("parses");
+    assert_eq!(c.name, "sid");
+    assert_eq!(c.value, "abc");
+    assert_eq!(c.path, "/api");
+    assert_eq!(c.domain, "example.com"); // leading dot stripped
+                                         // No Domain attr → falls back to the responding host.
+    let d = parse_set_cookie("t=1", "host.test").unwrap();
+    assert_eq!(d.domain, "host.test");
+    // Garbage (no `=`) is rejected.
+    assert!(parse_set_cookie("nonsense", "h").is_none());
+}
+
+#[test]
+fn upsert_cookie_replaces_same_key() {
+    let mut jar = Vec::new();
+    upsert_cookie(&mut jar, parse_set_cookie("a=1", "h").unwrap());
+    upsert_cookie(&mut jar, parse_set_cookie("a=2", "h").unwrap());
+    upsert_cookie(&mut jar, parse_set_cookie("b=9", "h").unwrap());
+    assert_eq!(jar.len(), 2);
+    assert_eq!(jar.iter().find(|c| c.name == "a").unwrap().value, "2");
+}
+
+#[test]
+fn json_path_navigates_keys_indexes_wildcards() {
+    let v: serde_json::Value =
+        serde_json::from_str(r#"{"items":[{"name":"a"},{"name":"b"}],"n":3}"#).unwrap();
+    assert_eq!(json_path(&v, "$.n"), Some(serde_json::json!(3)));
+    assert_eq!(json_path(&v, "items[0].name"), Some(serde_json::json!("a")));
+    assert_eq!(
+        json_path(&v, "$.items[*].name"),
+        Some(serde_json::json!(["a", "b"]))
+    );
+    assert_eq!(json_path(&v, "$.missing"), None);
+    assert_eq!(json_path(&v, "items[9]"), None);
+}
+
+#[test]
+fn git_branch_reads_head_ref_and_detached() {
+    let td = TempDir::new("git");
+    let git = td.0.join(".git");
+    std::fs::create_dir_all(&git).unwrap();
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/feature/x\n").unwrap();
+    assert_eq!(git_branch(&td.0).as_deref(), Some("feature/x"));
+    // Detached HEAD → short hash.
+    std::fs::write(git.join("HEAD"), "0123456789abcdef\n").unwrap();
+    assert_eq!(git_branch(&td.0).as_deref(), Some("0123456"));
+    // A subdirectory resolves the ancestor repo.
+    let sub = td.0.join("a/b");
+    std::fs::create_dir_all(&sub).unwrap();
+    assert_eq!(git_branch(&sub).as_deref(), Some("0123456"));
+}
+
+#[test]
+fn git_branch_none_outside_repo() {
+    let td = TempDir::new("nogit");
+    assert_eq!(git_branch(&td.0), None);
+}
