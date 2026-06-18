@@ -57,6 +57,14 @@ struct App {
     collapsed: HashSet<PathBuf>,
     envs: Vec<String>,
     selected_env: Option<String>,
+    /// User-level global environments (names) + selection, stored outside any
+    /// collection in `~/.bruno-rs/globals/environments/`. Their vars sit at the
+    /// lowest precedence, under collection + collection-env vars.
+    global_envs: Vec<String>,
+    selected_global_env: Option<String>,
+    /// Cached resolved global-env vars (selected global env's enabled, non-secret
+    /// vars), the base layer for both the URL preview and the send pipeline.
+    global_vars: HashMap<String, String>,
     tabs: Vec<Tab>,
     active: Option<usize>,
     status: String,
@@ -175,6 +183,17 @@ fn prefs_path() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(".bruno-rs.json"))
 }
 
+/// The user-level "global environments" pseudo-collection root
+/// (`~/.bruno-rs/globals`), creating its `environments/` dir on first use so the
+/// regular env fsops (which take a collection root and append `environments/`)
+/// operate on it unchanged.
+fn globals_root() -> Option<PathBuf> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    let root = PathBuf::from(home).join(".bruno-rs").join("globals");
+    std::fs::create_dir_all(root.join("environments")).ok()?;
+    Some(root)
+}
+
 fn load_prefs() -> Prefs {
     let mut p = Prefs::default();
     if let Some(path) = prefs_path() {
@@ -233,6 +252,8 @@ struct EnvEditor {
     rename_buf: String,
     rows: Vec<fsops::EnvRow>,
     error: Option<String>,
+    /// Scope: false = the open collection's environments, true = global ones.
+    global: bool,
 }
 
 /// What an open tab represents.
@@ -710,6 +731,8 @@ enum Message {
 
     // ── environment manager ──
     OpenEnvEditor,
+    EnvScope(bool),
+    SelectGlobalEnv(Option<String>),
     EnvSelect(String),
     EnvName(usize, String),
     EnvValue(usize, String),
@@ -761,6 +784,7 @@ impl App {
             ..App::default()
         };
         theme::set_light(app.prefs.light);
+        app.global_envs = globals_root().map(|r| scan_envs(&r)).unwrap_or_default();
         match std::env::args().nth(1) {
             Some(arg) => app.load(PathBuf::from(arg)),
             None => app.status = "Open a Bruno collection folder to begin.".to_string(),
@@ -1074,8 +1098,9 @@ impl App {
                     let env = self.selected_env.clone();
                     let dev = self.developer_mode;
                     let opts = self.prefs.send_options();
+                    let globals = self.global_vars.clone();
                     return Task::perform(
-                        send_request(file, vars_path, script_dir, env, dev, opts),
+                        send_request(file, vars_path, script_dir, env, globals, dev, opts),
                         move |o| Message::Sent(id, o),
                     );
                 }
@@ -1575,11 +1600,34 @@ impl App {
                             rename_buf: first,
                             rows,
                             error: None,
+                            global: false,
                         }
                     }
                     None => EnvEditor::default(),
                 };
                 self.env_editor = Some(ed);
+            }
+            Message::EnvScope(global) => {
+                // Switch the env manager between collection and global scope, then
+                // re-seed the selection + rows from the new scope's first env.
+                if self.env_editor.as_ref().is_some_and(|e| e.global) != global {
+                    if let Some(ed) = &mut self.env_editor {
+                        ed.global = global;
+                        ed.error = None;
+                    }
+                    self.rescan_envs();
+                    let first = self.env_names().first().cloned().unwrap_or_default();
+                    let rows = self.load_env_rows(&first);
+                    if let Some(ed) = &mut self.env_editor {
+                        ed.selected = first.clone();
+                        ed.rename_buf = first;
+                        ed.rows = rows;
+                    }
+                }
+            }
+            Message::SelectGlobalEnv(name) => {
+                self.selected_global_env = name;
+                self.refresh_global_vars();
             }
             Message::EnvSelect(name) => {
                 let rows = self.load_env_rows(&name);
@@ -1634,7 +1682,7 @@ impl App {
                 }
             }
             Message::EnvSave => {
-                if let (Some(dir), Some(ed)) = (self.collection_dir.clone(), &mut self.env_editor) {
+                if let (Some(dir), Some(ed)) = (self.env_root(), &mut self.env_editor) {
                     if ed.selected.is_empty() {
                         ed.error = Some("Select or create an environment first".to_string());
                     } else {
@@ -1642,23 +1690,22 @@ impl App {
                             Ok(()) => ed.error = None,
                             Err(e) => ed.error = Some(e),
                         }
-                        self.envs = scan_envs(&dir);
-                        self.refresh_vars();
+                        self.after_env_change();
                     }
                 }
             }
             Message::EnvClose => self.env_editor = None,
             Message::EnvNew => {
-                if let Some(dir) = self.collection_dir.clone() {
+                if let Some(dir) = self.env_root() {
                     let mut name = "New Environment".to_string();
                     let mut n = 1;
-                    while self.envs.iter().any(|e| e == &name) {
+                    while self.env_names().iter().any(|e| e == &name) {
                         n += 1;
                         name = format!("New Environment {n}");
                     }
                     match fsops::create_env(&dir, &name) {
                         Ok(()) => {
-                            self.envs = scan_envs(&dir);
+                            self.rescan_envs();
                             let rows = self.load_env_rows(&name);
                             if let Some(ed) = &mut self.env_editor {
                                 ed.rename_buf = name.clone();
@@ -1676,16 +1723,23 @@ impl App {
                 }
             }
             Message::EnvDelete(name) => {
-                if let Some(dir) = self.collection_dir.clone() {
+                let global = self.env_editor.as_ref().is_some_and(|e| e.global);
+                if let Some(dir) = self.env_root() {
                     let _ = fsops::delete_env(&dir, &name);
-                    self.envs = scan_envs(&dir);
-                    if self.selected_env.as_deref() == Some(name.as_str()) {
+                    self.rescan_envs();
+                    if global {
+                        if self.selected_global_env.as_deref() == Some(name.as_str()) {
+                            self.selected_global_env = None;
+                            self.refresh_global_vars();
+                        }
+                    } else if self.selected_env.as_deref() == Some(name.as_str()) {
                         self.selected_env = None;
                         self.refresh_vars();
                     }
+                    let first = self.env_names().first().cloned().unwrap_or_default();
                     if let Some(ed) = &mut self.env_editor {
                         if ed.selected == name {
-                            ed.selected = self.envs.first().cloned().unwrap_or_default();
+                            ed.selected = first;
                         }
                     }
                     let sel = self
@@ -1703,9 +1757,9 @@ impl App {
                 }
             }
             Message::EnvDuplicate(name) => {
-                if let Some(dir) = self.collection_dir.clone() {
+                if let Some(dir) = self.env_root() {
                     let _ = fsops::duplicate_env(&dir, &name);
-                    self.envs = scan_envs(&dir);
+                    self.rescan_envs();
                 }
             }
             Message::EnvRenameBuf(v) => {
@@ -1714,7 +1768,8 @@ impl App {
                 }
             }
             Message::EnvRenameApply => {
-                if let Some(dir) = self.collection_dir.clone() {
+                let global = self.env_editor.as_ref().is_some_and(|e| e.global);
+                if let Some(dir) = self.env_root() {
                     let (old, new) = self
                         .env_editor
                         .as_ref()
@@ -1723,8 +1778,13 @@ impl App {
                     if !old.is_empty() && !new.is_empty() && old != new {
                         match fsops::rename_env(&dir, &old, &new) {
                             Ok(()) => {
-                                self.envs = scan_envs(&dir);
-                                if self.selected_env.as_deref() == Some(old.as_str()) {
+                                self.rescan_envs();
+                                if global {
+                                    if self.selected_global_env.as_deref() == Some(old.as_str()) {
+                                        self.selected_global_env = Some(new.clone());
+                                        self.refresh_global_vars();
+                                    }
+                                } else if self.selected_env.as_deref() == Some(old.as_str()) {
                                     self.selected_env = Some(new.clone());
                                     self.refresh_vars();
                                 }
@@ -1763,7 +1823,11 @@ impl App {
                 let env = self.selected_env.clone();
                 let dev = self.developer_mode;
                 let opts = self.prefs.send_options();
-                return Task::perform(run_folder(files, dir, env, dev, opts), Message::RunnerDone);
+                let globals = self.global_vars.clone();
+                return Task::perform(
+                    run_folder(files, dir, env, globals, dev, opts),
+                    Message::RunnerDone,
+                );
             }
             Message::RunnerDone(results) => {
                 if let Some(r) = &mut self.runner {
@@ -2034,10 +2098,10 @@ impl App {
         if name.is_empty() {
             return Vec::new();
         }
-        let Some(dir) = &self.collection_dir else {
+        let Some(dir) = self.env_root() else {
             return Vec::new();
         };
-        bru_lang::load_env(dir, name)
+        bru_lang::load_env(&dir, name)
             .unwrap_or_default()
             .into_iter()
             .map(|v| fsops::EnvRow {
@@ -2061,13 +2125,70 @@ impl App {
         self.refresh_vars();
     }
 
-    /// Recompute the cached collection + selected-environment variable map used
-    /// for the URL hover preview. Cheap to call; reads at most two `.bru` files.
+    /// Recompute the cached variable map used for the URL hover preview: global
+    /// env vars (base) overlaid by collection + collection-env vars. Cheap to
+    /// call; reads at most two `.bru` files (globals are already cached).
     fn refresh_vars(&mut self) {
-        self.vars = match &self.collection_dir {
-            Some(dir) => base_vars(dir, self.selected_env.as_deref()),
-            None => HashMap::new(),
+        let mut m = self.global_vars.clone();
+        if let Some(dir) = &self.collection_dir {
+            for (k, v) in base_vars(dir, self.selected_env.as_deref()) {
+                m.insert(k, v);
+            }
+        }
+        self.vars = m;
+    }
+
+    /// Recompute the cached global-env vars from the selected global environment,
+    /// then refresh the (collection-overlaid) preview map.
+    fn refresh_global_vars(&mut self) {
+        self.global_vars = match (&self.selected_global_env, globals_root()) {
+            (Some(name), Some(root)) => bru_lang::load_env(&root, name)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|v| v.enabled && !v.secret)
+                .map(|v| (v.name, v.value))
+                .collect(),
+            _ => HashMap::new(),
         };
+        self.refresh_vars();
+    }
+
+    /// The collection root the env manager currently targets: the globals
+    /// pseudo-collection in Global scope, else the open collection.
+    fn env_root(&self) -> Option<PathBuf> {
+        if self.env_editor.as_ref().is_some_and(|e| e.global) {
+            globals_root()
+        } else {
+            self.collection_dir.clone()
+        }
+    }
+
+    /// Environment names for the active editor scope.
+    fn env_names(&self) -> &[String] {
+        if self.env_editor.as_ref().is_some_and(|e| e.global) {
+            &self.global_envs
+        } else {
+            &self.envs
+        }
+    }
+
+    /// Re-scan environments for the active scope into the matching name list.
+    fn rescan_envs(&mut self) {
+        if self.env_editor.as_ref().is_some_and(|e| e.global) {
+            self.global_envs = globals_root().map(|r| scan_envs(&r)).unwrap_or_default();
+        } else if let Some(dir) = &self.collection_dir {
+            self.envs = scan_envs(dir);
+        }
+    }
+
+    /// Rescan + refresh vars after an env CRUD op, honoring the active scope.
+    fn after_env_change(&mut self) {
+        self.rescan_envs();
+        if self.env_editor.as_ref().is_some_and(|e| e.global) {
+            self.refresh_global_vars();
+        } else {
+            self.refresh_vars();
+        }
     }
 
     fn modal_set_name(&mut self, v: String) {
@@ -3234,8 +3355,25 @@ impl App {
 
     /// The environment-manager overlay: env list (left) + variables table (right).
     fn env_overlay<'a>(&'a self, ed: &'a EnvEditor) -> Element<'a, Message> {
-        // Left: environment list with New / per-env duplicate+delete.
+        // Left: scope toggle, then environment list with New / duplicate / delete.
+        let scope_btn = |label: &str, on: bool, global: bool| {
+            button(
+                text(label.to_string())
+                    .size(11)
+                    .color(if on { TEXT() } else { MUTED() }),
+            )
+            .style(move |_, _| tab_button(on))
+            .padding(Padding::from([3, 8]))
+            .on_press(Message::EnvScope(global))
+        };
         let mut list = Column::new().spacing(2);
+        list = list.push(
+            row![
+                scope_btn("Collection", !ed.global, false),
+                scope_btn("Global", ed.global, true),
+            ]
+            .spacing(2),
+        );
         list = list.push(
             button(text("+ New Environment").size(12).color(ACCENT()))
                 .style(|_, s| icon_button(s, ACCENT()))
@@ -3243,7 +3381,7 @@ impl App {
                 .padding(Padding::from([5, 8]))
                 .on_press(Message::EnvNew),
         );
-        for name in &self.envs {
+        for name in self.env_names() {
             let active = ed.selected == *name;
             let row_el = row![
                 button(
@@ -3436,6 +3574,30 @@ impl App {
             }
         });
 
+        // Global-environment selector (user-level, applies across collections).
+        let global_selector: Element<'_, Message> = if self.global_envs.is_empty() {
+            Space::new().into()
+        } else {
+            let mut pairs = vec![(String::new(), "No Global Env".to_string())];
+            for e in &self.global_envs {
+                pairs.push((e.clone(), e.clone()));
+            }
+            let val = self.selected_global_env.clone().unwrap_or_default();
+            row![
+                text("Global:").size(12).color(MUTED()),
+                dropdown(pairs, &val, Length::Fixed(160.0), |s| {
+                    if s.is_empty() {
+                        Message::SelectGlobalEnv(None)
+                    } else {
+                        Message::SelectGlobalEnv(Some(s))
+                    }
+                }),
+            ]
+            .spacing(6)
+            .align_y(Center)
+            .into()
+        };
+
         // Git branch chip (only when the collection lives in a repo).
         let branch: Element<'_, Message> = match &self.git_branch {
             Some(b) => row![
@@ -3501,6 +3663,7 @@ impl App {
                     .style(checkbox_style),
                 text("Env:").size(12).color(MUTED()),
                 env_selector,
+                global_selector,
                 tooltip(
                     button(text("\u{2699}").size(14).color(SUBTEXT()))
                         .style(|_, s| icon_button(s, SUBTEXT()))
@@ -6070,6 +6233,7 @@ async fn run_folder(
     files: Vec<PathBuf>,
     vars_base: PathBuf,
     env: Option<String>,
+    global_vars: HashMap<String, String>,
     developer_mode: bool,
     opts: SendOptions,
 ) -> Vec<RunResult> {
@@ -6085,8 +6249,12 @@ async fn run_folder(
             }]
         }
     };
+    let mut vars = global_vars;
+    for (k, v) in base_vars(&vars_base, env.as_deref()) {
+        vars.insert(k, v);
+    }
     let mut ctx = RunContext {
-        vars: base_vars(&vars_base, env.as_deref()),
+        vars,
         client,
         send_options: opts,
         developer_mode,
@@ -6148,11 +6316,13 @@ async fn run_folder(
     results
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_request(
     file: BruFile,
     vars_path: Option<PathBuf>,
     script_dir: Option<PathBuf>,
     env: Option<String>,
+    global_vars: HashMap<String, String>,
     developer_mode: bool,
     opts: SendOptions,
 ) -> Box<RunOutcome> {
@@ -6160,10 +6330,14 @@ async fn send_request(
         .request_name()
         .map(str::to_string)
         .unwrap_or_else(|| "request".to_string());
-    let vars = vars_path
-        .as_deref()
-        .map(|p| base_vars(p, env.as_deref()))
-        .unwrap_or_default();
+    // Global env vars are the base layer; collection + collection-env vars
+    // (from base_vars) override them.
+    let mut vars = global_vars;
+    if let Some(p) = vars_path.as_deref() {
+        for (k, v) in base_vars(p, env.as_deref()) {
+            vars.insert(k, v);
+        }
+    }
     let client = match HttpClient::new(&opts) {
         Ok(c) => c,
         Err(e) => return Box::new(RunOutcome::errored(name, format!("{e}"))),

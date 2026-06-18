@@ -1187,7 +1187,7 @@ async fn send_request_success_path() {
     );
     let file = bru_lang::parse(&src).unwrap();
     let opts = Prefs::default().send_options();
-    let outcome = send_request(file, None, None, None, false, opts).await;
+    let outcome = send_request(file, None, None, None, HashMap::new(), false, opts).await;
     let _ = server.join();
     assert!(outcome.error.is_none(), "error: {:?}", outcome.error);
     assert_eq!(outcome.response.as_ref().unwrap().status, 200);
@@ -1218,6 +1218,7 @@ async fn send_request_resolves_vars_from_path() {
         Some(r1.clone()),
         None,
         Some("dev".to_string()),
+        HashMap::new(),
         false,
         opts,
     )
@@ -1232,7 +1233,7 @@ async fn send_request_not_a_request_errors() {
     // A folder.bru (no method block) -> run_request returns an errored outcome.
     let file = bru_lang::parse("meta {\n  name: F\n  type: folder\n}\n").unwrap();
     let opts = Prefs::default().send_options();
-    let outcome = send_request(file, None, None, None, false, opts).await;
+    let outcome = send_request(file, None, None, None, HashMap::new(), false, opts).await;
     assert!(outcome.error.is_some());
     assert_eq!(outcome.name, "F");
 }
@@ -1250,7 +1251,15 @@ async fn run_folder_runs_each_request() {
     .unwrap();
     let files = vec![target.clone()];
     let opts = Prefs::default().send_options();
-    let results = run_folder(files, d.path().to_path_buf(), None, false, opts).await;
+    let results = run_folder(
+        files,
+        d.path().to_path_buf(),
+        None,
+        HashMap::new(),
+        false,
+        opts,
+    )
+    .await;
     let _ = server.join();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].status, 200);
@@ -1269,7 +1278,15 @@ async fn run_folder_missing_and_parse_error_and_non_request() {
 
     let files = vec![missing, bad, folder];
     let opts = Prefs::default().send_options();
-    let results = run_folder(files, d.path().to_path_buf(), None, false, opts).await;
+    let results = run_folder(
+        files,
+        d.path().to_path_buf(),
+        None,
+        HashMap::new(),
+        false,
+        opts,
+    )
+    .await;
     // Missing + parse-error each produce a RunResult with an error; the folder
     // (non-request) is silently skipped -> 2 results total.
     assert_eq!(results.len(), 2);

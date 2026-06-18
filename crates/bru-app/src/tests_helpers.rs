@@ -1058,3 +1058,25 @@ fn git_branch_none_outside_repo() {
     let td = TempDir::new("nogit");
     assert_eq!(git_branch(&td.0), None);
 }
+
+#[test]
+fn global_vars_are_overlaid_by_collection_vars() {
+    let td = TempDir::new("gvars");
+    std::fs::write(
+        td.0.join("collection.bru"),
+        "vars:pre-request {\n  a: collection\n}\n",
+    )
+    .unwrap();
+    let mut app = App {
+        collection_dir: Some(td.0.clone()),
+        ..App::default()
+    };
+    app.global_vars = std::collections::HashMap::from([
+        ("a".to_string(), "global".to_string()),
+        ("g".to_string(), "gval".to_string()),
+    ]);
+    app.refresh_vars();
+    // Collection vars override global ones; global-only vars survive as the base.
+    assert_eq!(app.vars.get("a").map(String::as_str), Some("collection"));
+    assert_eq!(app.vars.get("g").map(String::as_str), Some("gval"));
+}
