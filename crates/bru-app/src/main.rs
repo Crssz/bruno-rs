@@ -18,6 +18,7 @@
 
 mod edit;
 mod fsops;
+mod import;
 mod theme;
 
 use std::collections::{HashMap, HashSet};
@@ -460,6 +461,10 @@ enum Modal {
     SaveExample {
         name: String,
     },
+    ImportCurl {
+        text: String,
+        error: Option<String>,
+    },
 }
 
 /// The multiline `text_editor` buffers for the active request. Rebuilt from
@@ -696,6 +701,9 @@ enum Message {
     NewRequestPrompt(PathBuf),
     NewFolderPrompt(PathBuf),
     NewCollectionPrompt,
+    ImportPostman,
+    ImportCurlPrompt,
+    ImportCurlText(String),
     RenamePrompt(PathBuf, bool),
     ClonePrompt(PathBuf, bool),
     DeletePrompt(PathBuf, bool),
@@ -951,6 +959,16 @@ impl App {
         load_editors_for(&mut tab);
         self.tabs.push(tab);
         self.active = Some(self.tabs.len() - 1);
+    }
+
+    /// Open an unsaved draft tab from a parsed `.bru` file (e.g. a curl import).
+    fn open_draft_from(&mut self, file: BruFile) {
+        let mut tab = self.blank_tab(None, file, String::new());
+        tab.dirty = true;
+        load_editors_for(&mut tab);
+        self.tabs.push(tab);
+        self.active = Some(self.tabs.len() - 1);
+        self.home = false;
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -1280,6 +1298,39 @@ impl App {
                         name: String::new(),
                         error: None,
                     });
+                }
+            }
+            Message::ImportPostman => {
+                self.menu = None;
+                if let Some(file) = rfd::FileDialog::new()
+                    .add_filter("Postman collection", &["json"])
+                    .pick_file()
+                {
+                    match std::fs::read_to_string(&file) {
+                        Ok(json) => {
+                            let parent = file
+                                .parent()
+                                .map(Path::to_path_buf)
+                                .unwrap_or_else(|| PathBuf::from("."));
+                            match import::import_postman(&json, &parent) {
+                                Ok(dir) => self.load(dir),
+                                Err(e) => self.status = format!("Import failed: {e}"),
+                            }
+                        }
+                        Err(e) => self.status = format!("Could not read file: {e}"),
+                    }
+                }
+            }
+            Message::ImportCurlPrompt => {
+                self.menu = None;
+                self.modal = Some(Modal::ImportCurl {
+                    text: String::new(),
+                    error: None,
+                });
+            }
+            Message::ImportCurlText(v) => {
+                if let Some(Modal::ImportCurl { text, .. }) = &mut self.modal {
+                    *text = v;
                 }
             }
             Message::RenamePrompt(path, is_folder) => {
@@ -2305,6 +2356,23 @@ impl App {
                     }
                 }
             }
+            Modal::ImportCurl { text, .. } => match import::curl_to_bru(&text) {
+                Some((_, bru)) => match bru_lang::parse(&bru) {
+                    Ok(file) => self.open_draft_from(file),
+                    Err(e) => {
+                        self.modal = Some(Modal::ImportCurl {
+                            text,
+                            error: Some(e.to_string()),
+                        })
+                    }
+                },
+                None => {
+                    self.modal = Some(Modal::ImportCurl {
+                        text,
+                        error: Some("No URL found in the curl command".to_string()),
+                    })
+                }
+            },
             Modal::Rename {
                 path,
                 is_folder,
@@ -3039,6 +3107,16 @@ impl App {
                     Message::NewCollectionPrompt,
                 ));
                 v.push(menu_row("Open Collection", false, Message::OpenFolder));
+                v.push(menu_row(
+                    "Import Postman\u{2026}",
+                    false,
+                    Message::ImportPostman,
+                ));
+                v.push(menu_row(
+                    "Import curl\u{2026}",
+                    false,
+                    Message::ImportCurlPrompt,
+                ));
                 if let Some(dir) = self.collection_dir.clone() {
                     v.push(menu_sep());
                     v.push(menu_row(
@@ -3208,6 +3286,25 @@ impl App {
                 .spacing(10)
                 .into(),
                 "Create",
+                false,
+            ),
+            Modal::ImportCurl { text, error } => modal_card_view(
+                "Import curl",
+                column![
+                    labeled(
+                        "curl command",
+                        text_input("curl https://api.example.com -H 'k: v'", text)
+                            .on_input(Message::ImportCurlText)
+                            .on_submit(Message::ModalSubmit)
+                            .font(MONO)
+                            .padding(8)
+                            .style(input_style)
+                    ),
+                    modal_error(error),
+                ]
+                .spacing(10)
+                .into(),
+                "Import",
                 false,
             ),
             Modal::Rename { name, error, .. } => modal_card_view(
@@ -3881,6 +3978,19 @@ impl App {
                     .style(|_, _| solid_button(ACCENT(), BLACK))
                     .padding(Padding::from([8, 16]))
                     .on_press(Message::NewCollectionPrompt),
+            ]
+            .spacing(10),
+        );
+        col = col.push(
+            row![
+                button(text("Import Postman").size(12).color(SUBTEXT()))
+                    .style(|_, s| ghost_button(s))
+                    .padding(Padding::from([6, 12]))
+                    .on_press(Message::ImportPostman),
+                button(text("Import curl").size(12).color(SUBTEXT()))
+                    .style(|_, s| ghost_button(s))
+                    .padding(Padding::from([6, 12]))
+                    .on_press(Message::ImportCurlPrompt),
             ]
             .spacing(10),
         );
