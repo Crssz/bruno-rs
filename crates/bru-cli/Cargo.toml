@@ -12,3 +12,7 @@ path = "src/main.rs"
 [dependencies]
 bru-core.workspace = true
 bru-lang.workspace = true
+bru-engine.workspace = true
+bru-http.workspace = true
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

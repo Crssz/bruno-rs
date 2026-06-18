@@ -8,4 +8,8 @@ license.workspace = true
 [dependencies]
 bru-core.workspace = true
 bru-http.workspace = true
-bru-script.workspace = true
+bru-lang.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

@@ -3,10 +3,12 @@
 //! The acceptance bar is `serialize(parse(x)) == x` over a corpus of real Bruno
 //! files (see this crate's integration tests).
 
+mod env;
 mod loader;
 mod parse;
 mod serialize;
 
+pub use env::{load_env, parse_env, EnvVar};
 pub use loader::load_collection;
 pub use parse::{parse, ParseError};
 pub use serialize::serialize;

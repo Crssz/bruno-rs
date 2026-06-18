@@ -12,5 +12,8 @@ path = "src/main.rs"
 [dependencies]
 bru-core.workspace = true
 bru-lang.workspace = true
-iced = "0.14"
+bru-engine.workspace = true
+bru-http.workspace = true
+serde_json.workspace = true
+iced = { version = "0.14", features = ["tokio"] }
 rfd = "0.15"
