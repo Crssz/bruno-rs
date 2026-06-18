@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use bru_core::{
     eval_response_expr, evaluate_assertions, interpolate, AssertOutcome, Auth, Body, BruFile,
-    KeyVal, OAuth2, Request, ResponseFacts,
+    KeyVal, MultipartValue, OAuth2, Request, ResponseFacts,
 };
 use bru_http::{HttpClient, HttpResponse};
 use bru_script::{run_script, ScriptInput, ScriptRequest, ScriptResponse};
@@ -348,6 +348,20 @@ fn interpolate_request(req: &mut Request, vars: &HashMap<String, String>) {
                 f.value = i(&f.value);
             }
             Body::FormUrlEncoded(fields)
+        }
+        Body::GraphQl { query, variables } => Body::GraphQl {
+            query: i(&query),
+            variables: i(&variables),
+        },
+        Body::MultipartForm(mut fields) => {
+            for f in &mut fields {
+                f.value = match std::mem::replace(&mut f.value, MultipartValue::Text(String::new()))
+                {
+                    MultipartValue::Text(s) => MultipartValue::Text(i(&s)),
+                    MultipartValue::File(p) => MultipartValue::File(i(&p)),
+                };
+            }
+            Body::MultipartForm(fields)
         }
     };
     req.auth = match std::mem::take(&mut req.auth) {

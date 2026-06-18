@@ -184,6 +184,84 @@ async fn content_type_not_duplicated_when_header_present() {
 }
 
 #[tokio::test]
+async fn graphql_body_sends_json_with_query_and_variables() {
+    let (base, server) = mock_server(r#"{"data":{"ok":true}}"#);
+    // `{{id}}` interpolates into the variables block; query is outdented text.
+    let src = "meta {\n  name: G\n  type: http\n}\n\n\
+        post {\n  url: URL\n  body: graphql\n  auth: none\n}\n\n\
+        body:graphql {\n  query Q($id: ID!) {\n    user(id: $id) { name }\n  }\n}\n\n\
+        body:graphql:vars {\n  {\n    \"id\": \"{{id}}\"\n  }\n}\n";
+    let file = bru_lang::parse(&src.replace("URL", &format!("{base}/graphql"))).unwrap();
+
+    let mut ctx = RunContext::default();
+    ctx.vars.insert("id".to_string(), "42".to_string());
+
+    let outcome = run_request(&file, &mut ctx).await;
+    let sent = server.join().unwrap();
+
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert!(
+        sent.to_lowercase()
+            .contains("content-type: application/json"),
+        "missing json content-type:\n{sent}"
+    );
+    // Body is the last line after the blank-line header separator.
+    let body = sent.split("\r\n\r\n").nth(1).unwrap_or("");
+    let json: serde_json::Value = serde_json::from_str(body.trim()).expect("body is JSON");
+    assert!(
+        json["query"].as_str().unwrap().contains("user(id: $id)"),
+        "query missing:\n{json}"
+    );
+    assert_eq!(json["variables"]["id"], "42");
+}
+
+#[tokio::test]
+async fn multipart_body_sends_text_and_file_parts() {
+    use std::io::Write as _;
+
+    // Write a temp file to act as the file part.
+    let path = std::env::temp_dir().join("bru_rs_multipart_test.txt");
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"hello-from-file").unwrap();
+    }
+    let path_str = path.to_string_lossy().replace('\\', "\\\\");
+
+    let (base, server) = mock_server(r#"{"ok":true}"#);
+    let src = format!(
+        "meta {{\n  name: M\n  type: http\n}}\n\n\
+        post {{\n  url: {base}/upload\n  body: multipartForm\n  auth: none\n}}\n\n\
+        body:multipart-form {{\n  field1: {{{{val}}}}\n  doc: @file({path_str})\n}}\n"
+    );
+    let file = bru_lang::parse(&src).unwrap();
+
+    let mut ctx = RunContext::default();
+    ctx.vars.insert("val".to_string(), "textvalue".to_string());
+
+    let outcome = run_request(&file, &mut ctx).await;
+    let sent = server.join().unwrap();
+
+    let _ = std::fs::remove_file(&path);
+
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert!(
+        sent.to_lowercase()
+            .contains("content-type: multipart/form-data; boundary="),
+        "missing multipart content-type:\n{sent}"
+    );
+    assert!(
+        sent.contains("name=\"field1\"") && sent.contains("textvalue"),
+        "text field missing:\n{sent}"
+    );
+    assert!(
+        sent.contains("name=\"doc\"")
+            && sent.contains("filename=\"bru_rs_multipart_test.txt\"")
+            && sent.contains("hello-from-file"),
+        "file part missing:\n{sent}"
+    );
+}
+
+#[tokio::test]
 async fn failed_assertion_marks_outcome_failed() {
     let (base, server) = mock_server(r#"{"status":"error"}"#);
     let src = "meta {\n  name: X\n  type: http\n}\n\nget {\n  url: URL\n  auth: none\n}\n\nassert {\n  res.status: 404\n}\n";

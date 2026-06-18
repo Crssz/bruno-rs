@@ -30,6 +30,23 @@ pub struct Assertion {
     pub enabled: bool,
 }
 
+/// One field of a `multipart/form-data` body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultipartField {
+    pub name: String,
+    pub value: MultipartValue,
+    /// An explicit per-part content-type (`@contentType(...)`), if any.
+    pub content_type: Option<String>,
+    pub enabled: bool,
+}
+
+/// A multipart field is either an inline text value or a file (by path on disk).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MultipartValue {
+    Text(String),
+    File(String),
+}
+
 /// The request body, by mode.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Body {
@@ -40,6 +57,11 @@ pub enum Body {
     Xml(String),
     Sparql(String),
     FormUrlEncoded(Vec<KeyVal>),
+    GraphQl {
+        query: String,
+        variables: String,
+    },
+    MultipartForm(Vec<MultipartField>),
 }
 
 /// Where an API-key credential is placed.
@@ -208,7 +230,21 @@ impl BruFile {
             "xml" => Body::Xml(text("body:xml")),
             "sparql" => Body::Sparql(text("body:sparql")),
             "formUrlEncoded" => Body::FormUrlEncoded(self.key_vals("body:form-urlencoded")),
+            "graphql" => Body::GraphQl {
+                query: text("body:graphql"),
+                variables: text("body:graphql:vars"),
+            },
+            "multipartForm" => Body::MultipartForm(self.multipart_fields("body:multipart-form")),
             _ => Body::None,
+        }
+    }
+
+    fn multipart_fields(&self, block: &str) -> Vec<MultipartField> {
+        match self.block(block).map(|b| &b.content) {
+            Some(BlockContent::Dict(entries)) => {
+                entries.iter().map(parse_multipart_field).collect()
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -307,6 +343,43 @@ fn method_dict_value<'a>(block: &'a crate::model::Block, key: &str) -> Option<&'
                 })
         }
         _ => None,
+    }
+}
+
+/// Parse one `body:multipart-form` dict entry into a [`MultipartField`].
+///
+/// An inline value of the form `@file(path)` (optionally followed by
+/// ` @contentType(ct)`) projects to a [`MultipartValue::File`]; any other value
+/// is plain [`MultipartValue::Text`]. The leading `@file(...)` token must be at
+/// the start of the value for it to count as a file part.
+fn parse_multipart_field(e: &crate::model::Entry) -> MultipartField {
+    let name = e.key.name().to_string();
+    let enabled = !e.disabled;
+    let raw = e.value.as_inline().trim();
+
+    if let Some(rest) = raw.strip_prefix("@file(") {
+        if let Some(end) = rest.find(')') {
+            let path = rest[..end].trim().to_string();
+            // Anything after the `)` may carry an `@contentType(...)` decorator.
+            let trailing = rest[end + 1..].trim();
+            let content_type = trailing
+                .strip_prefix("@contentType(")
+                .and_then(|s| s.strip_suffix(')'))
+                .map(|ct| ct.trim().to_string());
+            return MultipartField {
+                name,
+                value: MultipartValue::File(path),
+                content_type,
+                enabled,
+            };
+        }
+    }
+
+    MultipartField {
+        name,
+        value: MultipartValue::Text(raw.to_string()),
+        content_type: None,
+        enabled,
     }
 }
 

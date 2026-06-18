@@ -30,4 +30,7 @@ pub use assert::{
 pub use collection::{CollectionTree, Folder, RequestItem};
 pub use interp::interpolate;
 pub use model::{Annotation, Block, BlockContent, BruFile, Entry, Key, Value, HTTP_VERBS};
-pub use request::{ApiKeyPlacement, Assertion, Auth, Body, KeyVal, OAuth2, Request, Var};
+pub use request::{
+    ApiKeyPlacement, Assertion, Auth, Body, KeyVal, MultipartField, MultipartValue, OAuth2,
+    Request, Var,
+};

@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use bru_core::{ApiKeyPlacement, Auth, Body, Request};
+use bru_core::{ApiKeyPlacement, Auth, Body, MultipartValue, Request};
 use reqwest::{Method, Url};
 use thiserror::Error;
 
@@ -29,6 +29,10 @@ pub enum HttpError {
     Request(#[source] reqwest::Error),
     #[error("response body exceeded the {0}-byte limit")]
     BodyTooLarge(usize),
+    #[error("failed to read multipart file `{0}`: {1}")]
+    FileRead(String, String),
+    #[error("invalid multipart content-type: {0}")]
+    InvalidMultipart(String),
 }
 
 /// Options used to construct an [`HttpClient`].
@@ -101,7 +105,14 @@ impl HttpClient {
         }
 
         builder = apply_auth(builder, &req.auth);
-        builder = apply_body(builder, &req.body, has_ct);
+        // Multipart needs async file reads, so it is built here in `send`; every
+        // other body is applied by the sync `apply_body` helper.
+        if let Body::MultipartForm(fields) = &req.body {
+            let form = build_multipart_form(fields).await?;
+            builder = builder.multipart(form);
+        } else {
+            builder = apply_body(builder, &req.body, has_ct);
+        }
 
         let started = Instant::now();
         let resp = builder.send().await.map_err(HttpError::Request)?;
@@ -270,5 +281,59 @@ fn apply_body(
                 builder.form(&pairs)
             }
         }
+        Body::GraphQl { query, variables } => {
+            // Parse the variables text as JSON; fall back to an empty object when
+            // it is blank or not valid JSON.
+            let vars: serde_json::Value = if variables.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(variables).unwrap_or_else(|_| serde_json::json!({}))
+            };
+            let payload = serde_json::json!({ "query": query, "variables": vars });
+            let body = serde_json::to_string(&payload).unwrap_or_default();
+            with_default_ct(builder.body(body), "application/json")
+        }
+        // Multipart is built asynchronously in `send`; nothing to do here.
+        Body::MultipartForm(_) => builder,
     }
+}
+
+/// Build a `reqwest::multipart::Form` from the enabled fields, reading any file
+/// parts off disk. File parts carry a filename (the path's basename) and, when
+/// declared, a per-part content-type.
+async fn build_multipart_form(
+    fields: &[bru_core::MultipartField],
+) -> Result<reqwest::multipart::Form, HttpError> {
+    let mut form = reqwest::multipart::Form::new();
+    for f in fields.iter().filter(|f| f.enabled) {
+        let part = match &f.value {
+            MultipartValue::Text(text) => {
+                let mut part = reqwest::multipart::Part::text(text.clone());
+                if let Some(ct) = &f.content_type {
+                    part = part
+                        .mime_str(ct)
+                        .map_err(|e| HttpError::InvalidMultipart(e.to_string()))?;
+                }
+                part
+            }
+            MultipartValue::File(path) => {
+                let bytes = tokio::fs::read(path)
+                    .await
+                    .map_err(|e| HttpError::FileRead(path.clone(), e.to_string()))?;
+                let filename = std::path::Path::new(path)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone());
+                let mut part = reqwest::multipart::Part::bytes(bytes).file_name(filename);
+                if let Some(ct) = &f.content_type {
+                    part = part
+                        .mime_str(ct)
+                        .map_err(|e| HttpError::InvalidMultipart(e.to_string()))?;
+                }
+                part
+            }
+        };
+        form = form.part(f.name.clone(), part);
+    }
+    Ok(form)
 }
