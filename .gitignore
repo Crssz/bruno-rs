@@ -1,5 +1,6 @@
 /target
 /reference
+/.claude
 **/*.rs.bk
 *.pdb
 *.log
