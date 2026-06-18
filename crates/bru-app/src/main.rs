@@ -2394,17 +2394,24 @@ impl App {
                     .on_press(Message::CopyVarValue(v)),
             );
         }
-        let panel = container(col)
-            .style(|_| menu_panel())
-            .padding(10)
-            .width(Length::Fixed(340.0));
+        // No full-screen backdrop: the pills beneath stay hoverable, so moving to
+        // another `{{var}}` switches the popover. Leaving the panel closes it.
+        let panel = mouse_area(
+            container(col)
+                .style(|_| menu_panel())
+                .padding(10)
+                .width(Length::Fixed(340.0)),
+        )
+        .on_exit(Message::CloseVarPopup);
+        // Drop it just below the cursor so moving down enters the panel (rather
+        // than the panel opening directly under the pointer).
         let x = self.cursor.x.max(0.0);
-        let y = self.cursor.y.max(0.0);
-        let positioned = column![
+        let y = (self.cursor.y + 14.0).max(0.0);
+        column![
             Space::new().height(y),
             row![Space::new().width(x), panel],
-        ];
-        stack![self.dismiss_layer(Message::CloseVarPopup), positioned].into()
+        ]
+        .into()
     }
 
     /// The list of menu rows for a given right-click target.
@@ -3643,12 +3650,12 @@ impl App {
                     Fill,
                 );
                 match self.var_strip(tab, &tab.editors.body.text()) {
-                    Some(strip) => column![editor, strip].spacing(2).height(Fill).into(),
+                    Some(strip) => column![strip, editor].spacing(2).height(Fill).into(),
                     None => editor,
                 }
             }
             Body::GraphQl { .. } => {
-                let mut col = column![
+                let inner = column![
                     section("Query"),
                     editor_box(&tab.editors.gql_query, EditorField::GqlQuery, "js", Fill),
                     vspace(12.0),
@@ -3659,10 +3666,10 @@ impl App {
                 .height(Fill);
                 let combined =
                     format!("{} {}", tab.editors.gql_query.text(), tab.editors.gql_vars.text());
-                if let Some(strip) = self.var_strip(tab, &combined) {
-                    col = col.push(strip);
+                match self.var_strip(tab, &combined) {
+                    Some(strip) => column![strip, inner].spacing(2).height(Fill).into(),
+                    None => inner.into(),
                 }
-                col.into()
             }
             Body::FormUrlEncoded(fields) => {
                 self.kv_or_bulk(tab, KvSection::Form, "Name", "Value", kv_rows(fields))
@@ -4277,30 +4284,18 @@ fn assert_table<'a>(rows: Vec<(String, String, bool)>) -> Element<'a, Message> {
 /// Settings tabs), where `Fill` would collapse to nothing.
 const FIXED_EDITOR: Length = Length::Fixed(220.0);
 
-/// A single `{{name}}` pill: hovering shows the resolved value (quick glance),
-/// clicking opens a popover with a Copy button. Gold when resolved, red when
-/// unset. Self-contained (owned), so it lives `'static`.
+/// A single `{{name}}` pill. Hovering it opens the value popover (with a Copy
+/// button) anchored at the cursor. Gold when resolved, red when unset.
+/// Self-contained (owned), so it lives `'static`.
 fn var_pill(name: &str, value: Option<String>) -> Element<'static, Message> {
     let color = if value.is_some() { ACCENT() } else { RED() };
-    let tip = match &value {
-        Some(v) if v.is_empty() => format!("{name} = (empty)"),
-        Some(v) => format!("{name} = {v}"),
-        None => format!("{name}  —  not set"),
-    };
     let mut label = String::from("{{");
     label.push_str(name);
     label.push_str("}}");
-    let btn = button(text(label).size(12).font(MONO).color(color))
-        .style(move |_, s| icon_button(s, color))
-        .padding(Padding::from([0, 2]))
-        .on_press(Message::OpenVarPopup(name.to_string(), value));
-    tooltip(
-        btn,
-        container(text(tip).size(11).color(TEXT()))
-            .style(|_| menu_panel())
-            .padding(6),
-        tooltip::Position::Bottom,
+    mouse_area(
+        container(text(label).size(12).font(MONO).color(color)).padding(Padding::from([0, 2])),
     )
+    .on_enter(Message::OpenVarPopup(name.to_string(), value))
     .into()
 }
 
