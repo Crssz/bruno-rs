@@ -170,6 +170,18 @@ impl App {
                         .font(Font::MONOSPACE),
                 );
             }
+            for t in &outcome.tests {
+                let mark = if t.passed { "PASS" } else { "FAIL" };
+                let extra = match &t.error {
+                    Some(e) if !t.passed => format!("  ({e})"),
+                    _ => String::new(),
+                };
+                col = col
+                    .push(text(format!("[{mark}] test: {}{extra}", t.name)).font(Font::MONOSPACE));
+            }
+            for line in &outcome.console {
+                col = col.push(text(format!("| {line}")).font(Font::MONOSPACE));
+            }
             col = col.push(text(pretty_body(resp)).font(Font::MONOSPACE));
         }
         col.into()
@@ -218,12 +230,18 @@ fn summarize(outcome: &RunOutcome) -> String {
     if let Some(err) = &outcome.error {
         return format!("Error: {err}");
     }
-    let passed = outcome.assertions.iter().filter(|a| a.passed).count();
-    let total = outcome.assertions.len();
+    let checks: Vec<bool> = outcome
+        .assertions
+        .iter()
+        .map(|a| a.passed)
+        .chain(outcome.tests.iter().map(|t| t.passed))
+        .collect();
+    let passed = checks.iter().filter(|p| **p).count();
+    let total = checks.len();
     match &outcome.response {
         Some(r) => format!(
-            "{} {} · {} ms · {}/{} assertions passed",
-            r.status, r.status_text, r.duration_ms, passed, total
+            "{} {} · {} ms · {passed}/{total} checks passed",
+            r.status, r.status_text, r.duration_ms
         ),
         None => "No response".to_string(),
     }

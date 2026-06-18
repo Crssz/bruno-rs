@@ -166,6 +166,16 @@ fn print_outcome(o: &RunOutcome) {
             );
         }
     }
+    for t in &o.tests {
+        let mark = if t.passed { "PASS" } else { "FAIL" };
+        match &t.error {
+            Some(e) if !t.passed => println!("  [{mark}] test: {}  ({e})", t.name),
+            _ => println!("  [{mark}] test: {}", t.name),
+        }
+    }
+    for line in &o.console {
+        println!("  | {line}");
+    }
     for (k, v) in &o.vars_set {
         println!("  set var {k} = {}", redact(k, v));
     }

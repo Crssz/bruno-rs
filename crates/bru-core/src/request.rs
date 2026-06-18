@@ -201,6 +201,21 @@ impl BruFile {
             _ => None,
         }
     }
+
+    /// The pre-request script body (`script:pre-request`), outdented to source.
+    pub fn script_pre(&self) -> Option<String> {
+        self.text_block("script:pre-request").map(outdent)
+    }
+
+    /// The post-response script body (`script:post-response`), outdented.
+    pub fn script_post(&self) -> Option<String> {
+        self.text_block("script:post-response").map(outdent)
+    }
+
+    /// The `tests` script body, outdented.
+    pub fn tests_script(&self) -> Option<String> {
+        self.text_block("tests").map(outdent)
+    }
 }
 
 /// Read a single value out of a method block's dictionary.

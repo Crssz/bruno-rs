@@ -65,6 +65,29 @@ async fn runs_request_interpolates_asserts_and_captures_var() {
 }
 
 #[tokio::test]
+async fn pre_and_post_scripts_run_and_share_vars() {
+    let (base, server) = mock_server(r#"{"id":42,"ok":true}"#);
+    let src = "meta {\n  name: S\n  type: http\n}\n\n\
+        get {\n  url: {{base}}/{{path}}\n  auth: none\n}\n\n\
+        script:pre-request {\n  bru.setVar('path', 'items/' + 42);\n}\n\n\
+        script:post-response {\n  bru.setVar('captured', res.body.id);\n}\n\n\
+        tests {\n  test('status ok', function(){ expect(res.status).to.equal(200); });\n  test('id is 42', function(){ expect(res.body.id).to.equal(42); });\n}\n";
+    let file = bru_lang::parse(src).unwrap();
+
+    let mut ctx = RunContext::default();
+    ctx.vars.insert("base".to_string(), base.clone());
+
+    let outcome = run_request(&file, &mut ctx).await;
+    let sent = server.join().unwrap();
+
+    assert!(sent.starts_with("GET /items/42 "), "request line: {sent:?}");
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(outcome.tests.len(), 2);
+    assert!(outcome.passed(), "tests: {:?}", outcome.tests);
+    assert_eq!(ctx.vars.get("captured").map(String::as_str), Some("42"));
+}
+
+#[tokio::test]
 async fn content_type_not_duplicated_when_header_present() {
     let (base, server) = mock_server(r#"{"ok":true}"#);
     let src = "meta {\n  name: C\n  type: http\n}\n\n\

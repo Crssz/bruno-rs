@@ -9,6 +9,7 @@ license.workspace = true
 bru-core.workspace = true
 bru-http.workspace = true
 bru-lang.workspace = true
+bru-script.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
