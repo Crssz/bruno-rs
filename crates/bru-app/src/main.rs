@@ -20,6 +20,7 @@ mod edit;
 mod fsops;
 mod import;
 mod theme;
+mod vault;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -129,6 +130,14 @@ struct App {
     /// aren't auto-replayed — see the Cookies overlay note.)
     cookies: Vec<CookieEntry>,
     cookies_open: bool,
+    /// Secrets vault: `Some` when unlocked (decrypted name->value map). The master
+    /// password is held to re-encrypt on save; rows are the editable view.
+    vault: Option<HashMap<String, String>>,
+    vault_pw: Option<String>,
+    vault_open: bool,
+    vault_input: String,
+    vault_rows: Vec<(String, String)>,
+    vault_error: Option<String>,
 }
 
 /// One stored cookie, keyed by (domain, path, name) for upsert.
@@ -802,6 +811,18 @@ enum Message {
     DeleteCookie(usize),
     ClearCookies,
 
+    // ── secrets vault ──
+    OpenVault,
+    CloseVault,
+    VaultPwInput(String),
+    VaultUnlock,
+    VaultLock,
+    VaultRowKey(usize, String),
+    VaultRowValue(usize, String),
+    VaultAddRow,
+    VaultRemoveRow(usize),
+    VaultSave,
+
     // ── preferences ──
     OpenPrefs,
     PrefTimeout(String),
@@ -1164,7 +1185,7 @@ impl App {
                     let env = self.selected_env.clone();
                     let dev = self.developer_mode;
                     let opts = self.prefs.send_options();
-                    let globals = self.global_vars.clone();
+                    let globals = self.user_base_vars();
                     return Task::perform(
                         send_request(file, vars_path, script_dir, env, globals, dev, opts),
                         move |o| Message::Sent(id, o),
@@ -1922,7 +1943,7 @@ impl App {
                 let env = self.selected_env.clone();
                 let dev = self.developer_mode;
                 let opts = self.prefs.send_options();
-                let globals = self.global_vars.clone();
+                let globals = self.user_base_vars();
                 return Task::perform(
                     run_folder(files, dir, env, globals, dev, opts),
                     Message::RunnerDone,
@@ -1959,6 +1980,70 @@ impl App {
                 }
             }
             Message::ClearCookies => self.cookies.clear(),
+
+            // ── secrets vault ──
+            Message::OpenVault => {
+                self.menu = None;
+                self.vault_open = true;
+                self.vault_error = None;
+                self.vault_input.clear();
+            }
+            Message::CloseVault => self.vault_open = false,
+            Message::VaultPwInput(v) => self.vault_input = v,
+            Message::VaultUnlock => match vault::load(&self.vault_input) {
+                Ok(map) => {
+                    let mut rows: Vec<(String, String)> =
+                        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    rows.sort_by(|a, b| a.0.cmp(&b.0));
+                    self.vault_rows = rows;
+                    self.vault = Some(map);
+                    self.vault_pw = Some(std::mem::take(&mut self.vault_input));
+                    self.vault_error = None;
+                    self.refresh_vars();
+                }
+                Err(e) => self.vault_error = Some(e),
+            },
+            Message::VaultLock => {
+                self.vault = None;
+                self.vault_pw = None;
+                self.vault_rows.clear();
+                self.vault_input.clear();
+                self.refresh_vars();
+            }
+            Message::VaultRowKey(i, v) => {
+                if let Some(r) = self.vault_rows.get_mut(i) {
+                    r.0 = v;
+                }
+            }
+            Message::VaultRowValue(i, v) => {
+                if let Some(r) = self.vault_rows.get_mut(i) {
+                    r.1 = v;
+                }
+            }
+            Message::VaultAddRow => self.vault_rows.push((String::new(), String::new())),
+            Message::VaultRemoveRow(i) => {
+                if i < self.vault_rows.len() {
+                    self.vault_rows.remove(i);
+                }
+            }
+            Message::VaultSave => {
+                let map: HashMap<String, String> = self
+                    .vault_rows
+                    .iter()
+                    .filter(|(k, _)| !k.trim().is_empty())
+                    .map(|(k, v)| (k.trim().to_string(), v.clone()))
+                    .collect();
+                if let Some(pw) = &self.vault_pw {
+                    match vault::save(pw, &map) {
+                        Ok(()) => {
+                            self.vault = Some(map);
+                            self.vault_error = None;
+                            self.refresh_vars();
+                        }
+                        Err(e) => self.vault_error = Some(e),
+                    }
+                }
+            }
 
             // ── preferences ──
             Message::OpenPrefs => {
@@ -2230,13 +2315,23 @@ impl App {
     /// env vars (base) overlaid by collection + collection-env vars. Cheap to
     /// call; reads at most two `.bru` files (globals are already cached).
     fn refresh_vars(&mut self) {
-        let mut m = self.global_vars.clone();
+        let mut m = self.user_base_vars();
         if let Some(dir) = &self.collection_dir {
             for (k, v) in base_vars(dir, self.selected_env.as_deref()) {
                 m.insert(k, v);
             }
         }
         self.vars = m;
+    }
+
+    /// User-level base variables: vault secrets (lowest), overlaid by the
+    /// selected global environment. Collection + collection-env vars sit on top.
+    fn user_base_vars(&self) -> HashMap<String, String> {
+        let mut m = self.vault.clone().unwrap_or_default();
+        for (k, v) in &self.global_vars {
+            m.insert(k.clone(), v.clone());
+        }
+        m
     }
 
     /// Recompute the cached global-env vars from the selected global environment,
@@ -2700,6 +2795,9 @@ impl App {
         if self.cookies_open {
             layers = layers.push(self.cookies_overlay());
         }
+        if self.vault_open {
+            layers = layers.push(self.vault_overlay());
+        }
         layers.into()
     }
 
@@ -2861,6 +2959,129 @@ impl App {
                     .style(|_| scrim()),
             )
             .on_press(Message::CloseCookies),
+        );
+        stack![backdrop, container(opaque(card)).center(Fill).padding(40)].into()
+    }
+
+    /// The secrets-vault overlay: unlock form when locked, an editable secrets
+    /// table when unlocked.
+    fn vault_overlay(&self) -> Element<'_, Message> {
+        let unlocked = self.vault.is_some();
+        let mut header = row![text("Secrets Vault").size(15).color(TEXT()).font(BOLD)]
+            .spacing(8)
+            .align_y(Center);
+        header = header.push(fill_x());
+        if unlocked {
+            header = header.push(
+                button(text("Lock").size(11).color(SUBTEXT()))
+                    .style(|_, s| icon_button(s, SUBTEXT()))
+                    .padding(Padding::from([2, 8]))
+                    .on_press(Message::VaultLock),
+            );
+        }
+        header = header.push(
+            button(text("\u{00D7}").size(13).color(MUTED()))
+                .style(|_, s| icon_button(s, MUTED()))
+                .padding(Padding::from([2, 6]))
+                .on_press(Message::CloseVault),
+        );
+
+        let body: Element<'_, Message> = match &self.vault {
+            None => {
+                let prompt = if vault::exists() {
+                    "Enter your master password to unlock the vault."
+                } else {
+                    "No vault yet \u{2014} set a master password to create one."
+                };
+                column![
+                    text(prompt).size(12).color(SUBTEXT()),
+                    text_input("master password", &self.vault_input)
+                        .secure(true)
+                        .on_input(Message::VaultPwInput)
+                        .on_submit(Message::VaultUnlock)
+                        .padding(8)
+                        .style(input_style),
+                    button(text("Unlock").size(13).color(BLACK))
+                        .style(|_, _| solid_button(ACCENT(), BLACK))
+                        .padding(Padding::from([6, 16]))
+                        .on_press(Message::VaultUnlock),
+                    modal_error(&self.vault_error),
+                ]
+                .spacing(10)
+                .into()
+            }
+            Some(_) => {
+                let mut list = Column::new().spacing(2);
+                list = list.push(
+                    text("Secrets resolve into {{name}} at send time (lowest precedence).")
+                        .size(11)
+                        .color(MUTED()),
+                );
+                for (i, (k, v)) in self.vault_rows.iter().enumerate() {
+                    let mut val = text_input("value", v)
+                        .on_input(move |s| Message::VaultRowValue(i, s))
+                        .size(12)
+                        .font(MONO)
+                        .padding(Padding::from([4, 6]))
+                        .style(cell_input)
+                        .width(Length::FillPortion(3));
+                    if !self.reveal_secrets {
+                        val = val.secure(true);
+                    }
+                    list = list.push(
+                        row![
+                            text_input("name", k)
+                                .on_input(move |s| Message::VaultRowKey(i, s))
+                                .size(12)
+                                .font(MONO)
+                                .padding(Padding::from([4, 6]))
+                                .style(cell_input)
+                                .width(Length::FillPortion(2)),
+                            val,
+                            button(text("\u{2715}").size(11).color(RED()))
+                                .style(|_, s| icon_button(s, RED()))
+                                .padding(Padding::from([4, 4]))
+                                .on_press(Message::VaultRemoveRow(i)),
+                        ]
+                        .spacing(4)
+                        .align_y(Center),
+                    );
+                }
+                column![
+                    scrollable(list).height(Fill),
+                    row![
+                        button(text("+ Add Secret").size(12).color(ACCENT()))
+                            .style(|_, s| icon_button(s, ACCENT()))
+                            .padding(Padding::from([5, 8]))
+                            .on_press(Message::VaultAddRow),
+                        fill_x(),
+                        button(text("Save").size(12).color(BLACK))
+                            .style(|_, _| solid_button(ACCENT(), BLACK))
+                            .padding(Padding::from([5, 14]))
+                            .on_press(Message::VaultSave),
+                    ]
+                    .align_y(Center),
+                    modal_error(&self.vault_error),
+                ]
+                .spacing(8)
+                .height(Fill)
+                .into()
+            }
+        };
+
+        let card = container(column![header, body].spacing(12))
+            .style(|_| modal_card())
+            .width(Length::Fixed(560.0))
+            .height(Length::Fixed(if unlocked { 440.0 } else { 240.0 }))
+            .padding(16);
+        let backdrop = opaque(
+            mouse_area(
+                container(Space::new())
+                    .width(Fill)
+                    .height(Fill)
+                    .style(|_| scrim()),
+            )
+            .on_press(Message::CloseVault),
         );
         stack![backdrop, container(opaque(card)).center(Fill).padding(40)].into()
     }
@@ -3862,6 +4083,27 @@ impl App {
                     container(text("Manage environments").size(11))
                         .style(|_| menu_panel())
                         .padding(4),
+                    tooltip::Position::Bottom,
+                ),
+                tooltip(
+                    button(text("\u{1F6E1}").size(13).color(if self.vault.is_some() {
+                        GREEN()
+                    } else {
+                        SUBTEXT()
+                    }))
+                    .style(|_, s| icon_button(s, SUBTEXT()))
+                    .padding(Padding::from([2, 6]))
+                    .on_press(Message::OpenVault),
+                    container(
+                        text(if self.vault.is_some() {
+                            "Secrets vault (unlocked)"
+                        } else {
+                            "Secrets vault (locked)"
+                        })
+                        .size(11)
+                    )
+                    .style(|_| menu_panel())
+                    .padding(4),
                     tooltip::Position::Bottom,
                 ),
                 button(text("Console").size(12).color(if self.console_open {

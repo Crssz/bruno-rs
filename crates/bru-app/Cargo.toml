@@ -17,6 +17,10 @@ bru-http.workspace = true
 serde_json.workspace = true
 iced = { version = "0.14", features = ["tokio", "highlighter"] }
 rfd = "0.15"
+# Secrets vault: AES-256-GCM at rest, key stretched from a master password.
+aes-gcm = "0.10"
+sha2 = "0.10"
+getrandom = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "net", "io-util"] }
