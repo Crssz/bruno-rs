@@ -75,10 +75,24 @@ impl ReqTab {
     }
 }
 use gpui::{
-    div, prelude::*, px, size, App, Bounds, Context, Div, Entity, Focusable, MouseButton,
-    MouseDownEvent, MouseUpEvent, Pixels, Point, StyledText, Window, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, size, App, Bounds, Context, Div, Entity, FocusHandle, Focusable,
+    KeyBinding, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, StyledText, Window,
+    WindowBounds, WindowOptions,
 };
 use gpui_platform::application;
+
+// App-level keyboard actions (distinct namespace from the editor's actions).
+actions!(bru_app, [SaveTab, SendReq, CloseOverlay]);
+
+/// Bind the app-level shortcuts once at startup (scoped to the BruApp root
+/// context so they fire even while a CodeEditor descendant holds focus).
+fn bind_app_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("ctrl-s", SaveTab, Some("BruApp")),
+        KeyBinding::new("ctrl-enter", SendReq, Some("BruApp")),
+        KeyBinding::new("escape", CloseOverlay, Some("BruApp")),
+    ]);
+}
 
 /// A pill/button used in the chrome (ghost style).
 fn chip(label: &str) -> Div {
@@ -331,6 +345,8 @@ struct BruApp {
     /// JSONPath response-filter input + its current query.
     resp_filter: Entity<CodeEditor>,
     resp_filter_query: String,
+    /// Root focus handle, so app-level key actions dispatch.
+    focus_handle: FocusHandle,
 }
 
 /// A right-click menu over a sidebar entry, anchored at the click point.
@@ -1105,7 +1121,49 @@ impl BruApp {
             confirm_close: None,
             resp_filter,
             resp_filter_query: String::new(),
+            focus_handle: cx.focus_handle(),
         }
+    }
+
+    fn on_save_action(&mut self, _: &SaveTab, _w: &mut Window, cx: &mut Context<Self>) {
+        self.save(cx);
+        cx.notify();
+    }
+    fn on_send_action(&mut self, _: &SendReq, _w: &mut Window, cx: &mut Context<Self>) {
+        self.send(cx);
+        cx.notify();
+    }
+    fn on_escape_action(&mut self, _: &CloseOverlay, _w: &mut Window, cx: &mut Context<Self>) {
+        self.close_topmost_overlay(cx);
+    }
+
+    /// Esc closes the topmost open overlay/menu (in priority order).
+    fn close_topmost_overlay(&mut self, cx: &mut Context<Self>) {
+        if self.confirm_close.take().is_some()
+            || self.confirm_delete.take().is_some()
+            || self.rename.take().is_some()
+            || self.ctx_menu.take().is_some()
+            || self.env_menu.take().is_some()
+        {
+            // one of the lightweight popovers was closed
+        } else if self.curl_open {
+            self.curl_open = false;
+        } else if self.vault_open {
+            self.vault_open = false;
+        } else if self.prefs_open {
+            self.prefs_open = false;
+        } else if self.cookies_open {
+            self.cookies_open = false;
+        } else if self.devtools_open {
+            self.devtools_open = false;
+        } else if self.runner_open {
+            self.runner_open = false;
+        } else if self.env.is_some() {
+            self.env = None;
+        } else {
+            return;
+        }
+        cx.notify();
     }
 
     fn toggle_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -4385,6 +4443,11 @@ impl Render for BruApp {
             .child(content);
 
         let mut root = div()
+            .key_context("BruApp")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::on_save_action))
+            .on_action(cx.listener(Self::on_send_action))
+            .on_action(cx.listener(Self::on_escape_action))
             .relative()
             .flex()
             .flex_col()
@@ -4452,6 +4515,7 @@ fn main() {
 
     application().run(move |cx: &mut App| {
         editor::bind_keys(cx);
+        bind_app_keys(cx);
         let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
         cx.open_window(
             WindowOptions {
