@@ -3951,9 +3951,25 @@ impl BruApp {
         };
         let content: gpui::AnyElement = match (&tab.response, tab.resp_tab) {
             (None, _) => div()
-                .p_3()
-                .text_color(theme::muted())
-                .child("No response yet \u{2014} press Send.")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(theme::subtext())
+                        .child("No response yet"),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme::muted())
+                        .child("Press Send to make a request"),
+                )
                 .into_any_element(),
             (Some(o), RespTab::Response) => {
                 // Compute the displayed body (pretty JSON + JSONPath filter, or
