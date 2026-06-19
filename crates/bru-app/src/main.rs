@@ -9,7 +9,7 @@ mod import;
 mod theme;
 mod vault;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use bru_core::{Block, BlockContent, BruFile, CollectionTree, Folder};
@@ -134,8 +134,8 @@ fn req_row(method: &str, name: &str, active: bool, depth: usize) -> Div {
         )
 }
 
-/// A sidebar folder row.
-fn folder_row(name: &str, depth: usize) -> Div {
+/// A sidebar folder row (chevron reflects collapsed state).
+fn folder_row(name: &str, depth: usize, collapsed: bool) -> Div {
     div()
         .flex()
         .flex_row()
@@ -148,7 +148,7 @@ fn folder_row(name: &str, depth: usize) -> Div {
             div()
                 .text_size(px(11.))
                 .text_color(theme::muted())
-                .child("\u{25BE}"),
+                .child(if collapsed { "\u{25B8}" } else { "\u{25BE}" }),
         )
         .child(
             div()
@@ -322,6 +322,8 @@ struct BruApp {
     selected_env: Option<String>,
     /// Env-picker dropdown anchored at this point (None = closed).
     env_menu: Option<Point<Pixels>>,
+    /// Folder paths whose children are collapsed in the sidebar.
+    collapsed: HashSet<PathBuf>,
 }
 
 /// A right-click menu over a sidebar entry, anchored at the click point.
@@ -932,6 +934,34 @@ impl BruApp {
             confirm_delete: None,
             selected_env: None,
             env_menu: None,
+            collapsed: HashSet::new(),
+        }
+    }
+
+    fn toggle_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if !self.collapsed.remove(&path) {
+            self.collapsed.insert(path);
+        }
+        cx.notify();
+    }
+
+    /// Create a new sub-folder under `dir` and reload the tree.
+    fn new_folder_in(&mut self, dir: &Path, cx: &mut Context<Self>) {
+        let mut n = 1;
+        let mut path = dir.join("New Folder");
+        while path.exists() {
+            n += 1;
+            path = dir.join(format!("New Folder {n}"));
+        }
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("New Folder");
+        if std::fs::create_dir_all(&path).is_ok() {
+            // Bruno folder metadata lives in folder.bru.
+            let meta = format!("meta {{\n  name: {name}\n  seq: 1\n}}\n");
+            let _ = std::fs::write(path.join("folder.bru"), meta);
+            self.reload_collection(cx);
         }
     }
 
@@ -1243,6 +1273,14 @@ impl BruApp {
                     cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
                         if let Some(m) = this.ctx_menu.take() {
                             this.new_request_in(&m.target, cx);
+                        }
+                    }),
+                ))
+                .child(item("New Folder").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                        if let Some(m) = this.ctx_menu.take() {
+                            this.new_folder_in(&m.target, cx);
                         }
                     }),
                 ))
@@ -2215,12 +2253,35 @@ impl BruApp {
                     )
                     .child(
                         div()
-                            .px_1()
-                            .text_color(theme::accent())
-                            .child("+")
-                            .on_mouse_up(
-                                MouseButton::Left,
-                                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.new_request(cx)),
+                            .flex()
+                            .flex_row()
+                            .gap_1()
+                            .items_center()
+                            .child(
+                                div()
+                                    .px_1()
+                                    .text_size(px(13.))
+                                    .text_color(theme::accent())
+                                    .child("\u{1F4C1}+")
+                                    .on_mouse_up(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                                            let dir = this.dir.clone();
+                                            this.new_folder_in(&dir, cx);
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .px_1()
+                                    .text_color(theme::accent())
+                                    .child("+")
+                                    .on_mouse_up(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                                            this.new_request(cx)
+                                        }),
+                                    ),
                             ),
                     ),
             )
@@ -2262,15 +2323,29 @@ impl BruApp {
             if !query.is_empty() && !folder_matches(sub, query) {
                 continue;
             }
+            // A search query forces every branch open so matches are visible.
+            let collapsed = query.is_empty() && self.collapsed.contains(&sub.path);
             let fpath = sub.path.clone();
             let fname = sub.name.clone();
-            out.push(folder_row(&sub.name, depth).on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, ev: &MouseDownEvent, _win, cx| {
-                    this.open_ctx_menu(fpath.clone(), true, fname.clone(), ev.position, cx);
-                }),
-            ));
-            self.push_folder(sub, depth + 1, query, cx, out);
+            let tpath = sub.path.clone();
+            out.push(
+                folder_row(&sub.name, depth, collapsed)
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _ev: &MouseUpEvent, _win, cx| {
+                            this.toggle_folder(tpath.clone(), cx);
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, ev: &MouseDownEvent, _win, cx| {
+                            this.open_ctx_menu(fpath.clone(), true, fname.clone(), ev.position, cx);
+                        }),
+                    ),
+            );
+            if !collapsed {
+                self.push_folder(sub, depth + 1, query, cx, out);
+            }
         }
         let mut reqs: Vec<&bru_core::RequestItem> = folder.requests.iter().collect();
         reqs.sort_by(|a, b| {
