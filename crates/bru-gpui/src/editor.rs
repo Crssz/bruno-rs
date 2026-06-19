@@ -66,6 +66,8 @@ pub struct CodeEditor {
     selection_reversed: bool,
     is_selecting: bool,
     lang: Lang,
+    /// One line tall; Enter/Tab suppressed, paste/IME strip newlines. For the URL.
+    single_line: bool,
     /// Cached tree-sitter highlight spans (recomputed on every content change).
     spans: Vec<(Range<usize>, HighlightStyle)>,
     // Layout caches (filled during paint) for mouse mapping.
@@ -83,6 +85,7 @@ impl CodeEditor {
             selection_reversed: false,
             is_selecting: false,
             lang: Lang::Plain,
+            single_line: false,
             spans: Vec::new(),
             line_layouts: Vec::new(),
             bounds: None,
@@ -90,6 +93,18 @@ impl CodeEditor {
         };
         ed.recompute_highlight();
         ed
+    }
+
+    /// A single-line variant (for the URL field): one line tall, no newlines.
+    pub fn single_line(cx: &mut Context<Self>, text: &str) -> Self {
+        let mut ed = Self::new(cx, text);
+        ed.single_line = true;
+        ed
+    }
+
+    /// Replace the (single-line) content, keeping single-line mode.
+    pub fn set_line(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.set_text(text, Lang::Plain, cx);
     }
 
     pub fn set_text(&mut self, text: &str, lang: Lang, cx: &mut Context<Self>) {
@@ -109,7 +124,6 @@ impl CodeEditor {
         };
     }
 
-    #[allow(dead_code)] // used once Save is wired
     pub fn text(&self) -> &str {
         &self.content
     }
@@ -209,11 +223,15 @@ impl CodeEditor {
         self.move_to(o, cx);
     }
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
-        let o = self.vertical(-1);
+        let o = if self.single_line { 0 } else { self.vertical(-1) };
         self.move_to(o, cx);
     }
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
-        let o = self.vertical(1);
+        let o = if self.single_line {
+            self.content.len()
+        } else {
+            self.vertical(1)
+        };
         self.move_to(o, cx);
     }
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
@@ -250,6 +268,13 @@ impl CodeEditor {
 
     // ── editing ─────────────────────────────────────────────────────────────
     fn replace(&mut self, new_text: &str, cx: &mut Context<Self>) {
+        let owned;
+        let new_text = if self.single_line && new_text.contains('\n') {
+            owned = new_text.replace('\n', " ");
+            owned.as_str()
+        } else {
+            new_text
+        };
         let r = self.selected_range.clone();
         self.content
             .replace_range(r.clone(), new_text); // r is a valid char-boundary range
@@ -281,9 +306,15 @@ impl CodeEditor {
         self.replace("", cx);
     }
     fn enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
+        if self.single_line {
+            return;
+        }
         self.replace("\n", cx);
     }
     fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
+        if self.single_line {
+            return;
+        }
         self.replace("  ", cx);
     }
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -554,7 +585,12 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
-        let line_count = self.editor.read(cx).content.split('\n').count().max(1);
+        let editor = self.editor.read(cx);
+        let line_count = if editor.single_line {
+            1
+        } else {
+            editor.content.split('\n').count().max(1)
+        };
         let lh = window.line_height();
         let mut style = Style::default();
         style.size.width = relative(1.).into();

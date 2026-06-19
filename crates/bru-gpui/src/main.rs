@@ -1,22 +1,28 @@
 // Phase 3a: real collection data. Loads a Bruno collection (the bundled sample,
 // or a path arg), renders a clickable recursive sidebar, and shows the opened
 // request's real method/URL/body (JSON bodies tree-sitter-highlighted).
+mod edit;
 mod editor;
 mod highlight;
 mod theme;
 
 use std::path::{Path, PathBuf};
 
-use bru_core::{BlockContent, Body, BruFile, CollectionTree, Folder};
+use bru_core::{BlockContent, BruFile, CollectionTree, Folder};
 use editor::{CodeEditor, Lang};
 use gpui::SharedString;
 
-/// What the body editor is currently editing, for Save.
-enum EditTarget {
-    /// The whole `.bru` source (write verbatim).
-    Source,
-    /// A specific body block (e.g. `body:json`): set its raw text and re-serialize.
+/// What the single shared editor is currently editing (set per active sub-tab),
+/// so its content can be written back to the right place in the BruFile.
+enum EditKind {
+    /// Nothing editable for this tab.
+    None,
+    /// A raw-text block (a `body:*` or `script:*` block): set its text verbatim.
     Body(String),
+    /// A dictionary block (params/headers/vars/auth) edited as `key: value` lines.
+    Dict(String),
+    /// The whole `.bru` source: reparse it on apply.
+    Source,
 }
 
 /// Request sub-tabs (Body is the editable editor; the rest show parsed data).
@@ -168,12 +174,14 @@ struct BruApp {
     collection: Option<CollectionTree>,
     selected: Option<PathBuf>,
     method: String,
-    url: String,
     req_tab: ReqTab,
-    /// The parsed open request, for rendering the non-Body sub-tabs.
+    /// The parsed open request (the source of truth; edits are applied into it).
     file: Option<BruFile>,
+    /// The single shared editor for the active sub-tab's block.
     body_editor: Entity<CodeEditor>,
-    edit_target: EditTarget,
+    /// Single-line editor for the request URL.
+    url_input: Entity<CodeEditor>,
+    edit_kind: EditKind,
     status: String,
     sending: bool,
     response: Option<String>,
@@ -181,9 +189,7 @@ struct BruApp {
 
 /// Run a request to completion on a fresh tokio runtime (called on a worker
 /// thread). Returns the formatted response or an error string.
-fn run_blocking(path: PathBuf, dir: PathBuf) -> Result<String, String> {
-    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let file = bru_lang::parse(&text).map_err(|e| e.to_string())?;
+fn run_blocking(file: BruFile, dir: PathBuf, script_dir: Option<PathBuf>) -> Result<String, String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -195,7 +201,7 @@ fn run_blocking(path: PathBuf, dir: PathBuf) -> Result<String, String> {
             vars: bru_engine::base_vars(&dir, None),
             client,
             send_options: opts,
-            script_dir: path.parent().map(Path::to_path_buf),
+            script_dir,
             ..Default::default()
         };
         let outcome = bru_engine::run_request(&file, &mut ctx).await;
@@ -204,6 +210,7 @@ fn run_blocking(path: PathBuf, dir: PathBuf) -> Result<String, String> {
 }
 
 /// Rows `(key, value, disabled)` of a dictionary block.
+#[allow(dead_code)]
 fn dict_rows(b: &bru_core::Block) -> Vec<(String, String, bool)> {
     match &b.content {
         BlockContent::Dict(entries) => entries
@@ -240,16 +247,17 @@ impl BruApp {
     fn new(cx: &mut Context<Self>, dir: PathBuf) -> Self {
         let collection = bru_lang::load_collection(&dir).ok();
         let body_editor = cx.new(|cx| CodeEditor::new(cx, ""));
+        let url_input = cx.new(|cx| CodeEditor::single_line(cx, ""));
         Self {
             dir,
             collection,
             selected: None,
             method: String::new(),
-            url: String::new(),
             req_tab: ReqTab::Body,
             file: None,
             body_editor,
-            edit_target: EditTarget::Source,
+            url_input,
+            edit_kind: EditKind::None,
             status: String::new(),
             sending: false,
             response: None,
@@ -259,15 +267,20 @@ impl BruApp {
     /// Send the selected request: run it on a worker thread (its own tokio
     /// runtime) and deliver the result back to the UI via a oneshot + cx.spawn.
     fn send(&mut self, cx: &mut Context<Self>) {
+        self.apply_edits(cx);
         let Some(path) = self.selected.clone() else {
             return;
         };
+        let Some(file) = self.file.clone() else {
+            return;
+        };
         let dir = self.dir.clone();
+        let script_dir = path.parent().map(Path::to_path_buf);
         self.sending = true;
         self.status = "Sending\u{2026}".into();
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_blocking(path, dir));
+            let _ = tx.send(run_blocking(file, dir, script_dir));
         });
         cx.spawn(async move |this, cx| {
             let result = rx.await;
@@ -290,32 +303,113 @@ impl BruApp {
         .detach();
     }
 
-    /// Write the editor's content back to disk (reconstructing the `.bru` when
-    /// editing an isolated body block).
+    /// Apply the editor + URL edits into the in-memory `file`, then serialize to
+    /// disk.
     fn save(&mut self, cx: &mut Context<Self>) {
+        self.apply_edits(cx);
         let Some(path) = self.selected.clone() else {
             return;
         };
-        let text = self.body_editor.read(cx).text().to_string();
-        let ok = match &self.edit_target {
-            EditTarget::Source => std::fs::write(&path, text).is_ok(),
-            EditTarget::Body(block) => match std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|t| bru_lang::parse(&t).ok())
-            {
-                Some(mut file) => {
-                    if let Some(b) = file.blocks.iter_mut().find(|b| &b.name == block) {
-                        b.content = BlockContent::Text(text);
-                    }
-                    std::fs::write(&path, bru_lang::serialize(&file)).is_ok()
-                }
-                None => false,
-            },
-        };
+        let ok = self
+            .file
+            .as_ref()
+            .map(|f| std::fs::write(&path, bru_lang::serialize(f)).is_ok())
+            .unwrap_or(false);
         self.status = if ok { "Saved".into() } else { "Save failed".into() };
     }
 
-    /// Open a request file: project its method/URL/body and load the editor.
+    /// Fold the current editor content (per the active sub-tab) and the URL into
+    /// the in-memory `file`, so Save/Send act on unsaved edits.
+    fn apply_edits(&mut self, cx: &mut Context<Self>) {
+        let text = self.body_editor.read(cx).text().to_string();
+        // Source mode: the editor IS the whole file.
+        if let EditKind::Source = self.edit_kind {
+            if let Ok(f) = bru_lang::parse(&text) {
+                self.file = Some(f);
+            }
+        }
+        let url = self.url_input.read(cx).text().trim().to_string();
+        if let Some(file) = &mut self.file {
+            edit::set_active_url(file, &url);
+            match &self.edit_kind {
+                EditKind::Body(block) => {
+                    if let Some(b) = file.blocks.iter_mut().find(|b| &b.name == block) {
+                        b.content = BlockContent::Text(text);
+                    }
+                }
+                EditKind::Dict(block) => edit::lines_to_dict(file, block, &text),
+                EditKind::None | EditKind::Source => {}
+            }
+        }
+    }
+
+    /// Load the active sub-tab's block into the shared editor + URL field.
+    fn load_active_tab(&mut self, cx: &mut Context<Self>) {
+        let (text, lang, kind) = match (self.req_tab, self.file.as_ref()) {
+            (ReqTab::Body, Some(f)) => match f.blocks.iter().find(|b| b.name.starts_with("body:")) {
+                Some(b) => {
+                    let t = match &b.content {
+                        BlockContent::Text(s) => s.clone(),
+                        _ => String::new(),
+                    };
+                    let lang = if b.name == "body:json" {
+                        Lang::Json
+                    } else {
+                        Lang::Plain
+                    };
+                    (t, lang, EditKind::Body(b.name.clone()))
+                }
+                None => (String::new(), Lang::Plain, EditKind::None),
+            },
+            (ReqTab::Params, Some(f)) => (
+                edit::dict_to_lines(f, "params:query"),
+                Lang::Plain,
+                EditKind::Dict("params:query".into()),
+            ),
+            (ReqTab::Headers, Some(f)) => (
+                edit::dict_to_lines(f, "headers"),
+                Lang::Plain,
+                EditKind::Dict("headers".into()),
+            ),
+            (ReqTab::Vars, Some(f)) => (
+                edit::dict_to_lines(f, "vars:pre-request"),
+                Lang::Plain,
+                EditKind::Dict("vars:pre-request".into()),
+            ),
+            (ReqTab::Auth, Some(f)) => match f.blocks.iter().find(|b| b.name.starts_with("auth:")) {
+                Some(b) => (
+                    edit::dict_to_lines(f, &b.name),
+                    Lang::Plain,
+                    EditKind::Dict(b.name.clone()),
+                ),
+                None => (String::new(), Lang::Plain, EditKind::None),
+            },
+            (ReqTab::Script, Some(f)) => {
+                let t = f
+                    .block("script:pre-request")
+                    .and_then(|b| match &b.content {
+                        BlockContent::Text(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                (t, Lang::Plain, EditKind::Body("script:pre-request".into()))
+            }
+            (ReqTab::Source, Some(f)) => (bru_lang::serialize(f), Lang::Plain, EditKind::Source),
+            _ => (String::new(), Lang::Plain, EditKind::None),
+        };
+        self.edit_kind = kind;
+        self.body_editor
+            .update(cx, |ed, cx| ed.set_text(&text, lang, cx));
+    }
+
+    /// Switch sub-tab: persist the current tab's edits, then load the new one.
+    fn switch_tab(&mut self, t: ReqTab, cx: &mut Context<Self>) {
+        self.apply_edits(cx);
+        self.req_tab = t;
+        self.load_active_tab(cx);
+    }
+
+    /// Open a request file: project method/URL, load the Body tab into the editor.
     fn open_request(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let Some(file) = std::fs::read_to_string(&path)
             .ok()
@@ -325,22 +419,14 @@ impl BruApp {
         };
         let req = file.to_request();
         self.method = req.as_ref().map(|r| r.method.clone()).unwrap_or_default();
-        self.url = req.as_ref().map(|r| r.url.clone()).unwrap_or_default();
-        let (text, lang, target) = match req.as_ref().map(|r| &r.body) {
-            Some(Body::Json(s)) => (s.clone(), Lang::Json, EditTarget::Body("body:json".into())),
-            Some(Body::Text(s)) => (s.clone(), Lang::Plain, EditTarget::Body("body:text".into())),
-            Some(Body::Xml(s)) => (s.clone(), Lang::Plain, EditTarget::Body("body:xml".into())),
-            // No isolated body: edit the raw .bru source.
-            _ => (bru_lang::serialize(&file), Lang::Plain, EditTarget::Source),
-        };
-        self.edit_target = target;
+        let url = req.as_ref().map(|r| r.url.clone()).unwrap_or_default();
+        self.url_input.update(cx, |ed, cx| ed.set_line(&url, cx));
         self.req_tab = ReqTab::Body;
         self.status.clear();
         self.response = None;
-        self.body_editor
-            .update(cx, |ed, cx| ed.set_text(&text, lang, cx));
         self.file = Some(file);
         self.selected = Some(path);
+        self.load_active_tab(cx);
     }
 
     fn top_bar(&self) -> Div {
@@ -492,11 +578,7 @@ impl BruApp {
                     .text_color(theme::text())
                     .text_size(px(13.))
                     .font_family("monospace")
-                    .child(if self.url.is_empty() {
-                        "Select a request".to_string()
-                    } else {
-                        self.url.clone()
-                    }),
+                    .child(self.url_input.clone()),
             )
             .child(icon_chip("</>"))
             .child(chip("Save").on_mouse_up(
@@ -587,7 +669,7 @@ impl BruApp {
             strip = strip.child(tab(t.label(), active).on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |this, _ev: &MouseUpEvent, _w, cx| {
-                    this.req_tab = t;
+                    this.switch_tab(t, cx);
                     cx.notify();
                 }),
             ));
@@ -597,14 +679,14 @@ impl BruApp {
 
     /// The content for the active request sub-tab.
     fn req_content(&self) -> Div {
-        let inner = match self.req_tab {
-            ReqTab::Body => self.editor_view(),
-            ReqTab::Params => self.kv_view("params:query"),
-            ReqTab::Headers => self.kv_view("headers"),
-            ReqTab::Vars => self.kv_view("vars:pre-request"),
-            ReqTab::Auth => self.auth_view(),
-            ReqTab::Script => self.text_view("script:pre-request", "script"),
-            ReqTab::Source => self.source_view(),
+        let inner = if self.file.is_some() {
+            self.editor_view()
+        } else {
+            div()
+                .p_3()
+                .text_color(theme::muted())
+                .child("Select a request.")
+                .into_any_element()
         };
         div()
             .flex()
@@ -615,6 +697,7 @@ impl BruApp {
             .child(inner)
     }
 
+    /// The shared editor for the active sub-tab's block.
     fn editor_view(&self) -> gpui::AnyElement {
         div()
             .id("body")
@@ -629,7 +712,7 @@ impl BruApp {
             .into_any_element()
     }
 
-    /// Read-only table of a dictionary block (params/headers/vars/auth).
+    #[allow(dead_code)]
     fn kv_view(&self, block: &str) -> gpui::AnyElement {
         let rows = self
             .file
@@ -685,6 +768,7 @@ impl BruApp {
         col.into_any_element()
     }
 
+    #[allow(dead_code)]
     fn auth_view(&self) -> gpui::AnyElement {
         match self
             .file
@@ -740,6 +824,7 @@ impl BruApp {
         }
     }
 
+    #[allow(dead_code)]
     fn text_view(&self, block: &str, id: &'static str) -> gpui::AnyElement {
         let text = self
             .file
@@ -763,6 +848,7 @@ impl BruApp {
             .into_any_element()
     }
 
+    #[allow(dead_code)]
     fn source_view(&self) -> gpui::AnyElement {
         let text = self
             .file
