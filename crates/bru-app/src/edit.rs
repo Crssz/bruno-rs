@@ -49,6 +49,30 @@ fn set_inline_entry(entries: &mut Vec<Entry>, key: &str, value: &str) {
     }
 }
 
+/// Set a `key: value` field on the active method block (e.g. the `body`/`auth`
+/// mode). No-op if there's no method block.
+pub fn set_method_field(file: &mut BruFile, key: &str, value: &str) {
+    let Some(i) = method_block_index(file) else {
+        return;
+    };
+    if let BlockContent::Dict(entries) = &mut file.blocks[i].content {
+        set_inline_entry(entries, key, value);
+    }
+}
+
+/// Read a `key` field from the active method block (e.g. the current body mode).
+pub fn method_field(file: &BruFile, key: &str) -> Option<String> {
+    let i = method_block_index(file)?;
+    if let BlockContent::Dict(entries) = &file.blocks[i].content {
+        entries
+            .iter()
+            .find(|e| e.key.name() == key)
+            .map(|e| e.value.as_inline().to_string())
+    } else {
+        None
+    }
+}
+
 /// Set the `name` entry of the `meta` block — used when renaming a request so
 /// the tree label (which reads `meta.name`) follows the new file name.
 pub fn set_meta_name(file: &mut BruFile, name: &str) {

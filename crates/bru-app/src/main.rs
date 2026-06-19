@@ -494,21 +494,31 @@ impl OpenTab {
     fn load_active_tab(&mut self, cx: &mut Context<BruApp>) {
         let f = &self.file;
         let (text, lang, kind) = match self.req_tab {
-            ReqTab::Body => match f.blocks.iter().find(|b| b.name.starts_with("body:")) {
-                Some(b) => {
-                    let t = match &b.content {
-                        BlockContent::Text(s) => s.clone(),
-                        _ => String::new(),
-                    };
-                    let lang = if b.name == "body:json" {
-                        Lang::Json
-                    } else {
-                        Lang::Plain
-                    };
-                    (t, lang, EditKind::Body(b.name.clone()))
+            ReqTab::Body => {
+                // Mode-driven: the method block's `body:` field picks the block;
+                // fall back to any present body:* block for files without it.
+                let mode = edit::method_field(f, "body").unwrap_or_default();
+                let block = body_block_name(&mode).map(str::to_string).or_else(|| {
+                    f.blocks
+                        .iter()
+                        .find(|b| b.name.starts_with("body:"))
+                        .map(|b| b.name.clone())
+                });
+                match block {
+                    Some(b) if b == "body:form-urlencoded" => {
+                        (edit::dict_to_lines(f, &b), Lang::Plain, EditKind::Dict(b))
+                    }
+                    Some(b) => {
+                        let lang = if b == "body:json" {
+                            Lang::Json
+                        } else {
+                            Lang::Plain
+                        };
+                        (text_block(f, &b), lang, EditKind::Body(b))
+                    }
+                    None => (String::new(), Lang::Plain, EditKind::None),
                 }
-                None => (String::new(), Lang::Plain, EditKind::None),
-            },
+            }
             ReqTab::Params => (
                 edit::dict_to_lines(f, "params:query"),
                 Lang::Plain,
@@ -524,14 +534,19 @@ impl OpenTab {
                 Lang::Plain,
                 EditKind::Dict("vars:pre-request".into()),
             ),
-            ReqTab::Auth => match f.blocks.iter().find(|b| b.name.starts_with("auth:")) {
-                Some(b) => (
-                    edit::dict_to_lines(f, &b.name),
-                    Lang::Plain,
-                    EditKind::Dict(b.name.clone()),
-                ),
-                None => (String::new(), Lang::Plain, EditKind::None),
-            },
+            ReqTab::Auth => {
+                let mode = edit::method_field(f, "auth").unwrap_or_default();
+                let block = auth_block_name(&mode).map(str::to_string).or_else(|| {
+                    f.blocks
+                        .iter()
+                        .find(|b| b.name.starts_with("auth:"))
+                        .map(|b| b.name.clone())
+                });
+                match block {
+                    Some(b) => (edit::dict_to_lines(f, &b), Lang::Plain, EditKind::Dict(b)),
+                    None => (String::new(), Lang::Plain, EditKind::None),
+                }
+            }
             ReqTab::PostVars => (
                 edit::dict_to_lines(f, "vars:post-response"),
                 Lang::Plain,
@@ -697,6 +712,45 @@ fn text_block(f: &BruFile, name: &str) -> String {
             _ => None,
         })
         .unwrap_or_default()
+}
+
+/// Body modes the gpui editor can edit (text-based + url-encoded form). The
+/// structured types (multipartForm/graphql/file) need dedicated editors and are
+/// intentionally omitted from the cycle for now.
+const BODY_MODES: &[&str] = &["none", "json", "text", "xml", "sparql", "formUrlEncoded"];
+const AUTH_MODES: &[&str] = &[
+    "none", "inherit", "basic", "bearer", "apikey", "oauth2", "digest", "awsv4",
+];
+
+/// The `body:<block>` name for a body mode, or None for `none`/unknown.
+fn body_block_name(mode: &str) -> Option<&'static str> {
+    Some(match mode {
+        "json" => "body:json",
+        "text" => "body:text",
+        "xml" => "body:xml",
+        "sparql" => "body:sparql",
+        "formUrlEncoded" => "body:form-urlencoded",
+        _ => return None,
+    })
+}
+
+/// The `auth:<block>` name for an auth mode, or None for none/inherit/unknown.
+fn auth_block_name(mode: &str) -> Option<&'static str> {
+    Some(match mode {
+        "basic" => "auth:basic",
+        "bearer" => "auth:bearer",
+        "apikey" => "auth:apikey",
+        "oauth2" => "auth:oauth2",
+        "digest" => "auth:digest",
+        "awsv4" => "auth:awsv4",
+        _ => return None,
+    })
+}
+
+/// Next mode in a cycle list after `current` (wraps to the start).
+fn cycle_next(list: &[&str], current: &str) -> String {
+    let i = list.iter().position(|m| *m == current).unwrap_or(0);
+    list[(i + 1) % list.len()].to_string()
 }
 
 /// Rows `(key, value, disabled)` of a dictionary block.
@@ -2290,6 +2344,48 @@ impl BruApp {
         };
     }
 
+    /// Change the active request's body mode: set the method `body:` field,
+    /// create the content block if absent, and reload the editor.
+    fn set_body_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        let Some(i) = self.active else { return };
+        self.tabs[i].apply_edits(cx);
+        edit::set_method_field(&mut self.tabs[i].file, "body", mode);
+        if let Some(block) = body_block_name(mode) {
+            if !self.tabs[i].file.blocks.iter().any(|b| b.name == block) {
+                let content = if mode == "formUrlEncoded" {
+                    BlockContent::Dict(Vec::new())
+                } else {
+                    BlockContent::Text(String::new())
+                };
+                self.tabs[i].file.blocks.push(Block {
+                    name: block.into(),
+                    content,
+                });
+            }
+        }
+        self.tabs[i].load_active_tab(cx);
+        self.dirty.insert(self.tabs[i].path.clone());
+        cx.notify();
+    }
+
+    /// Change the active request's auth mode (mirrors `set_body_mode`).
+    fn set_auth_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        let Some(i) = self.active else { return };
+        self.tabs[i].apply_edits(cx);
+        edit::set_method_field(&mut self.tabs[i].file, "auth", mode);
+        if let Some(block) = auth_block_name(mode) {
+            if !self.tabs[i].file.blocks.iter().any(|b| b.name == block) {
+                self.tabs[i].file.blocks.push(Block {
+                    name: block.into(),
+                    content: BlockContent::Dict(Vec::new()),
+                });
+            }
+        }
+        self.tabs[i].load_active_tab(cx);
+        self.dirty.insert(self.tabs[i].path.clone());
+        cx.notify();
+    }
+
     /// Open a request as a tab, or focus it if already open.
     fn open_request(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if let Some(i) = self.tabs.iter().position(|t| t.path == path) {
@@ -3000,6 +3096,31 @@ impl BruApp {
                     cx.notify();
                 }),
             ));
+        }
+        // A mode-cycle chip pinned right when the Body/Auth tab is active.
+        if matches!(tab.req_tab, ReqTab::Body | ReqTab::Auth) {
+            let is_body = tab.req_tab == ReqTab::Body;
+            let (field, list, prefix) = if is_body {
+                ("body", BODY_MODES, "Body")
+            } else {
+                ("auth", AUTH_MODES, "Auth")
+            };
+            let cur = edit::method_field(&tab.file, field).unwrap_or_else(|| "none".into());
+            strip = strip.child(div().flex_1()).child(
+                chip(&format!("{prefix}: {cur}")).on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                        let Some(i) = this.active else { return };
+                        let cur = edit::method_field(&this.tabs[i].file, field).unwrap_or_default();
+                        let next = cycle_next(list, &cur);
+                        if is_body {
+                            this.set_body_mode(&next, cx);
+                        } else {
+                            this.set_auth_mode(&next, cx);
+                        }
+                    }),
+                ),
+            );
         }
         strip
     }
