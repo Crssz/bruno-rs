@@ -1,15 +1,17 @@
 // Phase 3a: real collection data. Loads a Bruno collection (the bundled sample,
 // or a path arg), renders a clickable recursive sidebar, and shows the opened
 // request's real method/URL/body (JSON bodies tree-sitter-highlighted).
+mod editor;
 mod highlight;
 mod theme;
 
 use std::path::{Path, PathBuf};
 
 use bru_core::{Body, CollectionTree, Folder};
+use editor::CodeEditor;
 use gpui::{
-    div, prelude::*, px, size, App, Bounds, Context, Div, MouseButton, MouseUpEvent, SharedString,
-    StyledText, Window, WindowBounds, WindowOptions,
+    div, prelude::*, px, size, App, Bounds, Context, Div, Entity, MouseButton, MouseUpEvent,
+    Window, WindowBounds, WindowOptions,
 };
 use gpui_platform::application;
 
@@ -122,26 +124,27 @@ struct BruApp {
     selected: Option<PathBuf>,
     method: String,
     url: String,
-    body: SharedString,
-    body_is_json: bool,
+    body_label: &'static str,
+    body_editor: Entity<CodeEditor>,
 }
 
 impl BruApp {
-    fn new(dir: PathBuf) -> Self {
+    fn new(cx: &mut Context<Self>, dir: PathBuf) -> Self {
         let collection = bru_lang::load_collection(&dir).ok();
+        let body_editor = cx.new(|cx| CodeEditor::new(cx, ""));
         Self {
             dir,
             collection,
             selected: None,
             method: String::new(),
             url: String::new(),
-            body: "".into(),
-            body_is_json: false,
+            body_label: "Body",
+            body_editor,
         }
     }
 
-    /// Open a request file: project its method/URL/body for display.
-    fn open_request(&mut self, path: PathBuf) {
+    /// Open a request file: project its method/URL/body and load the editor.
+    fn open_request(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let Some(file) = std::fs::read_to_string(&path)
             .ok()
             .and_then(|t| bru_lang::parse(&t).ok())
@@ -151,17 +154,15 @@ impl BruApp {
         let req = file.to_request();
         self.method = req.as_ref().map(|r| r.method.clone()).unwrap_or_default();
         self.url = req.as_ref().map(|r| r.url.clone()).unwrap_or_default();
-        match req.as_ref().map(|r| &r.body) {
-            Some(Body::Json(s)) => {
-                self.body = s.clone().into();
-                self.body_is_json = true;
-            }
-            _ => {
-                // No JSON body: show the raw .bru source (plain).
-                self.body = bru_lang::serialize(&file).into();
-                self.body_is_json = false;
-            }
-        }
+        let (text, label) = match req.as_ref().map(|r| &r.body) {
+            Some(Body::Json(s)) => (s.clone(), "Body (JSON)"),
+            Some(Body::Text(s)) | Some(Body::Xml(s)) => (s.clone(), "Body"),
+            // No editable body: show the raw .bru source.
+            _ => (bru_lang::serialize(&file), "Source"),
+        };
+        self.body_label = label;
+        self.body_editor
+            .update(cx, |ed, cx| ed.set_text(&text, cx));
         self.selected = Some(path);
     }
 
@@ -266,7 +267,7 @@ impl BruApp {
             let row = req_row(&method, &req.name, active, depth).on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |this, _ev: &MouseUpEvent, _win, cx| {
-                    this.open_request(path.clone());
+                    this.open_request(path.clone(), cx);
                     cx.notify();
                 }),
             );
@@ -334,7 +335,7 @@ impl BruApp {
             )
     }
 
-    fn body_pane(&self, window: &mut Window) -> Div {
+    fn body_pane(&self) -> Div {
         let header = div()
             .flex()
             .flex_row()
@@ -346,37 +347,18 @@ impl BruApp {
             .bg(theme::surface0())
             .border_b_1()
             .border_color(theme::border2())
-            .child(tab(if self.body_is_json { "Body (JSON)" } else { "Source" }, true));
+            .child(tab(self.body_label, true));
 
-        let content = if self.body_is_json {
-            let mut base = window.text_style();
-            base.font_family = "monospace".into();
-            base.color = theme::text();
-            base.font_size = px(13.).into();
-            let spans = highlight::json(&self.body);
-            div()
-                .id("body")
-                .overflow_y_scroll()
-                .flex_1()
-                .w_full()
-                .p_3()
-                .font_family("monospace")
-                .text_size(px(13.))
-                .line_height(px(19.))
-                .child(StyledText::new(self.body.clone()).with_default_highlights(&base, spans))
-        } else {
-            div()
-                .id("body")
-                .overflow_y_scroll()
-                .flex_1()
-                .w_full()
-                .p_3()
-                .font_family("monospace")
-                .text_size(px(13.))
-                .line_height(px(19.))
-                .text_color(theme::subtext())
-                .child(self.body.clone())
-        };
+        let content = div()
+            .id("body")
+            .overflow_y_scroll()
+            .flex_1()
+            .w_full()
+            .p_3()
+            .font_family("monospace")
+            .text_size(px(13.))
+            .line_height(px(19.))
+            .child(self.body_editor.clone());
 
         div()
             .flex()
@@ -411,14 +393,14 @@ impl BruApp {
 }
 
 impl Render for BruApp {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let center = div()
             .flex()
             .flex_col()
             .flex_1()
             .h_full()
             .child(self.url_bar())
-            .child(self.body_pane(window));
+            .child(self.body_pane());
 
         div()
             .flex()
@@ -448,13 +430,14 @@ fn main() {
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("sample"));
 
     application().run(move |cx: &mut App| {
+        editor::bind_keys(cx);
         let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| BruApp::new(dir.clone())),
+            |_, cx| cx.new(|cx| BruApp::new(cx, dir.clone())),
         )
         .unwrap();
         cx.activate(true);

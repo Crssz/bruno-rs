@@ -1,4 +1,8 @@
 //! Tree-sitter syntax highlighting → gpui highlight spans.
+//!
+//! Currently unused by the editable editor (single-color v1); kept for the
+//! follow-up that adds per-line highlight runs to the editor.
+#![allow(dead_code)]
 
 use std::ops::Range;
 
