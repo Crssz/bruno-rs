@@ -220,6 +220,11 @@ struct BruApp {
     status: String,
     /// The environment-manager overlay, if open.
     env: Option<EnvEditor>,
+    /// Collection-runner overlay state.
+    runner_open: bool,
+    runner_running: bool,
+    runner_title: String,
+    runner_results: Vec<RunResult>,
 }
 
 /// One editable env row: two single-line editors + two flags.
@@ -441,6 +446,107 @@ fn format_outcome(o: &bru_engine::RunOutcome) -> String {
     }
 }
 
+/// One request's outcome in a runner batch.
+#[derive(Clone)]
+struct RunResult {
+    name: String,
+    passed: bool,
+    status: u16,
+    ms: u128,
+    error: Option<String>,
+}
+
+/// Find the sub-folder whose path is `dir`.
+fn find_folder<'a>(folder: &'a Folder, dir: &Path) -> Option<&'a Folder> {
+    for sub in &folder.folders {
+        if sub.path == dir {
+            return Some(sub);
+        }
+        if let Some(f) = find_folder(sub, dir) {
+            return Some(f);
+        }
+    }
+    None
+}
+
+/// Collect every request path under `folder` (recursive).
+fn collect_folder_requests(folder: &Folder, out: &mut Vec<PathBuf>) {
+    for sub in &folder.folders {
+        collect_folder_requests(sub, out);
+    }
+    for req in &folder.requests {
+        out.push(req.path.clone());
+    }
+}
+
+/// Run request files sequentially through one shared RunContext (Bruno's folder
+/// runner) on a fresh tokio runtime. Worker thread.
+fn run_folder_blocking(files: Vec<PathBuf>, vars_base: PathBuf) -> Vec<RunResult> {
+    let err_row = |name: &str, e: String| RunResult {
+        name: name.to_string(),
+        passed: false,
+        status: 0,
+        ms: 0,
+        error: Some(e),
+    };
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => return vec![err_row("runtime", e.to_string())],
+    };
+    rt.block_on(async move {
+        let opts = bru_http::SendOptions::default();
+        let client = match bru_http::HttpClient::new(&opts) {
+            Ok(c) => c,
+            Err(e) => return vec![err_row("client", e.to_string())],
+        };
+        let mut ctx = bru_engine::RunContext {
+            vars: bru_engine::base_vars(&vars_base, None),
+            client,
+            send_options: opts,
+            ..Default::default()
+        };
+        let mut results = Vec::new();
+        for path in files {
+            ctx.script_dir = path.parent().map(Path::to_path_buf);
+            let fname = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("request")
+                .to_string();
+            let file = match std::fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|t| bru_lang::parse(&t).map_err(|e| e.to_string()))
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    results.push(err_row(&fname, e));
+                    continue;
+                }
+            };
+            if file.to_request().is_none() {
+                continue; // skip non-HTTP .bru
+            }
+            let outcome = bru_engine::run_request(&file, &mut ctx).await;
+            let status = outcome.response.as_ref().map(|r| r.status).unwrap_or(0);
+            let ms = outcome.response.as_ref().map(|r| r.duration_ms).unwrap_or(0);
+            let passed = outcome.error.is_none()
+                && outcome.assertions.iter().all(|a| a.passed)
+                && outcome.tests.iter().all(|t| t.passed);
+            results.push(RunResult {
+                name: outcome.name.clone(),
+                passed,
+                status,
+                ms,
+                error: outcome.error.clone(),
+            });
+        }
+        results
+    })
+}
+
 impl BruApp {
     fn new(_cx: &mut Context<Self>, dir: PathBuf) -> Self {
         let collection = bru_lang::load_collection(&dir).ok();
@@ -451,7 +557,61 @@ impl BruApp {
             active: None,
             status: String::new(),
             env: None,
+            runner_open: false,
+            runner_running: false,
+            runner_title: String::new(),
+            runner_results: Vec::new(),
         }
+    }
+
+    // ── collection runner ────────────────────────────────────────────────────
+    fn requests_under(&self, dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let Some(tree) = &self.collection else {
+            return out;
+        };
+        let start = if self.dir == dir {
+            Some(&tree.root)
+        } else {
+            find_folder(&tree.root, dir)
+        };
+        if let Some(folder) = start {
+            collect_folder_requests(folder, &mut out);
+        }
+        out
+    }
+
+    /// Run every request under `dir` sequentially on a worker thread; bridge the
+    /// batch back via oneshot + cx.spawn (same pattern as send()).
+    fn run_folder(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        if self.runner_running {
+            return;
+        }
+        let files = self.requests_under(&dir);
+        self.runner_title = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| "Collection".into());
+        self.runner_open = true;
+        self.runner_running = true;
+        self.runner_results.clear();
+        let vars_base = self.dir.clone();
+        let (tx, rx) = futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_folder_blocking(files, vars_base));
+        });
+        cx.spawn(async move |this, cx| {
+            let result = rx.await;
+            let _ = this.update(cx, |this, cx| {
+                this.runner_running = false;
+                if let Ok(results) = result {
+                    this.runner_results = results;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     // ── environment manager ──────────────────────────────────────────────────
@@ -758,6 +918,14 @@ impl BruApp {
             .child(icon_chip("\u{2302}"))
             .child(chip("Open Collection"))
             .child(chip("New"))
+            .child(chip("Run").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                    let dir = this.dir.clone();
+                    this.run_folder(dir, cx);
+                    cx.notify();
+                }),
+            ))
             .child(div().text_color(theme::accent()).text_size(px(13.)).child(name))
             .child(
                 div()
@@ -1009,6 +1177,129 @@ impl BruApp {
                     .line_height(px(19.))
                     .child(tab.body_editor.clone()),
             )
+    }
+
+    /// The collection-runner overlay (scrim + results card).
+    fn runner_overlay(&self, cx: &mut Context<Self>) -> Div {
+        let passed = self.runner_results.iter().filter(|x| x.passed).count();
+        let total = self.runner_results.len();
+        let status_text = if self.runner_running {
+            "running\u{2026}".to_string()
+        } else {
+            format!("{passed}/{total} passed")
+        };
+        let status_color = if self.runner_running {
+            theme::accent()
+        } else if passed == total {
+            theme::green()
+        } else {
+            theme::red()
+        };
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .w_full()
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .text_color(theme::text())
+                    .child(format!("Run: {}", self.runner_title)),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(status_color)
+                    .child(status_text),
+            )
+            .child(ghost_btn("Close").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                    this.runner_open = false;
+                    cx.notify();
+                }),
+            ));
+        let mut list = div()
+            .id("runner-list")
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .w_full();
+        if self.runner_running && self.runner_results.is_empty() {
+            list = list.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme::muted())
+                    .child("Running requests\u{2026}"),
+            );
+        }
+        for res in &self.runner_results {
+            let (mark, c) = if res.passed {
+                ("\u{2713}", theme::green())
+            } else {
+                ("\u{2717}", theme::red())
+            };
+            let detail = match &res.error {
+                Some(e) => e.clone(),
+                None => format!("{} \u{00B7} {} ms", res.status, res.ms),
+            };
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(div().w(px(14.)).text_size(px(12.)).text_color(c).child(mark))
+                    .child(
+                        div()
+                            .w(px(220.))
+                            .text_size(px(12.))
+                            .text_color(theme::text())
+                            .child(res.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_family("monospace")
+                            .text_size(px(12.))
+                            .text_color(theme::subtext())
+                            .child(detail),
+                    ),
+            );
+        }
+        let card = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w(px(620.))
+            .h(px(460.))
+            .p_4()
+            .rounded_md()
+            .bg(theme::mantle())
+            .border_1()
+            .border_color(theme::border2())
+            .occlude()
+            .child(header)
+            .child(list);
+        div()
+            .absolute()
+            .inset_0()
+            .bg(gpui::rgba(0x00000099))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                    this.runner_open = false;
+                    cx.notify();
+                }),
+            )
+            .child(card)
     }
 
     /// The environment-manager overlay (scrim + card).
@@ -1410,6 +1701,9 @@ impl Render for BruApp {
             .child(self.status_bar());
         if self.env.is_some() {
             root = root.child(self.env_overlay(cx));
+        }
+        if self.runner_open {
+            root = root.child(self.runner_overlay(cx));
         }
         root
     }
