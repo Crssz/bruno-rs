@@ -282,6 +282,9 @@ struct BruApp {
     vault_input: Entity<CodeEditor>,
     vault_rows: Vec<(Entity<CodeEditor>, Entity<CodeEditor>)>,
     vault_error: Option<String>,
+    /// Recently-opened collections + a Home-screen toggle.
+    recent: Vec<String>,
+    home: bool,
 }
 
 /// One editable env row: two single-line editors + two flags.
@@ -568,6 +571,36 @@ struct CookieEntry {
     value: String,
 }
 
+/// `~/.bruno-rs/gpui-recent.json` — the recent-collections list.
+fn recent_path() -> Option<PathBuf> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    let dir = PathBuf::from(home).join(".bruno-rs");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("gpui-recent.json"))
+}
+
+fn load_recent() -> Vec<String> {
+    recent_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn save_recent(recent: &[String]) {
+    if let Some(p) = recent_path() {
+        if let Ok(json) = serde_json::to_string(recent) {
+            let _ = std::fs::write(p, json);
+        }
+    }
+}
+
+/// Move `s` to the front of the recent list (deduped, capped at 10).
+fn bump_recent(recent: &mut Vec<String>, s: String) {
+    recent.retain(|r| r != &s);
+    recent.insert(0, s);
+    recent.truncate(10);
+}
+
 /// Host of a URL (no scheme/path/userinfo/port).
 fn host_of(u: &str) -> String {
     let s = u.split("://").nth(1).unwrap_or(u);
@@ -756,7 +789,14 @@ impl BruApp {
             vault_input: cx.new(|cx| CodeEditor::single_line(cx, "")),
             vault_rows: Vec::new(),
             vault_error: None,
+            recent: load_recent(),
+            home: false,
         }
+    }
+
+    fn go_home(&mut self, cx: &mut Context<Self>) {
+        self.home = !self.home;
+        cx.notify();
     }
 
     // ── secrets vault ────────────────────────────────────────────────────────
@@ -885,10 +925,13 @@ impl BruApp {
         match bru_lang::load_collection(&dir) {
             Ok(tree) => {
                 self.collection = Some(tree);
+                bump_recent(&mut self.recent, dir.to_string_lossy().into_owned());
+                save_recent(&self.recent);
                 self.dir = dir;
                 self.tabs.clear();
                 self.active = None;
                 self.env = None;
+                self.home = false;
                 self.status = "Loaded collection".into();
             }
             Err(e) => self.status = format!("Failed to load: {e}"),
@@ -1344,6 +1387,7 @@ impl BruApp {
             self.tabs.push(tab);
             self.active = Some(self.tabs.len() - 1);
             self.status.clear();
+            self.home = false;
         }
     }
 
@@ -1364,7 +1408,10 @@ impl BruApp {
             .bg(theme::mantle())
             .border_b_1()
             .border_color(theme::border1())
-            .child(icon_chip("\u{2302}"))
+            .child(icon_chip("\u{2302}").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.go_home(cx)),
+            ))
             .child(chip("Open Collection").on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
@@ -2795,6 +2842,107 @@ impl BruApp {
             .child(card)
     }
 
+    /// The Home / welcome screen (open / import + recent collections).
+    fn home_screen(&self, cx: &mut Context<Self>) -> Div {
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .items_center()
+            .child(
+                div()
+                    .text_size(px(28.))
+                    .text_color(theme::accent())
+                    .child("bru-gpui"),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(theme::subtext())
+                    .child("Open or import a collection to begin."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(solid_btn("Open Collection").on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                                this.load_collection(dir, cx);
+                            }
+                        }),
+                    ))
+                    .child(ghost_btn("Import Postman").on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.import_postman(cx)),
+                    ))
+                    .child(ghost_btn("Import curl").on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_curl(cx)),
+                    )),
+            );
+        if !self.recent.is_empty() {
+            col = col.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme::muted())
+                    .child("Recent"),
+            );
+            let mut list = div().flex().flex_col().gap_1().w(px(460.));
+            for p in &self.recent {
+                let path = PathBuf::from(p);
+                let name = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| p.clone());
+                let pc = path.clone();
+                list = list.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(theme::surface0())
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(theme::text())
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(theme::muted())
+                                .child(p.clone()),
+                        )
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                this.load_collection(pc.clone(), cx)
+                            }),
+                        ),
+                );
+            }
+            col = col.child(
+                div()
+                    .id("home-recent")
+                    .overflow_y_scroll()
+                    .h(px(240.))
+                    .child(list),
+            );
+        }
+        div()
+            .flex()
+            .flex_1()
+            .w_full()
+            .items_center()
+            .justify_center()
+            .child(col)
+    }
+
     /// The strip of open request tabs (click to focus, × to close).
     fn tab_strip(&self, cx: &mut Context<Self>) -> Div {
         let mut strip = div()
@@ -2892,7 +3040,9 @@ impl BruApp {
 impl Render for BruApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let strip = self.tab_strip(cx);
-        let content = if let Some(i) = self.active {
+        let content = if self.collection.is_none() || self.home {
+            self.home_screen(cx)
+        } else if let Some(i) = self.active {
             let tab = &self.tabs[i];
             div()
                 .flex()
