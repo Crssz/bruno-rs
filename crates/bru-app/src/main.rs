@@ -361,6 +361,8 @@ struct BruApp {
     env_menu: Option<Point<Pixels>>,
     /// Folder paths whose children are collapsed in the sidebar.
     collapsed: HashSet<PathBuf>,
+    /// Sidebar copy/paste clipboard: (source path, is_dir).
+    clipboard_item: Option<(PathBuf, bool)>,
     /// Tab paths with unsaved edits (live, via editor Changed events).
     dirty: HashSet<PathBuf>,
     /// Close-confirmation for a dirty tab (the tab index).
@@ -1076,6 +1078,27 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Reveal a path in the OS file manager (Explorer on Windows, Finder on macOS).
+fn reveal_in_file_manager(path: &Path) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn();
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = path;
+    }
+}
+
 /// Build a `curl` command for the request — method, URL, headers, and body —
 /// for the "</>" generate-code affordance (copied to the clipboard).
 fn to_curl(tab: &OpenTab, cx: &App) -> String {
@@ -1256,6 +1279,7 @@ impl BruApp {
             selected_env: None,
             env_menu: None,
             collapsed: HashSet::new(),
+            clipboard_item: None,
             dirty: HashSet::new(),
             confirm_close: None,
             resp_filter,
@@ -1661,6 +1685,71 @@ impl BruApp {
         cx.notify();
     }
 
+    /// Run a single request from its row: open it, then send.
+    fn ctx_run_request(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = self.ctx_menu.take() else {
+            return;
+        };
+        self.open_request(menu.target, cx);
+        self.send(cx);
+        cx.notify();
+    }
+
+    /// Copy the menu target onto the sidebar clipboard for a later Paste.
+    fn ctx_copy(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.ctx_menu.take() {
+            self.clipboard_item = Some((menu.target, menu.is_dir));
+            self.status = "Copied to sidebar clipboard".into();
+            cx.notify();
+        }
+    }
+
+    /// Paste the clipboard item into the menu's folder (dedup name).
+    fn ctx_paste(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = self.ctx_menu.take() else {
+            return;
+        };
+        let dest_dir = if menu.is_dir {
+            menu.target.clone()
+        } else {
+            menu.target.parent().map(Path::to_path_buf).unwrap_or(menu.target)
+        };
+        let Some((src, is_dir)) = self.clipboard_item.clone() else {
+            return;
+        };
+        let stem = src
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Item")
+            .to_string();
+        if is_dir {
+            let mut dest = dest_dir.join(&stem);
+            let mut n = 1;
+            while dest.exists() {
+                n += 1;
+                dest = dest_dir.join(format!("{stem} {n}"));
+            }
+            let _ = copy_dir_recursive(&src, &dest);
+        } else {
+            let mut dest = dest_dir.join(format!("{stem}.bru"));
+            let mut n = 1;
+            while dest.exists() {
+                n += 1;
+                dest = dest_dir.join(format!("{stem} {n}.bru"));
+            }
+            let _ = std::fs::copy(&src, &dest);
+        }
+        self.reload_collection(cx);
+    }
+
+    /// Reveal the menu target in the OS file manager.
+    fn ctx_reveal(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.ctx_menu.take() {
+            reveal_in_file_manager(&menu.target);
+            cx.notify();
+        }
+    }
+
     fn start_rename(&mut self, cx: &mut Context<Self>) {
         let Some(menu) = self.ctx_menu.take() else {
             return;
@@ -1793,11 +1882,22 @@ impl BruApp {
                     MouseButton::Left,
                     cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_run(cx)),
                 ));
+            if self.clipboard_item.is_some() {
+                card = card.child(item("Paste").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_paste(cx)),
+                ));
+            }
         } else {
-            card = card.child(item("Open").on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_run(cx)),
-            ));
+            card = card
+                .child(item("Open").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_run(cx)),
+                ))
+                .child(item("Run").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_run_request(cx)),
+                ));
         }
         card = card
             .child(item("Rename").on_mouse_up(
@@ -1807,6 +1907,14 @@ impl BruApp {
             .child(item("Clone").on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_duplicate(cx)),
+            ))
+            .child(item("Copy").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_copy(cx)),
+            ))
+            .child(item("Reveal in Explorer").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_reveal(cx)),
             ))
             .child(item("Delete").text_color(theme::red()).on_mouse_up(
                 MouseButton::Left,
