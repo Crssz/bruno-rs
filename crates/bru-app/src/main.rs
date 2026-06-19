@@ -1,4 +1,4 @@
-// Phase 3a: real collection data. Loads a Bruno collection (the bundled sample,
+﻿// Phase 3a: real collection data. Loads a Bruno collection (the bundled sample,
 // or a path arg), renders a clickable recursive sidebar, and shows the opened
 // request's real method/URL/body (JSON bodies tree-sitter-highlighted).
 mod edit;
@@ -360,6 +360,8 @@ struct BruApp {
     confirm_delete: Option<(PathBuf, bool, String)>,
     /// The active environment applied to sends/runs (None = no environment).
     selected_env: Option<String>,
+    /// The active global (app-level) environment, overlaid under collection vars.
+    selected_global_env: Option<String>,
     /// Env-picker dropdown anchored at this point (None = closed).
     env_menu: Option<Point<Pixels>>,
     /// Folder paths whose children are collapsed in the sidebar.
@@ -413,6 +415,8 @@ struct EnvEditor {
     rename: Entity<CodeEditor>,
     rows: Vec<EnvRowState>,
     error: Option<String>,
+    /// Collection scope (false) vs global/app-level scope (true).
+    global: bool,
 }
 
 /// Response sub-tabs.
@@ -974,7 +978,7 @@ struct CookieEntry {
     value: String,
 }
 
-/// `~/.bruno-rs/gpui-recent.json` — the recent-collections list.
+/// `~/.bruno-rs/gpui-recent.json` â€” the recent-collections list.
 fn recent_path() -> Option<PathBuf> {
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
     let dir = PathBuf::from(home).join(".bruno-rs");
@@ -994,6 +998,16 @@ fn prefs_path() -> Option<PathBuf> {
     let dir = PathBuf::from(home).join(".bruno-rs");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join("gpui-prefs.json"))
+}
+
+/// Root dir for global (app-level, cross-collection) environments. Holds an
+/// `environments/` subdir just like a collection.
+fn globals_root() -> PathBuf {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    home.join(".bruno-rs").join("globals")
 }
 
 /// Load persisted prefs as `(timeout_secs, insecure, light)`.
@@ -1159,7 +1173,7 @@ fn reveal_in_file_manager(path: &Path) {
     }
 }
 
-/// Build a `curl` command for the request — method, URL, headers, and body —
+/// Build a `curl` command for the request â€” method, URL, headers, and body â€”
 /// for the "</>" generate-code affordance (copied to the clipboard).
 fn to_curl(tab: &OpenTab, cx: &App) -> String {
     let method = if tab.method.is_empty() {
@@ -1337,6 +1351,7 @@ impl BruApp {
             rename: None,
             confirm_delete: None,
             selected_env: None,
+            selected_global_env: None,
             env_menu: None,
             collapsed: HashSet::new(),
             clipboard_item: None,
@@ -1555,7 +1570,7 @@ impl BruApp {
         }
     }
 
-    // ── active environment selector ───────────────────────────────────────────
+    // â”€â”€ active environment selector â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     fn open_env_menu(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
         self.env_menu = Some(pos);
         cx.notify();
@@ -1567,6 +1582,11 @@ impl BruApp {
     }
     fn select_env(&mut self, name: Option<String>, cx: &mut Context<Self>) {
         self.selected_env = name;
+        self.env_menu = None;
+        cx.notify();
+    }
+    fn select_global_env(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.selected_global_env = name;
         self.env_menu = None;
         cx.notify();
     }
@@ -1617,6 +1637,38 @@ impl BruApp {
                     this.select_env(Some(n.clone()), cx)
                 }),
             ));
+        }
+        // Global (app-level) environments overlay collection vars beneath them.
+        let globals = envfs::scan_envs(&globals_root());
+        if !globals.is_empty() {
+            card = card.child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_size(px(10.))
+                    .text_color(theme::muted())
+                    .child("GLOBAL"),
+            );
+            card = card.child(
+                item(
+                    "No Global Env".into(),
+                    self.selected_global_env.is_none(),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.select_global_env(None, cx)),
+                ),
+            );
+            for name in globals {
+                let active = self.selected_global_env.as_deref() == Some(name.as_str());
+                let n = name.clone();
+                card = card.child(item(name, active).on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                        this.select_global_env(Some(n.clone()), cx)
+                    }),
+                ));
+            }
         }
         div()
             .absolute()
@@ -1669,7 +1721,7 @@ impl BruApp {
         cx.notify();
     }
 
-    // ── sidebar context menu ──────────────────────────────────────────────────
+    // â”€â”€ sidebar context menu â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     fn open_ctx_menu(
         &mut self,
         target: PathBuf,
@@ -2169,10 +2221,25 @@ impl BruApp {
             .child(card)
     }
 
-    // ── secrets vault ────────────────────────────────────────────────────────
+    // â”€â”€ secrets vault â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     /// Vault secrets as the lowest-precedence base vars for sends.
     fn vault_vars(&self) -> HashMap<String, String> {
         self.vault.clone().unwrap_or_default()
+    }
+
+    /// The send base layer: vault secrets overlaid by the active GLOBAL env's
+    /// vars (collection + collection-env vars are layered on top in
+    /// run_blocking via base_vars).
+    fn send_globals(&self) -> HashMap<String, String> {
+        let mut vars = self.vault_vars();
+        if let Some(name) = &self.selected_global_env {
+            for r in envfs::load_env_rows(&globals_root(), name) {
+                if r.enabled {
+                    vars.insert(r.name, r.value);
+                }
+            }
+        }
+        vars
     }
 
     fn open_vault(&mut self, cx: &mut Context<Self>) {
@@ -2424,7 +2491,7 @@ impl BruApp {
         cx.notify();
     }
 
-    // ── collection runner ────────────────────────────────────────────────────
+    // â”€â”€ collection runner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     fn requests_under(&self, dir: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
         let Some(tree) = &self.collection else {
@@ -2458,7 +2525,7 @@ impl BruApp {
         self.runner_results.clear();
         let vars_base = self.dir.clone();
         let opts = self.send_options();
-        let globals = self.vault_vars();
+        let globals = self.send_globals();
         let env = self.selected_env.clone();
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
@@ -2477,10 +2544,20 @@ impl BruApp {
         .detach();
     }
 
-    // ── environment manager ──────────────────────────────────────────────────
+    // â”€â”€ environment manager â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    /// The dir the env manager currently operates on (collection or globals).
+    fn env_dir(&self) -> PathBuf {
+        if self.env.as_ref().map(|e| e.global).unwrap_or(false) {
+            globals_root()
+        } else {
+            self.dir.clone()
+        }
+    }
+
     fn env_build_rows(&self, name: &str, cx: &mut Context<Self>) -> Vec<EnvRowState> {
         let reveal = self.reveal_secrets;
-        envfs::load_env_rows(&self.dir, name)
+        let dir = self.env_dir();
+        envfs::load_env_rows(&dir, name)
             .into_iter()
             .map(|r| EnvRowState {
                 name: cx.new(|cx| CodeEditor::single_line(cx, &r.name)),
@@ -2521,7 +2598,27 @@ impl BruApp {
             rename,
             rows,
             error: None,
+            global: false,
         });
+        cx.notify();
+    }
+
+    /// Switch the env manager between Collection and Global scope.
+    fn env_set_scope(&mut self, global: bool, cx: &mut Context<Self>) {
+        if let Some(ed) = &mut self.env {
+            ed.global = global;
+        }
+        let dir = self.env_dir();
+        let names = envfs::scan_envs(&dir);
+        let first = names.first().cloned().unwrap_or_default();
+        let rows = self.env_build_rows(&first, cx);
+        if let Some(ed) = &mut self.env {
+            ed.names = names;
+            ed.selected = first.clone();
+            ed.rows = rows;
+            ed.error = None;
+            ed.rename.update(cx, |li, cx| li.set_line(&first, cx));
+        }
         cx.notify();
     }
 
@@ -2596,7 +2693,7 @@ impl BruApp {
         }
         let rows = self.env_collect_rows(ed, cx);
         let sel = ed.selected.clone();
-        let res = envfs::save_env(&self.dir, &sel, &rows);
+        let res = envfs::save_env(&self.env_dir(), &sel, &rows);
         if let Some(ed) = &mut self.env {
             ed.error = res.err();
         }
@@ -2604,16 +2701,17 @@ impl BruApp {
     }
 
     fn env_new(&mut self, cx: &mut Context<Self>) {
-        let existing = envfs::scan_envs(&self.dir);
+        let dir = self.env_dir();
+        let existing = envfs::scan_envs(&dir);
         let mut name = "New Environment".to_string();
         let mut n = 1;
         while existing.iter().any(|e| e == &name) {
             n += 1;
             name = format!("New Environment {n}");
         }
-        match envfs::create_env(&self.dir, &name) {
+        match envfs::create_env(&dir, &name) {
             Ok(()) => {
-                let names = envfs::scan_envs(&self.dir);
+                let names = envfs::scan_envs(&dir);
                 let rows = self.env_build_rows(&name, cx);
                 let rename = cx.new(|cx| CodeEditor::single_line(cx, &name));
                 if let Some(ed) = &mut self.env {
@@ -2634,8 +2732,9 @@ impl BruApp {
     }
 
     fn env_delete(&mut self, name: String, cx: &mut Context<Self>) {
-        let _ = envfs::delete_env(&self.dir, &name);
-        let names = envfs::scan_envs(&self.dir);
+        let dir = self.env_dir();
+        let _ = envfs::delete_env(&dir, &name);
+        let names = envfs::scan_envs(&dir);
         let reselect = self
             .env
             .as_ref()
@@ -2661,8 +2760,9 @@ impl BruApp {
     }
 
     fn env_duplicate(&mut self, name: String, cx: &mut Context<Self>) {
-        let _ = envfs::duplicate_env(&self.dir, &name);
-        let names = envfs::scan_envs(&self.dir);
+        let dir = self.env_dir();
+        let _ = envfs::duplicate_env(&dir, &name);
+        let names = envfs::scan_envs(&dir);
         if let Some(ed) = &mut self.env {
             ed.names = names;
         }
@@ -2680,9 +2780,9 @@ impl BruApp {
         if old.is_empty() || new.is_empty() || old == new {
             return;
         }
-        match envfs::rename_env(&self.dir, &old, &new) {
+        match envfs::rename_env(&self.env_dir(), &old, &new) {
             Ok(()) => {
-                let names = envfs::scan_envs(&self.dir);
+                let names = envfs::scan_envs(&self.env_dir());
                 if let Some(ed) = &mut self.env {
                     ed.names = names;
                     ed.selected = new;
@@ -2822,7 +2922,7 @@ impl BruApp {
         let dir = self.dir.clone();
         let script_dir = path.parent().map(Path::to_path_buf);
         let opts = self.send_options();
-        let globals = self.vault_vars();
+        let globals = self.send_globals();
         let env = self.selected_env.clone();
         self.tabs[i].sending = true;
         self.status = "Sending\u{2026}".into();
@@ -2833,7 +2933,7 @@ impl BruApp {
         cx.spawn(async move |this, cx| {
             let result = rx.await;
             let _ = this.update(cx, |this, cx| {
-                // Tab may have moved/closed while in flight — re-find by path.
+                // Tab may have moved/closed while in flight â€” re-find by path.
                 let status = match &result {
                     Ok(o) if o.error.is_none() => "Response received",
                     Ok(_) => "Request error",
@@ -2945,7 +3045,7 @@ impl BruApp {
         cx.notify();
     }
 
-    // ── structured params/headers grid ───────────────────────────────────────
+    // â”€â”€ structured params/headers grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     fn kv_add_row(&mut self, cx: &mut Context<Self>) {
         let Some(i) = self.active else { return };
         let row = KvRow {
@@ -3102,9 +3202,9 @@ impl BruApp {
             ))
             .child(
                 icon_chip(if theme::is_dark() {
-                    "\u{2600}" // ☀ — click for light
+                    "\u{2600}" // â˜€ â€” click for light
                 } else {
-                    "\u{263E}" // ☾ — click for dark
+                    "\u{263E}" // â˜¾ â€” click for dark
                 })
                 .on_mouse_up(
                     MouseButton::Left,
@@ -3856,7 +3956,7 @@ impl BruApp {
             )
     }
 
-    /// The structured params/headers grid (enable toggle + name + value + ✕).
+    /// The structured params/headers grid (enable toggle + name + value + âœ•).
     fn kv_grid(&self, tab: &OpenTab, cx: &mut Context<Self>) -> Div {
         let cell = |child: Entity<CodeEditor>, w: Option<Pixels>| {
             let d = div()
@@ -4929,6 +5029,34 @@ impl BruApp {
                             .child("Environments"),
                     )
                     .child({
+                        let global = self.env.as_ref().map(|e| e.global).unwrap_or(false);
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_1()
+                            .mr_2()
+                            .child(
+                                ghost_btn("Collection")
+                                    .when(!global, |d| d.text_color(theme::accent()))
+                                    .on_mouse_up(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                                            this.env_set_scope(false, cx)
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                ghost_btn("Global")
+                                    .when(global, |d| d.text_color(theme::accent()))
+                                    .on_mouse_up(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                                            this.env_set_scope(true, cx)
+                                        }),
+                                    ),
+                            )
+                    })
+                    .child({
                         let eye = if self.reveal_secrets {
                             "\u{1F441} Hide"
                         } else {
@@ -5067,7 +5195,7 @@ impl BruApp {
             .child(col)
     }
 
-    /// The strip of open request tabs (click to focus, × to close).
+    /// The strip of open request tabs (click to focus, Ã— to close).
     fn tab_strip(&self, cx: &mut Context<Self>) -> Div {
         let mut strip = div()
             .flex()
@@ -5307,3 +5435,4 @@ fn main() {
         cx.activate(true);
     });
 }
+
