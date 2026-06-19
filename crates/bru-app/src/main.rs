@@ -3827,6 +3827,10 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some("bruno-rs".into()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             |_, cx| cx.new(|cx| BruApp::new(cx, dir.clone())),
