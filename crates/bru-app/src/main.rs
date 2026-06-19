@@ -227,6 +227,26 @@ fn human_size(bytes: usize) -> String {
     }
 }
 
+/// A classic `offset  hex bytes  ascii` hex dump of a byte buffer.
+fn hex_dump(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for (i, chunk) in bytes.chunks(16).enumerate() {
+        let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+        let ascii: String = chunk
+            .iter()
+            .map(|&b| {
+                if (0x20..0x7f).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
+        out.push_str(&format!("{:08x}  {:<47}  {}\n", i * 16, hex.join(" "), ascii));
+    }
+    out
+}
+
 /// Cycle to the next HTTP method (click-to-change in the URL bar).
 fn next_method(m: &str) -> String {
     const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
@@ -377,6 +397,8 @@ struct BruApp {
     resp_filter_query: String,
     /// Show the response body raw (no pretty-print / filter) when true.
     resp_raw: bool,
+    /// Show the response body as a hex dump when true (overrides raw/pretty).
+    resp_hex: bool,
     /// Read-only editor for the response body (selectable + copyable).
     resp_editor: Entity<CodeEditor>,
     /// Root focus handle, so app-level key actions dispatch.
@@ -1369,6 +1391,7 @@ impl BruApp {
             resp_filter,
             resp_filter_query: String::new(),
             resp_raw: false,
+            resp_hex: false,
             resp_editor: cx.new(|cx| CodeEditor::read_only(cx, "")),
             focus_handle: cx.focus_handle(),
             palette_open: false,
@@ -3671,6 +3694,17 @@ impl BruApp {
                         }),
                     ),
                 )
+                .child(
+                    ghost_btn("Hex")
+                        .when(self.resp_hex, |d| d.text_color(theme::accent()))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                                this.resp_hex = !this.resp_hex;
+                                cx.notify();
+                            }),
+                        ),
+                )
                 .child(ghost_btn("Copy").on_mouse_up(
                     MouseButton::Left,
                     cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.copy_response(cx)),
@@ -3697,6 +3731,7 @@ impl BruApp {
                 // raw), then push it into the read-only selectable editor only
                 // when it changes (so a live text selection survives re-renders).
                 let (displayed, lang) = match o.response.as_ref() {
+                    Some(r) if self.resp_hex => (hex_dump(&r.body), Lang::Plain),
                     Some(r) => {
                         let raw = String::from_utf8_lossy(&r.body).to_string();
                         let is_json = !self.resp_raw
