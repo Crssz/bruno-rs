@@ -588,11 +588,16 @@ impl OpenTab {
 
     /// Load the active sub-tab's block into the shared editor.
     fn load_active_tab(&mut self, cx: &mut Context<BruApp>) {
-        // Params/Headers use the structured row grid, not the shared text editor.
-        let kv_block = match self.req_tab {
+        // Params/Headers/Assert + form/multipart bodies use the structured grid.
+        let kv_block: Option<&str> = match self.req_tab {
             ReqTab::Params => Some("params:query"),
             ReqTab::Headers => Some("headers"),
             ReqTab::Assert => Some("assert"),
+            ReqTab::Body => match edit::method_field(&self.file, "body").as_deref() {
+                Some("formUrlEncoded") => Some("body:form-urlencoded"),
+                Some("multipartForm") => Some("body:multipart-form"),
+                _ => None,
+            },
             _ => None,
         };
         if let Some(block) = kv_block {
@@ -875,6 +880,7 @@ const BODY_MODES: &[&str] = &[
     "xml",
     "sparql",
     "formUrlEncoded",
+    "multipartForm",
     "graphql",
 ];
 const AUTH_MODES: &[&str] = &[
@@ -889,6 +895,7 @@ fn body_block_name(mode: &str) -> Option<&'static str> {
         "xml" => "body:xml",
         "sparql" => "body:sparql",
         "formUrlEncoded" => "body:form-urlencoded",
+        "multipartForm" => "body:multipart-form",
         "graphql" => "body:graphql",
         _ => return None,
     })
@@ -3014,7 +3021,7 @@ impl BruApp {
         edit::set_method_field(&mut self.tabs[i].file, "body", mode);
         if let Some(block) = body_block_name(mode) {
             if !self.tabs[i].file.blocks.iter().any(|b| b.name == block) {
-                let content = if mode == "formUrlEncoded" {
+                let content = if mode == "formUrlEncoded" || mode == "multipartForm" {
                     BlockContent::Dict(Vec::new())
                 } else {
                     BlockContent::Text(String::new())
