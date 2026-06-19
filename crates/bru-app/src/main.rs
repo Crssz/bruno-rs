@@ -3253,13 +3253,11 @@ impl BruApp {
                     .border_1()
                     .border_color(theme::border1())
                     .text_size(px(12.))
-                    .child(
-                        div()
-                            .w(px(7.))
-                            .h(px(7.))
-                            .rounded_full()
-                            .bg(if has { theme::green() } else { theme::muted() }),
-                    )
+                    .child(div().w(px(7.)).h(px(7.)).rounded_full().bg(if has {
+                        theme::green()
+                    } else {
+                        theme::muted()
+                    }))
                     .child(
                         div()
                             .text_color(if has { theme::text() } else { theme::muted() })
@@ -3900,8 +3898,12 @@ impl BruApp {
                         }
                     }
                     None => {
-                        col = col
-                            .child(div().p_2().text_color(theme::muted()).child("(no response)"))
+                        col = col.child(
+                            div()
+                                .p_2()
+                                .text_color(theme::muted())
+                                .child("(no response)"),
+                        )
                     }
                 }
                 scroll("resp-headers").child(col).into_any_element()
@@ -4137,9 +4139,7 @@ impl BruApp {
                 .py_1()
                 .font_family("monospace")
                 .text_size(px(12.))
-                .when(divider, |x| {
-                    x.border_r_1().border_color(theme::border0())
-                })
+                .when(divider, |x| x.border_r_1().border_color(theme::border0()))
                 .child(child);
             match w {
                 Some(w) => d.w(w),
@@ -5441,7 +5441,11 @@ impl BruApp {
                 tab.child(
                     div()
                         .text_size(px(12.))
-                        .text_color(if active { theme::text() } else { theme::muted() })
+                        .text_color(if active {
+                            theme::text()
+                        } else {
+                            theme::muted()
+                        })
                         .child(t.title())
                         .on_mouse_up(
                             MouseButton::Left,
