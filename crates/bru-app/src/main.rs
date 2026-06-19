@@ -44,6 +44,7 @@ enum ReqTab {
     Body,
     Headers,
     Auth,
+    Assert,
     Vars,
     PostVars,
     Script,
@@ -54,11 +55,12 @@ enum ReqTab {
 }
 
 impl ReqTab {
-    const ALL: [ReqTab; 11] = [
+    const ALL: [ReqTab; 12] = [
         ReqTab::Params,
         ReqTab::Body,
         ReqTab::Headers,
         ReqTab::Auth,
+        ReqTab::Assert,
         ReqTab::Vars,
         ReqTab::PostVars,
         ReqTab::Script,
@@ -73,6 +75,7 @@ impl ReqTab {
             ReqTab::Body => "Body",
             ReqTab::Headers => "Headers",
             ReqTab::Auth => "Auth",
+            ReqTab::Assert => "Assert",
             ReqTab::Vars => "Vars",
             ReqTab::PostVars => "Post Vars",
             ReqTab::Script => "Script",
@@ -552,6 +555,7 @@ impl OpenTab {
         let kv_block = match self.req_tab {
             ReqTab::Params => Some("params:query"),
             ReqTab::Headers => Some("headers"),
+            ReqTab::Assert => Some("assert"),
             _ => None,
         };
         if let Some(block) = kv_block {
@@ -609,6 +613,9 @@ impl OpenTab {
                 Lang::Plain,
                 EditKind::Dict("headers".into()),
             ),
+            // Params/Headers/Assert are handled by the kv-grid early return above;
+            // this arm only exists to keep the match exhaustive.
+            ReqTab::Assert => (String::new(), Lang::Plain, EditKind::None),
             ReqTab::Vars => (
                 edit::dict_to_lines(f, "vars:pre-request"),
                 Lang::Plain,
@@ -3403,7 +3410,26 @@ impl BruApp {
                 None => d.flex_1(),
             }
         };
-        let mut table = div().flex().flex_col().gap_1();
+        let block = match &tab.edit_kind {
+            EditKind::Kv(b) => b.as_str(),
+            _ => "",
+        };
+        let (col1, col2) = if block == "assert" {
+            ("Expression  (e.g. res.status)", "Operator + Value  (e.g. eq 200)")
+        } else {
+            ("Name", "Value")
+        };
+        let mut table = div().flex().flex_col().gap_1().child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .text_size(px(10.))
+                .text_color(theme::muted())
+                .child(div().w(px(234.)).child(col1))
+                .child(div().flex_1().child(col2)),
+        );
         for (idx, row) in tab.kv_rows.iter().enumerate() {
             table = table.child(
                 div()
