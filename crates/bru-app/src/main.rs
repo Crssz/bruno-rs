@@ -26,6 +26,9 @@ enum EditKind {
     Dict(String),
     /// A dictionary block (params/headers) edited as a structured row grid.
     Kv(String),
+    /// GraphQL: body:graphql (query) in the main editor, body:graphql:vars in
+    /// the secondary editor.
+    GraphQl,
     /// The whole `.bru` source: reparse it on apply.
     Source,
 }
@@ -450,6 +453,8 @@ struct OpenTab {
     body_editor: Entity<CodeEditor>,
     /// Single-line editor for the request URL.
     url_input: Entity<CodeEditor>,
+    /// Secondary editor (GraphQL variables) shown alongside the body editor.
+    body_vars_editor: Entity<CodeEditor>,
     edit_kind: EditKind,
     /// Row editors for the structured params/headers grid (when on those tabs).
     kv_rows: Vec<KvRow>,
@@ -470,11 +475,12 @@ impl OpenTab {
         let method = req.as_ref().map(|r| r.method.clone()).unwrap_or_default();
         let url = req.as_ref().map(|r| r.url.clone()).unwrap_or_default();
         let body_editor = cx.new(|cx| CodeEditor::new(cx, ""));
+        let body_vars_editor = cx.new(|cx| CodeEditor::new(cx, ""));
         let url_input = cx.new(|cx| CodeEditor::single_line(cx, ""));
         url_input.update(cx, |ed, cx| ed.set_line(&url, cx));
         // Mark the tab dirty on any editor edit (set_text on tab/load doesn't
         // emit Changed, so loading/switching tabs won't false-positive).
-        for ed in [&body_editor, &url_input] {
+        for ed in [&body_editor, &body_vars_editor, &url_input] {
             let p = path.clone();
             cx.subscribe(ed, move |this, _ed, _ev: &editor::Changed, cx| {
                 this.dirty.insert(p.clone());
@@ -489,6 +495,7 @@ impl OpenTab {
             resp_tab: RespTab::Response,
             file,
             body_editor,
+            body_vars_editor,
             url_input,
             edit_kind: EditKind::None,
             kv_rows: Vec::new(),
@@ -564,6 +571,11 @@ impl OpenTab {
                     .collect();
                 edit::set_kv_block(&mut self.file, block, &rows);
             }
+            EditKind::GraphQl => {
+                let vars = self.body_vars_editor.read(cx).text().to_string();
+                set_text_block(&mut self.file, "body:graphql", text);
+                set_text_block(&mut self.file, "body:graphql:vars", vars);
+            }
             EditKind::None | EditKind::Source => {}
         }
     }
@@ -591,6 +603,21 @@ impl OpenTab {
                 Vec::new()
             };
             self.edit_kind = EditKind::Kv(block.to_string());
+            return;
+        }
+        // GraphQL body: two editors (query + variables).
+        if self.req_tab == ReqTab::Body
+            && edit::method_field(&self.file, "body").as_deref() == Some("graphql")
+        {
+            let query = text_block(&self.file, "body:graphql");
+            let vars = text_block(&self.file, "body:graphql:vars");
+            self.kv_rows = Vec::new();
+            self.path_rows = Vec::new();
+            self.edit_kind = EditKind::GraphQl;
+            self.body_editor
+                .update(cx, |ed, cx| ed.set_text(&query, Lang::Plain, cx));
+            self.body_vars_editor
+                .update(cx, |ed, cx| ed.set_text(&vars, Lang::Json, cx));
             return;
         }
         self.kv_rows = Vec::new();
@@ -810,6 +837,18 @@ fn json_path(v: &serde_json::Value, query: &str) -> Option<serde_json::Value> {
     }
 }
 
+/// Set a `BlockContent::Text` block (create if absent + non-empty).
+fn set_text_block(file: &mut BruFile, name: &str, content: String) {
+    if let Some(b) = file.blocks.iter_mut().find(|b| b.name == name) {
+        b.content = BlockContent::Text(content);
+    } else if !content.trim().is_empty() {
+        file.blocks.push(Block {
+            name: name.to_string(),
+            content: BlockContent::Text(content),
+        });
+    }
+}
+
 /// The text content of a `BlockContent::Text` block, or empty.
 fn text_block(f: &BruFile, name: &str) -> String {
     f.block(name)
@@ -823,7 +862,15 @@ fn text_block(f: &BruFile, name: &str) -> String {
 /// Body modes the gpui editor can edit (text-based + url-encoded form). The
 /// structured types (multipartForm/graphql/file) need dedicated editors and are
 /// intentionally omitted from the cycle for now.
-const BODY_MODES: &[&str] = &["none", "json", "text", "xml", "sparql", "formUrlEncoded"];
+const BODY_MODES: &[&str] = &[
+    "none",
+    "json",
+    "text",
+    "xml",
+    "sparql",
+    "formUrlEncoded",
+    "graphql",
+];
 const AUTH_MODES: &[&str] = &[
     "none", "inherit", "basic", "bearer", "apikey", "oauth2", "digest", "awsv4",
 ];
@@ -836,6 +883,7 @@ fn body_block_name(mode: &str) -> Option<&'static str> {
         "xml" => "body:xml",
         "sparql" => "body:sparql",
         "formUrlEncoded" => "body:form-urlencoded",
+        "graphql" => "body:graphql",
         _ => return None,
     })
 }
@@ -3692,6 +3740,42 @@ impl BruApp {
     fn req_content(&self, tab: &OpenTab, cx: &mut Context<Self>) -> Div {
         if matches!(tab.edit_kind, EditKind::Kv(_)) {
             return self.kv_grid(tab, cx);
+        }
+        if matches!(tab.edit_kind, EditKind::GraphQl) {
+            let pane = |label: &str, id: &'static str, ed: Entity<CodeEditor>| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .child(
+                        div()
+                            .px_3()
+                            .pt_2()
+                            .text_size(px(11.))
+                            .text_color(theme::muted())
+                            .child(label.to_string()),
+                    )
+                    .child(
+                        div()
+                            .id(id)
+                            .overflow_y_scroll()
+                            .flex_1()
+                            .w_full()
+                            .p_3()
+                            .font_family("monospace")
+                            .text_size(px(13.))
+                            .line_height(px(19.))
+                            .child(ed),
+                    )
+            };
+            return div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .w_full()
+                .bg(theme::bg())
+                .child(pane("QUERY", "gql-query", tab.body_editor.clone()))
+                .child(pane("VARIABLES", "gql-vars", tab.body_vars_editor.clone()));
         }
         div()
             .flex()
