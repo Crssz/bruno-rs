@@ -5471,6 +5471,7 @@ impl Render for BruApp {
                     .flex()
                     .flex_row()
                     .flex_1()
+                    .min_h_0()
                     .w_full()
                     .child(self.sidebar(cx))
                     .child(center),
