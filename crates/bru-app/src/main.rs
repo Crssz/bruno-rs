@@ -154,10 +154,12 @@ fn req_row(method: &str, name: &str, active: bool, depth: usize) -> Div {
         .pl(px(8. + depth as f32 * 14.))
         .rounded_md()
         .when(active, |d| d.bg(theme::surface0()))
+        .when(!active, |d| d.hover(|s| s.bg(theme::mantle())))
         .child(
             div()
                 .w(px(36.))
                 .text_size(px(10.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
                 .font_family("monospace")
                 .text_color(theme::method_color(method))
                 .child(short_method(method)),
@@ -165,11 +167,7 @@ fn req_row(method: &str, name: &str, active: bool, depth: usize) -> Div {
         .child(
             div()
                 .text_size(px(13.))
-                .text_color(if active {
-                    theme::text()
-                } else {
-                    theme::subtext()
-                })
+                .text_color(theme::text())
                 .child(name.to_string()),
         )
 }
@@ -184,6 +182,8 @@ fn folder_row(name: &str, depth: usize, collapsed: bool) -> Div {
         .pr_2()
         .py_1()
         .pl(px(8. + depth as f32 * 14.))
+        .rounded_md()
+        .hover(|s| s.bg(theme::mantle()))
         .child(
             div()
                 .text_size(px(11.))
@@ -193,7 +193,7 @@ fn folder_row(name: &str, depth: usize, collapsed: bool) -> Div {
         .child(
             div()
                 .text_size(px(13.))
-                .text_color(theme::subtext())
+                .text_color(theme::text())
                 .child(name.to_string()),
         )
 }
@@ -321,14 +321,17 @@ fn solid_btn(label: &str) -> Div {
 fn tab_chip(label: &str, active: bool) -> Div {
     div()
         .px_3()
-        .py_1()
+        .py(px(6.))
         .text_size(px(12.))
         .text_color(if active {
             theme::text()
         } else {
             theme::muted()
         })
-        .when(active, |d| d.border_b_1().border_color(theme::accent()))
+        .when(active, |d| {
+            d.border_b_1().border_color(theme::tab_underline())
+        })
+        .when(!active, |d| d.hover(|s| s.text_color(theme::text())))
         .child(label.to_string())
 }
 
@@ -3979,9 +3982,9 @@ impl BruApp {
             .w_full()
             .overflow_x_scroll()
             .px_2()
-            .bg(theme::surface0())
+            .bg(theme::bg())
             .border_b_1()
-            .border_color(theme::border2());
+            .border_color(theme::border1());
         for t in ReqTab::ALL {
             let active = tab.req_tab == t;
             strip = strip.child(tab_chip(t.label(), active).on_mouse_up(
@@ -4089,16 +4092,17 @@ impl BruApp {
 
     /// The structured params/headers grid (enable toggle + name + value + Ã¢Å“â€¢).
     fn kv_grid(&self, tab: &OpenTab, cx: &mut Context<Self>) -> Div {
-        let cell = |child: Entity<CodeEditor>, w: Option<Pixels>| {
+        // Cells are borderless and sit inside one bordered table (Bruno's grid);
+        // `divider` draws the vertical gridline on the right of the name column.
+        let cell = |child: Entity<CodeEditor>, w: Option<Pixels>, divider: bool| {
             let d = div()
                 .px_2()
                 .py_1()
-                .rounded_md()
-                .bg(theme::input_bg())
-                .border_1()
-                .border_color(theme::border1())
                 .font_family("monospace")
                 .text_size(px(12.))
+                .when(divider, |x| {
+                    x.border_r_1().border_color(theme::border0())
+                })
                 .child(child);
             match w {
                 Some(w) => d.w(w),
@@ -4117,36 +4121,58 @@ impl BruApp {
         } else {
             ("Name", "Value")
         };
-        let mut table = div().flex().flex_col().gap_1().child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .text_size(px(10.))
-                .text_color(theme::muted())
-                .child(div().w(px(234.)).child(col1))
-                .child(div().flex_1().child(col2)),
-        );
-        for (idx, row) in tab.kv_rows.iter().enumerate() {
-            table = table.child(
+        // One bordered table: a header row, then a gridlined row per entry.
+        let mut grid = div()
+            .flex()
+            .flex_col()
+            .border_1()
+            .border_color(theme::border0())
+            .rounded_md()
+            .overflow_hidden()
+            .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
-                    .child(check_box(row.enabled).on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
-                            this.kv_toggle_row(idx, cx)
-                        }),
-                    ))
-                    .child(cell(row.name.clone(), Some(px(220.))))
-                    .child(cell(row.value.clone(), None))
+                    .bg(theme::mantle())
+                    .border_b_1()
+                    .border_color(theme::border0())
+                    .text_size(px(10.))
+                    .text_color(theme::muted())
                     .child(
                         div()
-                            .px_1()
-                            .text_color(theme::red())
+                            .w(px(234.))
+                            .px_2()
+                            .py_1()
+                            .border_r_1()
+                            .border_color(theme::border0())
+                            .child(col1),
+                    )
+                    .child(div().flex_1().px_2().py_1().child(col2)),
+            );
+        for (idx, row) in tab.kv_rows.iter().enumerate() {
+            grid = grid.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme::border0())
+                    .hover(|s| s.bg(theme::mantle()))
+                    .child(div().w(px(22.)).flex().justify_center().child(
+                        check_box(row.enabled).on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                this.kv_toggle_row(idx, cx)
+                            }),
+                        ),
+                    ))
+                    .child(cell(row.name.clone(), Some(px(212.)), true))
+                    .child(cell(row.value.clone(), None, false))
+                    .child(
+                        div()
+                            .px_2()
+                            .text_color(theme::muted())
                             .child("\u{2715}")
                             .on_mouse_up(
                                 MouseButton::Left,
@@ -4157,9 +4183,8 @@ impl BruApp {
                     ),
             );
         }
-        table = table.child(
+        let table = div().flex().flex_col().gap_2().child(grid).child(
             div()
-                .pt_1()
                 .text_size(px(12.))
                 .text_color(theme::accent())
                 .child("+ Add")
@@ -4192,7 +4217,7 @@ impl BruApp {
                                 .text_color(theme::accent())
                                 .child(format!(":{name}")),
                         )
-                        .child(cell(ed.clone(), None)),
+                        .child(cell(ed.clone(), None, false)),
                 );
             }
             inner = inner.child(pt);
