@@ -263,6 +263,16 @@ struct BruApp {
     /// curl-import overlay (paste a curl command).
     curl_open: bool,
     curl_input: Entity<CodeEditor>,
+    /// Preferences: request timeout (s) + TLS-insecure.
+    pref_timeout: u64,
+    pref_insecure: bool,
+    prefs_open: bool,
+    timeout_input: Entity<CodeEditor>,
+    /// DevTools: console lines + network log.
+    console: Vec<String>,
+    network: Vec<NetEntry>,
+    devtools_open: bool,
+    devtools_net: bool,
 }
 
 /// One editable env row: two single-line editors + two flags.
@@ -463,6 +473,7 @@ fn run_blocking(
     file: BruFile,
     dir: PathBuf,
     script_dir: Option<PathBuf>,
+    opts: bru_http::SendOptions,
 ) -> bru_engine::RunOutcome {
     let errout = |e: String| bru_engine::RunOutcome::errored("request".to_string(), e);
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -473,7 +484,6 @@ fn run_blocking(
         Err(e) => return errout(e.to_string()),
     };
     rt.block_on(async move {
-        let opts = bru_http::SendOptions::default();
         let client = match bru_http::HttpClient::new(&opts) {
             Ok(c) => c,
             Err(e) => return errout(e.to_string()),
@@ -521,6 +531,17 @@ fn format_outcome(o: &bru_engine::RunOutcome) -> String {
         ),
         None => "(no response)".to_string(),
     }
+}
+
+/// One row in the devtools Network log.
+#[derive(Clone)]
+struct NetEntry {
+    method: String,
+    url: String,
+    status: u16,
+    ms: u128,
+    size: usize,
+    ok: bool,
 }
 
 /// One stored cookie, keyed by (domain, path, name).
@@ -612,7 +633,11 @@ fn collect_folder_requests(folder: &Folder, out: &mut Vec<PathBuf>) {
 
 /// Run request files sequentially through one shared RunContext (Bruno's folder
 /// runner) on a fresh tokio runtime. Worker thread.
-fn run_folder_blocking(files: Vec<PathBuf>, vars_base: PathBuf) -> Vec<RunResult> {
+fn run_folder_blocking(
+    files: Vec<PathBuf>,
+    vars_base: PathBuf,
+    opts: bru_http::SendOptions,
+) -> Vec<RunResult> {
     let err_row = |name: &str, e: String| RunResult {
         name: name.to_string(),
         passed: false,
@@ -628,7 +653,6 @@ fn run_folder_blocking(files: Vec<PathBuf>, vars_base: PathBuf) -> Vec<RunResult
         Err(e) => return vec![err_row("runtime", e.to_string())],
     };
     rt.block_on(async move {
-        let opts = bru_http::SendOptions::default();
         let client = match bru_http::HttpClient::new(&opts) {
             Ok(c) => c,
             Err(e) => return vec![err_row("client", e.to_string())],
@@ -682,6 +706,7 @@ impl BruApp {
     fn new(cx: &mut Context<Self>, dir: PathBuf) -> Self {
         let collection = bru_lang::load_collection(&dir).ok();
         let curl_input = cx.new(|cx| CodeEditor::new(cx, ""));
+        let timeout_input = cx.new(|cx| CodeEditor::single_line(cx, "30"));
         Self {
             dir,
             collection,
@@ -697,7 +722,54 @@ impl BruApp {
             cookies_open: false,
             curl_open: false,
             curl_input,
+            pref_timeout: 30,
+            pref_insecure: false,
+            prefs_open: false,
+            timeout_input,
+            console: Vec::new(),
+            network: Vec::new(),
+            devtools_open: false,
+            devtools_net: false,
         }
+    }
+
+    fn toggle_devtools(&mut self, cx: &mut Context<Self>) {
+        self.devtools_open = !self.devtools_open;
+        cx.notify();
+    }
+    fn clear_devtools(&mut self, cx: &mut Context<Self>) {
+        self.console.clear();
+        self.network.clear();
+        cx.notify();
+    }
+
+    fn send_options(&self) -> bru_http::SendOptions {
+        bru_http::SendOptions {
+            insecure: self.pref_insecure,
+            timeout: std::time::Duration::from_secs(self.pref_timeout.max(1)),
+            ..Default::default()
+        }
+    }
+
+    fn open_prefs(&mut self, cx: &mut Context<Self>) {
+        self.prefs_open = true;
+        cx.notify();
+    }
+    fn close_prefs(&mut self, cx: &mut Context<Self>) {
+        self.prefs_open = false;
+        cx.notify();
+    }
+    fn toggle_insecure(&mut self, cx: &mut Context<Self>) {
+        self.pref_insecure = !self.pref_insecure;
+        cx.notify();
+    }
+    /// Read the timeout input and commit it (ignored if not a number).
+    fn apply_prefs(&mut self, cx: &mut Context<Self>) {
+        if let Ok(n) = self.timeout_input.read(cx).text().trim().parse::<u64>() {
+            self.pref_timeout = n;
+        }
+        self.prefs_open = false;
+        cx.notify();
     }
 
     /// Load (or reload) a collection from `dir`, replacing open tabs.
@@ -827,9 +899,10 @@ impl BruApp {
         self.runner_running = true;
         self.runner_results.clear();
         let vars_base = self.dir.clone();
+        let opts = self.send_options();
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_folder_blocking(files, vars_base));
+            let _ = tx.send(run_folder_blocking(files, vars_base, opts));
         });
         cx.spawn(async move |this, cx| {
             let result = rx.await;
@@ -1078,11 +1151,12 @@ impl BruApp {
         let file = self.tabs[i].file.clone();
         let dir = self.dir.clone();
         let script_dir = path.parent().map(Path::to_path_buf);
+        let opts = self.send_options();
         self.tabs[i].sending = true;
         self.status = "Sending\u{2026}".into();
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_blocking(file, dir, script_dir));
+            let _ = tx.send(run_blocking(file, dir, script_dir, opts));
         });
         cx.spawn(async move |this, cx| {
             let result = rx.await;
@@ -1103,6 +1177,28 @@ impl BruApp {
                                 upsert_cookie(&mut this.cookies, c);
                             }
                         }
+                    }
+                }
+                // DevTools: mirror console + a network-log row.
+                if let Some(o) = outcome.as_ref() {
+                    for line in &o.console {
+                        this.console.push(line.clone());
+                    }
+                    if this.console.len() > 500 {
+                        let d = this.console.len() - 500;
+                        this.console.drain(0..d);
+                    }
+                    this.network.push(NetEntry {
+                        method: o.method.clone(),
+                        url: o.url.clone(),
+                        status: o.response.as_ref().map(|r| r.status).unwrap_or(0),
+                        ms: o.response.as_ref().map(|r| r.duration_ms).unwrap_or(0),
+                        size: o.response.as_ref().map(|r| r.body.len()).unwrap_or(0),
+                        ok: o.error.is_none(),
+                    });
+                    if this.network.len() > 200 {
+                        let d = this.network.len() - 200;
+                        this.network.drain(0..d);
                     }
                 }
                 if let Some(tab) = this.tabs.iter_mut().find(|t| t.path == path) {
@@ -1200,8 +1296,14 @@ impl BruApp {
                 MouseButton::Left,
                 cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_cookies(cx)),
             ))
-            .child(icon_chip("Eye"))
-            .child(icon_chip("Theme"))
+            .child(chip("Dev Tools").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.toggle_devtools(cx)),
+            ))
+            .child(chip("Prefs").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_prefs(cx)),
+            ))
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> Div {
@@ -1629,6 +1731,229 @@ impl BruApp {
                     .line_height(px(19.))
                     .child(tab.body_editor.clone()),
             )
+    }
+
+    /// The devtools dock (Console / Network), pinned to the bottom.
+    fn devtools_overlay(&self, cx: &mut Context<Self>) -> Div {
+        let tab_btn = |label: &'static str, net: bool, active: bool, cx: &mut Context<Self>| {
+            tab_chip(label, active).on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                    this.devtools_net = net;
+                    cx.notify();
+                }),
+            )
+        };
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .child(tab_btn("Console", false, !self.devtools_net, cx))
+            .child(tab_btn("Network", true, self.devtools_net, cx))
+            .child(div().flex_1())
+            .child(ghost_btn("Clear").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.clear_devtools(cx)),
+            ))
+            .child(ghost_btn("Close").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.toggle_devtools(cx)),
+            ));
+        let body: Div = if self.devtools_net {
+            let mut col = div().flex().flex_col().gap_1();
+            if self.network.is_empty() {
+                col = col.child(
+                    div()
+                        .text_color(theme::muted())
+                        .text_size(px(12.))
+                        .child("No requests yet."),
+                );
+            }
+            for e in &self.network {
+                let sc = if e.ok { status_color(e.status) } else { theme::red() };
+                col = col.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .child(
+                            div()
+                                .w(px(50.))
+                                .font_family("monospace")
+                                .text_size(px(11.))
+                                .text_color(theme::method_color(&e.method))
+                                .child(short_method(&e.method)),
+                        )
+                        .child(div().w(px(40.)).text_size(px(11.)).text_color(sc).child(
+                            if e.ok {
+                                e.status.to_string()
+                            } else {
+                                "ERR".to_string()
+                            },
+                        ))
+                        .child(
+                            div()
+                                .w(px(64.))
+                                .text_size(px(11.))
+                                .text_color(theme::subtext())
+                                .child(format!("{} ms", e.ms)),
+                        )
+                        .child(
+                            div()
+                                .w(px(80.))
+                                .text_size(px(11.))
+                                .text_color(theme::subtext())
+                                .child(human_size(e.size)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .font_family("monospace")
+                                .text_size(px(11.))
+                                .text_color(theme::text())
+                                .child(e.url.clone()),
+                        ),
+                );
+            }
+            col
+        } else {
+            let mut col = div().flex().flex_col().gap_1();
+            if self.console.is_empty() {
+                col = col.child(
+                    div()
+                        .text_color(theme::muted())
+                        .text_size(px(12.))
+                        .child("Console is empty."),
+                );
+            }
+            for line in &self.console {
+                col = col.child(
+                    div()
+                        .font_family("monospace")
+                        .text_size(px(12.))
+                        .text_color(theme::subtext())
+                        .child(line.clone()),
+                );
+            }
+            col
+        };
+        div()
+            .absolute()
+            .left(px(0.))
+            .right(px(0.))
+            .bottom(px(0.))
+            .h(px(220.))
+            .bg(theme::mantle())
+            .border_t_1()
+            .border_color(theme::border1())
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .occlude()
+            .child(header)
+            .child(
+                div()
+                    .id("devtools-body")
+                    .overflow_y_scroll()
+                    .flex_1()
+                    .w_full()
+                    .child(body),
+            )
+    }
+
+    /// The preferences overlay (timeout + TLS-insecure).
+    fn prefs_overlay(&self, cx: &mut Context<Self>) -> Div {
+        let card = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w(px(440.))
+            .p_4()
+            .rounded_md()
+            .bg(theme::mantle())
+            .border_1()
+            .border_color(theme::border2())
+            .occlude()
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .text_color(theme::text())
+                    .child("Preferences"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(150.))
+                            .text_size(px(12.))
+                            .text_color(theme::subtext())
+                            .child("Timeout (seconds)"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(theme::input_bg())
+                            .border_1()
+                            .border_color(theme::border1())
+                            .font_family("monospace")
+                            .text_size(px(12.))
+                            .child(self.timeout_input.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(check_box(self.pref_insecure).on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.toggle_insecure(cx)),
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme::subtext())
+                            .child("Disable TLS verification (insecure)"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap_2()
+                    .child(ghost_btn("Close").on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.close_prefs(cx)),
+                    ))
+                    .child(solid_btn("Apply").on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.apply_prefs(cx)),
+                    )),
+            );
+        div()
+            .absolute()
+            .inset_0()
+            .bg(gpui::rgba(0x00000099))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.close_prefs(cx)),
+            )
+            .child(card)
     }
 
     /// The curl-import overlay (paste a curl command).
@@ -2343,6 +2668,12 @@ impl Render for BruApp {
         }
         if self.curl_open {
             root = root.child(self.curl_overlay(cx));
+        }
+        if self.prefs_open {
+            root = root.child(self.prefs_overlay(cx));
+        }
+        if self.devtools_open {
+            root = root.child(self.devtools_overlay(cx));
         }
         root
     }
