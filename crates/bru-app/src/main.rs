@@ -324,6 +324,10 @@ struct BruApp {
     env_menu: Option<Point<Pixels>>,
     /// Folder paths whose children are collapsed in the sidebar.
     collapsed: HashSet<PathBuf>,
+    /// Tab paths with unsaved edits (live, via editor Changed events).
+    dirty: HashSet<PathBuf>,
+    /// Close-confirmation for a dirty tab (the tab index).
+    confirm_close: Option<usize>,
 }
 
 /// A right-click menu over a sidebar entry, anchored at the click point.
@@ -414,6 +418,16 @@ impl OpenTab {
         let body_editor = cx.new(|cx| CodeEditor::new(cx, ""));
         let url_input = cx.new(|cx| CodeEditor::single_line(cx, ""));
         url_input.update(cx, |ed, cx| ed.set_line(&url, cx));
+        // Mark the tab dirty on any editor edit (set_text on tab/load doesn't
+        // emit Changed, so loading/switching tabs won't false-positive).
+        for ed in [&body_editor, &url_input] {
+            let p = path.clone();
+            cx.subscribe(ed, move |this, _ed, _ev: &editor::Changed, cx| {
+                this.dirty.insert(p.clone());
+                cx.notify();
+            })
+            .detach();
+        }
         let mut tab = Self {
             path,
             method,
@@ -935,6 +949,8 @@ impl BruApp {
             selected_env: None,
             env_menu: None,
             collapsed: HashSet::new(),
+            dirty: HashSet::new(),
+            confirm_close: None,
         }
     }
 
@@ -1978,6 +1994,8 @@ impl BruApp {
         if i >= self.tabs.len() {
             return;
         }
+        let p = self.tabs[i].path.clone();
+        self.dirty.remove(&p);
         self.tabs.remove(i);
         self.active = if self.tabs.is_empty() {
             None
@@ -1988,6 +2006,97 @@ impl BruApp {
                 other => other,
             }
         };
+    }
+
+    /// Close tab `i`, but prompt first if it has unsaved edits (data-loss guard).
+    fn request_close_tab(&mut self, i: usize, cx: &mut Context<Self>) {
+        let dirty = self
+            .tabs
+            .get(i)
+            .map(|t| self.dirty.contains(&t.path))
+            .unwrap_or(false);
+        if dirty {
+            self.confirm_close = Some(i);
+        } else {
+            self.close_tab(i);
+        }
+        cx.notify();
+    }
+
+    /// The unsaved-changes confirmation modal for closing a dirty tab.
+    fn close_confirm_overlay(&self, cx: &mut Context<Self>) -> Div {
+        let Some(i) = self.confirm_close else {
+            return div();
+        };
+        let name = self
+            .tabs
+            .get(i)
+            .map(|t| t.title())
+            .unwrap_or_else(|| "this tab".into());
+        let card = div()
+            .w(px(440.))
+            .p_4()
+            .rounded_md()
+            .bg(theme::mantle())
+            .border_1()
+            .border_color(theme::border2())
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .text_color(theme::text())
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child("Unsaved Changes"),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(theme::subtext())
+                    .child(format!("{name} has unsaved edits.")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap_2()
+                    .child(ghost_btn("Cancel").on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                            this.confirm_close = None;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(ghost_btn("Discard").text_color(theme::red()).on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                            this.close_tab(i);
+                            this.confirm_close = None;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(solid_btn("Save & Close").on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                            this.active = Some(i);
+                            this.save(cx);
+                            this.close_tab(i);
+                            this.confirm_close = None;
+                            cx.notify();
+                        }),
+                    )),
+            );
+        div()
+            .absolute()
+            .inset_0()
+            .bg(gpui::rgba(0x000000aa))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(card)
     }
 
     /// Send the selected request: run it on a worker thread (its own tokio
@@ -2071,6 +2180,9 @@ impl BruApp {
         self.tabs[i].apply_edits(cx);
         let path = self.tabs[i].path.clone();
         let ok = std::fs::write(&path, bru_lang::serialize(&self.tabs[i].file)).is_ok();
+        if ok {
+            self.dirty.remove(&path);
+        }
         self.status = if ok {
             "Saved".into()
         } else {
@@ -3879,6 +3991,12 @@ impl BruApp {
             .border_color(theme::border1());
         for (i, t) in self.tabs.iter().enumerate() {
             let active = self.active == Some(i);
+            let dirty = self.dirty.contains(&t.path);
+            let title = if dirty {
+                format!("\u{25CF} {}", t.title())
+            } else {
+                t.title()
+            };
             strip = strip.child(
                 div()
                     .flex()
@@ -3895,12 +4013,14 @@ impl BruApp {
                     .child(
                         div()
                             .text_size(px(12.))
-                            .text_color(if active {
+                            .text_color(if dirty {
+                                theme::accent()
+                            } else if active {
                                 theme::text()
                             } else {
                                 theme::muted()
                             })
-                            .child(t.title())
+                            .child(title)
                             .on_mouse_up(
                                 MouseButton::Left,
                                 cx.listener(move |this, _ev: &MouseUpEvent, _w, cx| {
@@ -3918,8 +4038,7 @@ impl BruApp {
                             .on_mouse_up(
                                 MouseButton::Left,
                                 cx.listener(move |this, _ev: &MouseUpEvent, _w, cx| {
-                                    this.close_tab(i);
-                                    cx.notify();
+                                    this.request_close_tab(i, cx);
                                 }),
                             ),
                     ),
@@ -4046,6 +4165,9 @@ impl Render for BruApp {
         }
         if self.confirm_delete.is_some() {
             root = root.child(self.delete_overlay(cx));
+        }
+        if self.confirm_close.is_some() {
+            root = root.child(self.close_confirm_overlay(cx));
         }
         if self.rename.is_some() {
             root = root.child(self.rename_overlay(cx));
