@@ -7,7 +7,9 @@ mod envfs;
 mod highlight;
 mod import;
 mod theme;
+mod vault;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use bru_core::{BlockContent, BruFile, CollectionTree, Folder};
@@ -273,6 +275,13 @@ struct BruApp {
     network: Vec<NetEntry>,
     devtools_open: bool,
     devtools_net: bool,
+    /// Secrets vault: Some when unlocked (name->value). Password held to re-save.
+    vault: Option<HashMap<String, String>>,
+    vault_pw: Option<String>,
+    vault_open: bool,
+    vault_input: Entity<CodeEditor>,
+    vault_rows: Vec<(Entity<CodeEditor>, Entity<CodeEditor>)>,
+    vault_error: Option<String>,
 }
 
 /// One editable env row: two single-line editors + two flags.
@@ -474,6 +483,7 @@ fn run_blocking(
     dir: PathBuf,
     script_dir: Option<PathBuf>,
     opts: bru_http::SendOptions,
+    global_vars: HashMap<String, String>,
 ) -> bru_engine::RunOutcome {
     let errout = |e: String| bru_engine::RunOutcome::errored("request".to_string(), e);
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -488,8 +498,13 @@ fn run_blocking(
             Ok(c) => c,
             Err(e) => return errout(e.to_string()),
         };
+        // Vault secrets are the base layer; collection vars override them.
+        let mut vars = global_vars;
+        for (k, v) in bru_engine::base_vars(&dir, None) {
+            vars.insert(k, v);
+        }
         let mut ctx = bru_engine::RunContext {
-            vars: bru_engine::base_vars(&dir, None),
+            vars,
             client,
             send_options: opts,
             script_dir,
@@ -637,6 +652,7 @@ fn run_folder_blocking(
     files: Vec<PathBuf>,
     vars_base: PathBuf,
     opts: bru_http::SendOptions,
+    global_vars: HashMap<String, String>,
 ) -> Vec<RunResult> {
     let err_row = |name: &str, e: String| RunResult {
         name: name.to_string(),
@@ -657,8 +673,12 @@ fn run_folder_blocking(
             Ok(c) => c,
             Err(e) => return vec![err_row("client", e.to_string())],
         };
+        let mut vars = global_vars;
+        for (k, v) in bru_engine::base_vars(&vars_base, None) {
+            vars.insert(k, v);
+        }
         let mut ctx = bru_engine::RunContext {
-            vars: bru_engine::base_vars(&vars_base, None),
+            vars,
             client,
             send_options: opts,
             ..Default::default()
@@ -730,7 +750,95 @@ impl BruApp {
             network: Vec::new(),
             devtools_open: false,
             devtools_net: false,
+            vault: None,
+            vault_pw: None,
+            vault_open: false,
+            vault_input: cx.new(|cx| CodeEditor::single_line(cx, "")),
+            vault_rows: Vec::new(),
+            vault_error: None,
         }
+    }
+
+    // ── secrets vault ────────────────────────────────────────────────────────
+    /// Vault secrets as the lowest-precedence base vars for sends.
+    fn vault_vars(&self) -> HashMap<String, String> {
+        self.vault.clone().unwrap_or_default()
+    }
+
+    fn open_vault(&mut self, cx: &mut Context<Self>) {
+        self.vault_open = true;
+        self.vault_error = None;
+        cx.notify();
+    }
+    fn close_vault(&mut self, cx: &mut Context<Self>) {
+        self.vault_open = false;
+        cx.notify();
+    }
+    fn vault_unlock(&mut self, cx: &mut Context<Self>) {
+        let pw = self.vault_input.read(cx).text().to_string();
+        match vault::load(&pw) {
+            Ok(map) => {
+                let mut rows: Vec<(String, String)> =
+                    map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                rows.sort_by(|a, b| a.0.cmp(&b.0));
+                self.vault_rows = rows
+                    .into_iter()
+                    .map(|(k, v)| {
+                        (
+                            cx.new(|cx| CodeEditor::single_line(cx, &k)),
+                            cx.new(|cx| CodeEditor::single_line(cx, &v)),
+                        )
+                    })
+                    .collect();
+                self.vault = Some(map);
+                self.vault_pw = Some(pw);
+                self.vault_error = None;
+            }
+            Err(e) => self.vault_error = Some(e),
+        }
+        cx.notify();
+    }
+    fn vault_lock(&mut self, cx: &mut Context<Self>) {
+        self.vault = None;
+        self.vault_pw = None;
+        self.vault_rows.clear();
+        cx.notify();
+    }
+    fn vault_add_row(&mut self, cx: &mut Context<Self>) {
+        self.vault_rows.push((
+            cx.new(|cx| CodeEditor::single_line(cx, "")),
+            cx.new(|cx| CodeEditor::single_line(cx, "")),
+        ));
+        cx.notify();
+    }
+    fn vault_remove_row(&mut self, i: usize, cx: &mut Context<Self>) {
+        if i < self.vault_rows.len() {
+            self.vault_rows.remove(i);
+        }
+        cx.notify();
+    }
+    fn vault_save(&mut self, cx: &mut Context<Self>) {
+        let map: HashMap<String, String> = self
+            .vault_rows
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.read(cx).text().trim().to_string(),
+                    v.read(cx).text().to_string(),
+                )
+            })
+            .filter(|(k, _)| !k.is_empty())
+            .collect();
+        if let Some(pw) = &self.vault_pw {
+            match vault::save(pw, &map) {
+                Ok(()) => {
+                    self.vault = Some(map);
+                    self.vault_error = None;
+                }
+                Err(e) => self.vault_error = Some(e),
+            }
+        }
+        cx.notify();
     }
 
     fn toggle_devtools(&mut self, cx: &mut Context<Self>) {
@@ -900,9 +1008,10 @@ impl BruApp {
         self.runner_results.clear();
         let vars_base = self.dir.clone();
         let opts = self.send_options();
+        let globals = self.vault_vars();
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_folder_blocking(files, vars_base, opts));
+            let _ = tx.send(run_folder_blocking(files, vars_base, opts, globals));
         });
         cx.spawn(async move |this, cx| {
             let result = rx.await;
@@ -1152,11 +1261,12 @@ impl BruApp {
         let dir = self.dir.clone();
         let script_dir = path.parent().map(Path::to_path_buf);
         let opts = self.send_options();
+        let globals = self.vault_vars();
         self.tabs[i].sending = true;
         self.status = "Sending\u{2026}".into();
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_blocking(file, dir, script_dir, opts));
+            let _ = tx.send(run_blocking(file, dir, script_dir, opts, globals));
         });
         cx.spawn(async move |this, cx| {
             let result = rx.await;
@@ -1296,6 +1406,18 @@ impl BruApp {
                 MouseButton::Left,
                 cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_cookies(cx)),
             ))
+            .child(
+                chip("Vault")
+                    .text_color(if self.vault.is_some() {
+                        theme::green()
+                    } else {
+                        theme::text()
+                    })
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_vault(cx)),
+                    ),
+            )
             .child(chip("Dev Tools").on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.toggle_devtools(cx)),
@@ -1731,6 +1853,165 @@ impl BruApp {
                     .line_height(px(19.))
                     .child(tab.body_editor.clone()),
             )
+    }
+
+    /// The secrets-vault overlay (unlock or manage).
+    fn vault_overlay(&self, cx: &mut Context<Self>) -> Div {
+        let unlocked = self.vault.is_some();
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(15.))
+                    .text_color(theme::text())
+                    .child("Secrets Vault"),
+            )
+            .when(unlocked, |d| {
+                d.child(ghost_btn("Lock").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.vault_lock(cx)),
+                ))
+            })
+            .child(ghost_btn("Close").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.close_vault(cx)),
+            ));
+        let body: Div = if !unlocked {
+            let prompt = if vault::exists() {
+                "Enter your master password to unlock."
+            } else {
+                "No vault yet \u{2014} set a master password to create one."
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme::subtext())
+                        .child(prompt),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(theme::input_bg())
+                        .border_1()
+                        .border_color(theme::border1())
+                        .font_family("monospace")
+                        .text_size(px(12.))
+                        .child(self.vault_input.clone()),
+                )
+                .child(solid_btn("Unlock").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.vault_unlock(cx)),
+                ))
+        } else {
+            let cell = |child: Entity<CodeEditor>| {
+                div()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme::input_bg())
+                    .border_1()
+                    .border_color(theme::border1())
+                    .text_size(px(12.))
+                    .font_family("monospace")
+                    .child(child)
+            };
+            let mut table = div().flex().flex_col().gap_1();
+            for (i, (k, v)) in self.vault_rows.iter().enumerate() {
+                table = table.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(cell(k.clone()).w(px(200.)))
+                        .child(cell(v.clone()).flex_1())
+                        .child(
+                            div()
+                                .px_1()
+                                .text_color(theme::red())
+                                .child("\u{2715}")
+                                .on_mouse_up(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                        this.vault_remove_row(i, cx)
+                                    }),
+                                ),
+                        ),
+                );
+            }
+            table = table.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme::accent())
+                    .child("+ Add Secret")
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.vault_add_row(cx)),
+                    ),
+            );
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .flex_1()
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme::muted())
+                        .child("Secrets resolve into {{name}} at send (lowest precedence)."),
+                )
+                .child(div().id("vault-table").overflow_y_scroll().flex_1().child(table))
+                .child(
+                    div().flex().flex_row().justify_end().child(solid_btn("Save").on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.vault_save(cx)),
+                    )),
+                )
+        };
+        let card = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w(px(620.))
+            .h(if unlocked { px(440.) } else { px(220.) })
+            .p_4()
+            .rounded_md()
+            .bg(theme::mantle())
+            .border_1()
+            .border_color(theme::border2())
+            .occlude()
+            .child(header)
+            .child(body)
+            .children(self.vault_error.as_ref().map(|e| {
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme::red())
+                    .child(e.clone())
+            }));
+        div()
+            .absolute()
+            .inset_0()
+            .bg(gpui::rgba(0x00000099))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.close_vault(cx)),
+            )
+            .child(card)
     }
 
     /// The devtools dock (Console / Network), pinned to the bottom.
@@ -2674,6 +2955,9 @@ impl Render for BruApp {
         }
         if self.devtools_open {
             root = root.child(self.devtools_overlay(cx));
+        }
+        if self.vault_open {
+            root = root.child(self.vault_overlay(cx));
         }
         root
     }
