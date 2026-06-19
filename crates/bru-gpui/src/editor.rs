@@ -11,12 +11,20 @@ use std::ops::Range;
 use gpui::{
     actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
     CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    Focusable, GlobalElementId, Hsla, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, Style, TextRun, UTF16Selection, Window,
+    Focusable, Font, GlobalElementId, HighlightStyle, Hsla, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, Style, TextRun,
+    UTF16Selection, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::theme;
+use crate::{highlight, theme};
+
+/// What grammar (if any) to highlight the buffer with.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Lang {
+    Plain,
+    Json,
+}
 
 actions!(
     code_editor,
@@ -57,6 +65,9 @@ pub struct CodeEditor {
     selected_range: Range<usize>,
     selection_reversed: bool,
     is_selecting: bool,
+    lang: Lang,
+    /// Cached tree-sitter highlight spans (recomputed on every content change).
+    spans: Vec<(Range<usize>, HighlightStyle)>,
     // Layout caches (filled during paint) for mouse mapping.
     line_layouts: Vec<ShapedLine>,
     bounds: Option<Bounds<Pixels>>,
@@ -65,23 +76,37 @@ pub struct CodeEditor {
 
 impl CodeEditor {
     pub fn new(cx: &mut Context<Self>, text: &str) -> Self {
-        Self {
+        let mut ed = Self {
             focus_handle: cx.focus_handle(),
             content: text.to_string(),
             selected_range: 0..0,
             selection_reversed: false,
             is_selecting: false,
+            lang: Lang::Plain,
+            spans: Vec::new(),
             line_layouts: Vec::new(),
             bounds: None,
             line_height: px(19.),
-        }
+        };
+        ed.recompute_highlight();
+        ed
     }
 
-    pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+    pub fn set_text(&mut self, text: &str, lang: Lang, cx: &mut Context<Self>) {
         self.content = text.to_string();
+        self.lang = lang;
         self.selected_range = 0..0;
         self.selection_reversed = false;
+        self.recompute_highlight();
         cx.notify();
+    }
+
+    /// Recompute cached highlight spans for the current content + language.
+    fn recompute_highlight(&mut self) {
+        self.spans = match self.lang {
+            Lang::Json => highlight::json(&self.content),
+            Lang::Plain => Vec::new(),
+        };
     }
 
     #[allow(dead_code)] // used once Save is wired
@@ -231,6 +256,7 @@ impl CodeEditor {
         let at = r.start + new_text.len();
         self.selected_range = at..at;
         self.selection_reversed = false;
+        self.recompute_highlight();
         cx.notify();
     }
 
@@ -446,6 +472,52 @@ impl CodeEditor {
     }
 }
 
+/// Build per-line `TextRun`s from the cached highlight spans, filling gaps with
+/// the default color. `spans` must be sorted by start (tree-sitter emits them in
+/// document order) and non-overlapping.
+fn build_line_runs(
+    line: &str,
+    lstart: usize,
+    spans: &[(Range<usize>, HighlightStyle)],
+    font: &Font,
+    default: Hsla,
+) -> Vec<TextRun> {
+    if line.is_empty() {
+        return vec![];
+    }
+    let lend = lstart + line.len();
+    let mk = |len: usize, color: Hsla| TextRun {
+        len,
+        font: font.clone(),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let mut runs = Vec::new();
+    let mut pos = lstart;
+    for (range, style) in spans {
+        if range.end <= lstart || range.start >= lend {
+            continue;
+        }
+        let s = range.start.max(lstart);
+        let e = range.end.min(lend);
+        if s > pos {
+            runs.push(mk(s - pos, default));
+        }
+        if e > s {
+            runs.push(mk(e - s, style.color.unwrap_or(default)));
+        }
+        if e > pos {
+            pos = e;
+        }
+    }
+    if pos < lend {
+        runs.push(mk(lend - pos, default));
+    }
+    runs
+}
+
 /// The custom element that shapes lines and paints cursor/selection.
 struct EditorElement {
     editor: Entity<CodeEditor>,
@@ -506,17 +578,10 @@ impl Element for EditorElement {
         let text_color: Hsla = theme::text();
 
         let starts = editor.line_starts();
+        let font = style.font();
         let mut lines = Vec::new();
         for (i, line) in editor.content.split('\n').enumerate() {
-            let run = TextRun {
-                len: line.len(),
-                font: style.font(),
-                color: text_color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            let runs = if line.is_empty() { vec![] } else { vec![run] };
+            let runs = build_line_runs(line, starts[i], &editor.spans, &font, text_color);
             let shaped = window.text_system().shape_line(
                 gpui::SharedString::from(line.to_string()),
                 font_size,

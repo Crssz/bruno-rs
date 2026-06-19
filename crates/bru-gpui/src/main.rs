@@ -7,8 +7,16 @@ mod theme;
 
 use std::path::{Path, PathBuf};
 
-use bru_core::{Body, CollectionTree, Folder};
-use editor::CodeEditor;
+use bru_core::{BlockContent, Body, CollectionTree, Folder};
+use editor::{CodeEditor, Lang};
+
+/// What the body editor is currently editing, for Save.
+enum EditTarget {
+    /// The whole `.bru` source (write verbatim).
+    Source,
+    /// A specific body block (e.g. `body:json`): set its raw text and re-serialize.
+    Body(String),
+}
 use gpui::{
     div, prelude::*, px, size, App, Bounds, Context, Div, Entity, MouseButton, MouseUpEvent,
     Window, WindowBounds, WindowOptions,
@@ -119,6 +127,7 @@ fn tab(label: &str, active: bool) -> Div {
 }
 
 struct BruApp {
+    #[allow(dead_code)] // kept for reload/refresh later
     dir: PathBuf,
     collection: Option<CollectionTree>,
     selected: Option<PathBuf>,
@@ -126,6 +135,8 @@ struct BruApp {
     url: String,
     body_label: &'static str,
     body_editor: Entity<CodeEditor>,
+    edit_target: EditTarget,
+    status: String,
 }
 
 impl BruApp {
@@ -140,7 +151,34 @@ impl BruApp {
             url: String::new(),
             body_label: "Body",
             body_editor,
+            edit_target: EditTarget::Source,
+            status: String::new(),
         }
+    }
+
+    /// Write the editor's content back to disk (reconstructing the `.bru` when
+    /// editing an isolated body block).
+    fn save(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.selected.clone() else {
+            return;
+        };
+        let text = self.body_editor.read(cx).text().to_string();
+        let ok = match &self.edit_target {
+            EditTarget::Source => std::fs::write(&path, text).is_ok(),
+            EditTarget::Body(block) => match std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|t| bru_lang::parse(&t).ok())
+            {
+                Some(mut file) => {
+                    if let Some(b) = file.blocks.iter_mut().find(|b| &b.name == block) {
+                        b.content = BlockContent::Text(text);
+                    }
+                    std::fs::write(&path, bru_lang::serialize(&file)).is_ok()
+                }
+                None => false,
+            },
+        };
+        self.status = if ok { "Saved".into() } else { "Save failed".into() };
     }
 
     /// Open a request file: project its method/URL/body and load the editor.
@@ -154,15 +192,38 @@ impl BruApp {
         let req = file.to_request();
         self.method = req.as_ref().map(|r| r.method.clone()).unwrap_or_default();
         self.url = req.as_ref().map(|r| r.url.clone()).unwrap_or_default();
-        let (text, label) = match req.as_ref().map(|r| &r.body) {
-            Some(Body::Json(s)) => (s.clone(), "Body (JSON)"),
-            Some(Body::Text(s)) | Some(Body::Xml(s)) => (s.clone(), "Body"),
-            // No editable body: show the raw .bru source.
-            _ => (bru_lang::serialize(&file), "Source"),
+        let (text, label, lang, target) = match req.as_ref().map(|r| &r.body) {
+            Some(Body::Json(s)) => (
+                s.clone(),
+                "Body (JSON)",
+                Lang::Json,
+                EditTarget::Body("body:json".into()),
+            ),
+            Some(Body::Text(s)) => (
+                s.clone(),
+                "Body",
+                Lang::Plain,
+                EditTarget::Body("body:text".into()),
+            ),
+            Some(Body::Xml(s)) => (
+                s.clone(),
+                "Body",
+                Lang::Plain,
+                EditTarget::Body("body:xml".into()),
+            ),
+            // No isolated body: edit the raw .bru source.
+            _ => (
+                bru_lang::serialize(&file),
+                "Source",
+                Lang::Plain,
+                EditTarget::Source,
+            ),
         };
         self.body_label = label;
+        self.edit_target = target;
+        self.status.clear();
         self.body_editor
-            .update(cx, |ed, cx| ed.set_text(&text, cx));
+            .update(cx, |ed, cx| ed.set_text(&text, lang, cx));
         self.selected = Some(path);
     }
 
@@ -275,7 +336,7 @@ impl BruApp {
         }
     }
 
-    fn url_bar(&self) -> Div {
+    fn url_bar(&self, cx: &mut Context<Self>) -> Div {
         let method = if self.method.is_empty() {
             "GET".to_string()
         } else {
@@ -322,7 +383,13 @@ impl BruApp {
                     }),
             )
             .child(icon_chip("</>"))
-            .child(chip("Save"))
+            .child(chip("Save").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _ev: &MouseUpEvent, _w, cx| {
+                    this.save(cx);
+                    cx.notify();
+                }),
+            ))
             .child(
                 div()
                     .px_3()
@@ -382,13 +449,23 @@ impl BruApp {
             .bg(theme::mantle())
             .border_t_1()
             .border_color(theme::border1())
+            .child(
+                div()
+                    .px_2()
+                    .text_color(theme::green())
+                    .text_size(px(11.))
+                    .child(self.status.clone()),
+            )
             .child(div().flex_1())
             .child(icon_chip("Search"))
             .child(icon_chip("Cookies"))
             .child(icon_chip("Dev Tools"))
-            .child(div().text_color(theme::muted()).text_size(px(11.)).child(
-                format!("{} \u{00B7} v0.0.0", self.dir.display()),
-            ))
+            .child(
+                div()
+                    .text_color(theme::muted())
+                    .text_size(px(11.))
+                    .child("v0.0.0"),
+            )
     }
 }
 
@@ -399,7 +476,7 @@ impl Render for BruApp {
             .flex_col()
             .flex_1()
             .h_full()
-            .child(self.url_bar())
+            .child(self.url_bar(cx))
             .child(self.body_pane());
 
         div()
