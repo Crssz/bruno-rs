@@ -19,6 +19,11 @@ pub fn toggle() {
     DARK.fetch_xor(true, Ordering::Relaxed);
 }
 
+/// Set the palette explicitly (used to apply a persisted preference on startup).
+pub fn set_dark(dark: bool) {
+    DARK.store(dark, Ordering::Relaxed);
+}
+
 macro_rules! color {
     ($name:ident, $dark:literal, $light:literal) => {
         pub fn $name() -> Hsla {

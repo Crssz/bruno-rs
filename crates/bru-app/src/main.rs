@@ -889,6 +889,36 @@ fn load_recent() -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn prefs_path() -> Option<PathBuf> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    let dir = PathBuf::from(home).join(".bruno-rs");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("gpui-prefs.json"))
+}
+
+/// Load persisted prefs as `(timeout_secs, insecure, light)`.
+fn load_prefs() -> (u64, bool, bool) {
+    let v = prefs_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    match v {
+        Some(v) => (
+            v.get("timeout").and_then(|x| x.as_u64()).unwrap_or(30),
+            v.get("insecure").and_then(|x| x.as_bool()).unwrap_or(false),
+            v.get("light").and_then(|x| x.as_bool()).unwrap_or(false),
+        ),
+        None => (30, false, false),
+    }
+}
+
+fn save_prefs(timeout: u64, insecure: bool, light: bool) {
+    if let Some(p) = prefs_path() {
+        let json =
+            serde_json::json!({ "timeout": timeout, "insecure": insecure, "light": light });
+        let _ = std::fs::write(p, json.to_string());
+    }
+}
+
 fn save_recent(recent: &[String]) {
     if let Some(p) = recent_path() {
         if let Ok(json) = serde_json::to_string(recent) {
@@ -1112,8 +1142,12 @@ fn run_folder_blocking(
 impl BruApp {
     fn new(cx: &mut Context<Self>, dir: PathBuf) -> Self {
         let collection = bru_lang::load_collection(&dir).ok();
+        // Apply persisted preferences (timeout / insecure-TLS / theme).
+        let (pref_timeout, pref_insecure, light) = load_prefs();
+        theme::set_dark(!light);
         let curl_input = cx.new(|cx| CodeEditor::new(cx, ""));
-        let timeout_input = cx.new(|cx| CodeEditor::single_line(cx, "30"));
+        let timeout_input =
+            cx.new(|cx| CodeEditor::single_line(cx, &pref_timeout.to_string()));
         let search = cx.new(|cx| CodeEditor::single_line(cx, ""));
         // Live-filter the sidebar as the search box changes.
         cx.subscribe(&search, |this, ed, _ev: &editor::Changed, cx| {
@@ -1143,8 +1177,8 @@ impl BruApp {
             cookies_open: false,
             curl_open: false,
             curl_input,
-            pref_timeout: 30,
-            pref_insecure: false,
+            pref_timeout,
+            pref_insecure,
             prefs_open: false,
             timeout_input,
             console: Vec::new(),
@@ -1888,6 +1922,7 @@ impl BruApp {
     }
     fn toggle_insecure(&mut self, cx: &mut Context<Self>) {
         self.pref_insecure = !self.pref_insecure;
+        self.persist_prefs();
         cx.notify();
     }
     /// Read the timeout input and commit it (ignored if not a number).
@@ -1896,7 +1931,12 @@ impl BruApp {
             self.pref_timeout = n;
         }
         self.prefs_open = false;
+        self.persist_prefs();
         cx.notify();
+    }
+    /// Write the current prefs (timeout / insecure / theme) to disk.
+    fn persist_prefs(&self) {
+        save_prefs(self.pref_timeout, self.pref_insecure, !theme::is_dark());
     }
 
     /// Load (or reload) a collection from `dir`, replacing open tabs.
@@ -2680,8 +2720,9 @@ impl BruApp {
                 })
                 .on_mouse_up(
                     MouseButton::Left,
-                    cx.listener(|_this, _e: &MouseUpEvent, _w, cx| {
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
                         theme::toggle();
+                        this.persist_prefs();
                         cx.notify();
                     }),
                 ),
