@@ -12,7 +12,7 @@ mod vault;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use bru_core::{BlockContent, BruFile, CollectionTree, Folder};
+use bru_core::{Block, BlockContent, BruFile, CollectionTree, Folder};
 use editor::{CodeEditor, Lang};
 
 /// What the single shared editor is currently editing (set per active sub-tab),
@@ -36,18 +36,26 @@ enum ReqTab {
     Headers,
     Auth,
     Vars,
+    PostVars,
     Script,
+    PostScript,
+    Tests,
+    Docs,
     Source,
 }
 
 impl ReqTab {
-    const ALL: [ReqTab; 7] = [
+    const ALL: [ReqTab; 11] = [
         ReqTab::Params,
         ReqTab::Body,
         ReqTab::Headers,
         ReqTab::Auth,
         ReqTab::Vars,
+        ReqTab::PostVars,
         ReqTab::Script,
+        ReqTab::PostScript,
+        ReqTab::Tests,
+        ReqTab::Docs,
         ReqTab::Source,
     ];
     fn label(self) -> &'static str {
@@ -57,7 +65,11 @@ impl ReqTab {
             ReqTab::Headers => "Headers",
             ReqTab::Auth => "Auth",
             ReqTab::Vars => "Vars",
+            ReqTab::PostVars => "Post Vars",
             ReqTab::Script => "Script",
+            ReqTab::PostScript => "Post Script",
+            ReqTab::Tests => "Tests",
+            ReqTab::Docs => "Docs",
             ReqTab::Source => "Source",
         }
     }
@@ -445,6 +457,13 @@ impl OpenTab {
             EditKind::Body(block) => {
                 if let Some(b) = self.file.blocks.iter_mut().find(|b| &b.name == block) {
                     b.content = BlockContent::Text(text);
+                } else if !text.trim().is_empty() {
+                    // Create the block on first edit (tests/docs/post-response
+                    // script tabs start with no block in the file).
+                    self.file.blocks.push(Block {
+                        name: block.clone(),
+                        content: BlockContent::Text(text),
+                    });
                 }
             }
             EditKind::Dict(block) => edit::lines_to_dict(&mut self.file, block, &text),
@@ -494,16 +513,21 @@ impl OpenTab {
                 ),
                 None => (String::new(), Lang::Plain, EditKind::None),
             },
+            ReqTab::PostVars => (
+                edit::dict_to_lines(f, "vars:post-response"),
+                Lang::Plain,
+                EditKind::Dict("vars:post-response".into()),
+            ),
             ReqTab::Script => {
-                let t = f
-                    .block("script:pre-request")
-                    .and_then(|b| match &b.content {
-                        BlockContent::Text(s) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
+                let t = text_block(f, "script:pre-request");
                 (t, Lang::Plain, EditKind::Body("script:pre-request".into()))
             }
+            ReqTab::PostScript => {
+                let t = text_block(f, "script:post-response");
+                (t, Lang::Plain, EditKind::Body("script:post-response".into()))
+            }
+            ReqTab::Tests => (text_block(f, "tests"), Lang::Plain, EditKind::Body("tests".into())),
+            ReqTab::Docs => (text_block(f, "docs"), Lang::Plain, EditKind::Body("docs".into())),
             ReqTab::Source => (bru_lang::serialize(f), Lang::Plain, EditKind::Source),
         };
         self.edit_kind = kind;
@@ -556,6 +580,16 @@ fn run_blocking(
         };
         bru_engine::run_request(&file, &mut ctx).await
     })
+}
+
+/// The text content of a `BlockContent::Text` block, or empty.
+fn text_block(f: &BruFile, name: &str) -> String {
+    f.block(name)
+        .and_then(|b| match &b.content {
+            BlockContent::Text(s) => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// Rows `(key, value, disabled)` of a dictionary block.
@@ -2579,12 +2613,14 @@ impl BruApp {
     }
 
     /// The clickable request sub-tab strip.
-    fn req_subtabs(&self, tab: &OpenTab, cx: &mut Context<Self>) -> Div {
+    fn req_subtabs(&self, tab: &OpenTab, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
         let mut strip = div()
+            .id("req-subtabs")
             .flex()
             .flex_row()
             .items_center()
             .w_full()
+            .overflow_x_scroll()
             .px_2()
             .bg(theme::surface0())
             .border_b_1()
