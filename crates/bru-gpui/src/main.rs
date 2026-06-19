@@ -61,7 +61,7 @@ impl ReqTab {
 }
 use gpui::{
     div, prelude::*, px, size, App, Bounds, Context, Div, Entity, MouseButton, MouseUpEvent,
-    Window, WindowBounds, WindowOptions,
+    StyledText, Window, WindowBounds, WindowOptions,
 };
 use gpui_platform::application;
 
@@ -256,6 +256,9 @@ struct BruApp {
     runner_running: bool,
     runner_title: String,
     runner_results: Vec<RunResult>,
+    /// Cookies observed from response Set-Cookie headers this session.
+    cookies: Vec<CookieEntry>,
+    cookies_open: bool,
 }
 
 /// One editable env row: two single-line editors + two flags.
@@ -516,6 +519,60 @@ fn format_outcome(o: &bru_engine::RunOutcome) -> String {
     }
 }
 
+/// One stored cookie, keyed by (domain, path, name).
+#[derive(Clone)]
+struct CookieEntry {
+    domain: String,
+    path: String,
+    name: String,
+    value: String,
+}
+
+/// Host of a URL (no scheme/path/userinfo/port).
+fn host_of(u: &str) -> String {
+    let s = u.split("://").nth(1).unwrap_or(u);
+    let s = s.split('/').next().unwrap_or(s);
+    let s = s.rsplit('@').next().unwrap_or(s);
+    s.split(':').next().unwrap_or(s).to_string()
+}
+
+fn parse_set_cookie(header: &str, host: &str) -> Option<CookieEntry> {
+    let mut parts = header.split(';');
+    let (name, value) = parts.next()?.trim().split_once('=')?;
+    let mut domain = host.to_string();
+    let mut path = "/".to_string();
+    for attr in parts {
+        if let Some((k, v)) = attr.trim().split_once('=') {
+            match k.trim().to_ascii_lowercase().as_str() {
+                "domain" => domain = v.trim().trim_start_matches('.').to_string(),
+                "path" => path = v.trim().to_string(),
+                _ => {}
+            }
+        }
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(CookieEntry {
+        domain,
+        path,
+        name: name.to_string(),
+        value: value.trim().to_string(),
+    })
+}
+
+fn upsert_cookie(jar: &mut Vec<CookieEntry>, c: CookieEntry) {
+    if let Some(e) = jar
+        .iter_mut()
+        .find(|e| e.domain == c.domain && e.path == c.path && e.name == c.name)
+    {
+        e.value = c.value;
+    } else {
+        jar.push(c);
+    }
+}
+
 /// One request's outcome in a runner batch.
 #[derive(Clone)]
 struct RunResult {
@@ -631,7 +688,28 @@ impl BruApp {
             runner_running: false,
             runner_title: String::new(),
             runner_results: Vec::new(),
+            cookies: Vec::new(),
+            cookies_open: false,
         }
+    }
+
+    fn open_cookies(&mut self, cx: &mut Context<Self>) {
+        self.cookies_open = true;
+        cx.notify();
+    }
+    fn close_cookies(&mut self, cx: &mut Context<Self>) {
+        self.cookies_open = false;
+        cx.notify();
+    }
+    fn delete_cookie(&mut self, i: usize, cx: &mut Context<Self>) {
+        if i < self.cookies.len() {
+            self.cookies.remove(i);
+        }
+        cx.notify();
+    }
+    fn clear_cookies(&mut self, cx: &mut Context<Self>) {
+        self.cookies.clear();
+        cx.notify();
     }
 
     // ── collection runner ────────────────────────────────────────────────────
@@ -933,11 +1011,23 @@ impl BruApp {
                     Ok(_) => "Request error",
                     Err(_) => "Send cancelled",
                 };
+                let outcome = result.ok();
+                // Capture Set-Cookie headers into the session jar.
+                if let Some(r) = outcome.as_ref().and_then(|o| o.response.as_ref()) {
+                    let host = host_of(&outcome.as_ref().unwrap().url);
+                    for (k, v) in &r.headers {
+                        if k.eq_ignore_ascii_case("set-cookie") {
+                            if let Some(c) = parse_set_cookie(v, &host) {
+                                upsert_cookie(&mut this.cookies, c);
+                            }
+                        }
+                    }
+                }
                 if let Some(tab) = this.tabs.iter_mut().find(|t| t.path == path) {
                     tab.sending = false;
-                    if let Ok(outcome) = result {
+                    if let Some(o) = outcome {
                         tab.resp_tab = RespTab::Response;
-                        tab.response = Some(outcome);
+                        tab.response = Some(o);
                     }
                 }
                 this.status = status.into();
@@ -1010,7 +1100,10 @@ impl BruApp {
                 MouseButton::Left,
                 cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.env_open(cx)),
             ))
-            .child(icon_chip("Vault"))
+            .child(chip("Cookies").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_cookies(cx)),
+            ))
             .child(icon_chip("Eye"))
             .child(icon_chip("Theme"))
     }
@@ -1173,7 +1266,7 @@ impl BruApp {
             )
     }
 
-    fn response_pane(&self, tab: &OpenTab, cx: &mut Context<Self>) -> Div {
+    fn response_pane(&self, tab: &OpenTab, window: &mut Window, cx: &mut Context<Self>) -> Div {
         // Sub-tab strip + status/time/size summary.
         let mut strip = div()
             .flex()
@@ -1234,13 +1327,46 @@ impl BruApp {
                 .text_color(theme::muted())
                 .child("No response yet \u{2014} press Send.")
                 .into_any_element(),
-            (Some(o), RespTab::Response) => scroll("resp-body")
-                .font_family("monospace")
-                .text_size(px(13.))
-                .line_height(px(19.))
-                .text_color(theme::subtext())
-                .child(format_outcome(o))
-                .into_any_element(),
+            (Some(o), RespTab::Response) => {
+                let is_json = o
+                    .response
+                    .as_ref()
+                    .map(|r| {
+                        r.headers.iter().any(|(k, v)| {
+                            k.eq_ignore_ascii_case("content-type") && v.contains("json")
+                        })
+                    })
+                    .unwrap_or(false);
+                match (is_json, o.response.as_ref()) {
+                    (true, Some(r)) => {
+                        let raw = String::from_utf8_lossy(&r.body).to_string();
+                        let pretty = serde_json::from_str::<serde_json::Value>(&raw)
+                            .ok()
+                            .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                            .unwrap_or(raw);
+                        let mut base = window.text_style();
+                        base.font_family = "monospace".into();
+                        base.color = theme::text();
+                        base.font_size = px(13.).into();
+                        let spans = highlight::json(&pretty);
+                        scroll("resp-body")
+                            .font_family("monospace")
+                            .text_size(px(13.))
+                            .line_height(px(19.))
+                            .child(
+                                StyledText::new(pretty).with_default_highlights(&base, spans),
+                            )
+                            .into_any_element()
+                    }
+                    _ => scroll("resp-body")
+                        .font_family("monospace")
+                        .text_size(px(13.))
+                        .line_height(px(19.))
+                        .text_color(theme::subtext())
+                        .child(format_outcome(o))
+                        .into_any_element(),
+                }
+            }
             (Some(o), RespTab::Headers) => {
                 let mut col = div().flex().flex_col().gap_1();
                 match &o.response {
@@ -1407,6 +1533,117 @@ impl BruApp {
                     .line_height(px(19.))
                     .child(tab.body_editor.clone()),
             )
+    }
+
+    /// The cookies overlay (captured from response Set-Cookie headers).
+    fn cookies_overlay(&self, cx: &mut Context<Self>) -> Div {
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .w_full()
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(15.))
+                    .text_color(theme::text())
+                    .child("Cookies"),
+            )
+            .child(ghost_btn("Clear All").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.clear_cookies(cx)),
+            ))
+            .child(ghost_btn("Close").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.close_cookies(cx)),
+            ));
+        let mut list = div()
+            .id("cookies-list")
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .w_full();
+        if self.cookies.is_empty() {
+            list = list.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme::muted())
+                    .child("No cookies yet \u{2014} send a request that returns Set-Cookie."),
+            );
+        }
+        for (i, c) in self.cookies.iter().enumerate() {
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(180.))
+                            .font_family("monospace")
+                            .text_size(px(12.))
+                            .text_color(theme::subtext())
+                            .child(c.domain.clone()),
+                    )
+                    .child(
+                        div()
+                            .w(px(160.))
+                            .text_size(px(12.))
+                            .text_color(theme::accent())
+                            .child(c.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_family("monospace")
+                            .text_size(px(12.))
+                            .text_color(theme::text())
+                            .child(c.value.clone()),
+                    )
+                    .child(
+                        div()
+                            .px_1()
+                            .text_color(theme::red())
+                            .child("\u{2715}")
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                    this.delete_cookie(i, cx)
+                                }),
+                            ),
+                    ),
+            );
+        }
+        let card = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w(px(720.))
+            .h(px(440.))
+            .p_4()
+            .rounded_md()
+            .bg(theme::mantle())
+            .border_1()
+            .border_color(theme::border2())
+            .occlude()
+            .child(header)
+            .child(list);
+        div()
+            .absolute()
+            .inset_0()
+            .bg(gpui::rgba(0x00000099))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.close_cookies(cx)),
+            )
+            .child(card)
     }
 
     /// The collection-runner overlay (scrim + results card).
@@ -1881,7 +2118,7 @@ impl BruApp {
 }
 
 impl Render for BruApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let strip = self.tab_strip(cx);
         let content = if let Some(i) = self.active {
             let tab = &self.tabs[i];
@@ -1893,7 +2130,7 @@ impl Render for BruApp {
                 .child(self.url_bar(tab, cx))
                 .child(self.req_subtabs(tab, cx))
                 .child(self.req_content(tab))
-                .child(self.response_pane(tab, cx))
+                .child(self.response_pane(tab, window, cx))
         } else {
             div()
                 .flex()
@@ -1934,6 +2171,9 @@ impl Render for BruApp {
         }
         if self.runner_open {
             root = root.child(self.runner_overlay(cx));
+        }
+        if self.cookies_open {
+            root = root.child(self.cookies_overlay(cx));
         }
         root
     }

@@ -720,6 +720,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_platform",
+ "serde_json",
  "tokio",
  "tree-sitter",
  "tree-sitter-highlight",
