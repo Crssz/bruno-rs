@@ -253,17 +253,6 @@ fn hex_dump(bytes: &[u8]) -> String {
 }
 
 /// Cycle to the next HTTP method (click-to-change in the URL bar).
-fn next_method(m: &str) -> String {
-    const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
-    let cur = m.to_uppercase();
-    let i = METHODS
-        .iter()
-        .position(|x| *x == cur)
-        .map(|i| (i + 1) % METHODS.len())
-        .unwrap_or(0);
-    METHODS[i].to_string()
-}
-
 fn short_method(m: &str) -> String {
     let m = m.to_ascii_uppercase();
     match m.as_str() {
@@ -426,6 +415,8 @@ struct BruApp {
     /// Sidebar width (px) and whether its divider is being dragged.
     sidebar_w: f32,
     sidebar_dragging: bool,
+    /// Method-picker dropdown anchored at this point (None = closed).
+    method_menu: Option<Point<Pixels>>,
 }
 
 /// A right-click menu over a sidebar entry, anchored at the click point.
@@ -1430,6 +1421,7 @@ impl BruApp {
             split_dragging: false,
             sidebar_w: 280.0,
             sidebar_dragging: false,
+            method_menu: None,
         }
     }
 
@@ -1566,6 +1558,7 @@ impl BruApp {
             || self.rename.take().is_some()
             || self.ctx_menu.take().is_some()
             || self.env_menu.take().is_some()
+            || self.method_menu.take().is_some()
         {
             // one of the lightweight popovers was closed
         } else if self.curl_open {
@@ -1656,6 +1649,70 @@ impl BruApp {
         self.selected_global_env = name;
         self.env_menu = None;
         cx.notify();
+    }
+
+    fn open_method_menu(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        self.method_menu = Some(pos);
+        cx.notify();
+    }
+    fn close_method_menu(&mut self, cx: &mut Context<Self>) {
+        if self.method_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+    fn pick_method(&mut self, m: &str, cx: &mut Context<Self>) {
+        if let Some(i) = self.active {
+            edit::set_method(&mut self.tabs[i].file, m);
+            self.tabs[i].method = m.to_string();
+        }
+        self.method_menu = None;
+        cx.notify();
+    }
+
+    /// The method-picker dropdown (anchored under the URL-bar method badge).
+    fn method_menu_overlay(&self, cx: &mut Context<Self>) -> Div {
+        let Some(pos) = self.method_menu else {
+            return div();
+        };
+        let mut card = div()
+            .absolute()
+            .left(pos.x)
+            .top(pos.y)
+            .occlude()
+            .flex()
+            .flex_col()
+            .py_1()
+            .w(px(120.))
+            .rounded_md()
+            .bg(theme::mantle())
+            .border_1()
+            .border_color(theme::border2());
+        for m in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
+            card = card.child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_size(px(12.))
+                    .font_family("monospace")
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme::method_color(m))
+                    .hover(|s| s.bg(theme::surface0()))
+                    .child(m)
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e: &MouseUpEvent, _w, cx| this.pick_method(m, cx)),
+                    ),
+            );
+        }
+        // Full-screen catcher so a click outside the card dismisses it.
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseDownEvent, _w, cx| this.close_method_menu(cx)),
+            )
+            .child(card)
     }
 
     /// The active-environment dropdown (anchored under the toolbar chip).
@@ -3551,15 +3608,10 @@ impl BruApp {
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .font_family("monospace")
                             .child(method)
-                            .on_mouse_up(
+                            .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
-                                    if let Some(i) = this.active {
-                                        let next = next_method(&this.tabs[i].method);
-                                        edit::set_method(&mut this.tabs[i].file, &next);
-                                        this.tabs[i].method = next;
-                                        cx.notify();
-                                    }
+                                cx.listener(|this, ev: &MouseDownEvent, _w, cx| {
+                                    this.open_method_menu(ev.position, cx);
                                 }),
                             ),
                     )
@@ -5717,6 +5769,9 @@ impl Render for BruApp {
         }
         if self.env_menu.is_some() {
             root = root.child(self.env_menu_overlay(cx));
+        }
+        if self.method_menu.is_some() {
+            root = root.child(self.method_menu_overlay(cx));
         }
         if self.palette_open {
             root = root.child(self.palette_overlay(cx));
