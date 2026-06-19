@@ -7,8 +7,9 @@ mod theme;
 
 use std::path::{Path, PathBuf};
 
-use bru_core::{BlockContent, Body, CollectionTree, Folder};
+use bru_core::{BlockContent, Body, BruFile, CollectionTree, Folder};
 use editor::{CodeEditor, Lang};
+use gpui::SharedString;
 
 /// What the body editor is currently editing, for Save.
 enum EditTarget {
@@ -16,6 +17,41 @@ enum EditTarget {
     Source,
     /// A specific body block (e.g. `body:json`): set its raw text and re-serialize.
     Body(String),
+}
+
+/// Request sub-tabs (Body is the editable editor; the rest show parsed data).
+#[derive(Clone, Copy, PartialEq)]
+enum ReqTab {
+    Params,
+    Body,
+    Headers,
+    Auth,
+    Vars,
+    Script,
+    Source,
+}
+
+impl ReqTab {
+    const ALL: [ReqTab; 7] = [
+        ReqTab::Params,
+        ReqTab::Body,
+        ReqTab::Headers,
+        ReqTab::Auth,
+        ReqTab::Vars,
+        ReqTab::Script,
+        ReqTab::Source,
+    ];
+    fn label(self) -> &'static str {
+        match self {
+            ReqTab::Params => "Params",
+            ReqTab::Body => "Body",
+            ReqTab::Headers => "Headers",
+            ReqTab::Auth => "Auth",
+            ReqTab::Vars => "Vars",
+            ReqTab::Script => "Script",
+            ReqTab::Source => "Source",
+        }
+    }
 }
 use gpui::{
     div, prelude::*, px, size, App, Bounds, Context, Div, Entity, MouseButton, MouseUpEvent,
@@ -133,7 +169,9 @@ struct BruApp {
     selected: Option<PathBuf>,
     method: String,
     url: String,
-    body_label: &'static str,
+    req_tab: ReqTab,
+    /// The parsed open request, for rendering the non-Body sub-tabs.
+    file: Option<BruFile>,
     body_editor: Entity<CodeEditor>,
     edit_target: EditTarget,
     status: String,
@@ -165,6 +203,23 @@ fn run_blocking(path: PathBuf, dir: PathBuf) -> Result<String, String> {
     })
 }
 
+/// Rows `(key, value, disabled)` of a dictionary block.
+fn dict_rows(b: &bru_core::Block) -> Vec<(String, String, bool)> {
+    match &b.content {
+        BlockContent::Dict(entries) => entries
+            .iter()
+            .map(|e| {
+                (
+                    e.key.name().to_string(),
+                    e.value.as_inline().to_string(),
+                    e.disabled,
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn format_outcome(o: &bru_engine::RunOutcome) -> String {
     if let Some(e) = &o.error {
         return format!("Error: {e}");
@@ -191,7 +246,8 @@ impl BruApp {
             selected: None,
             method: String::new(),
             url: String::new(),
-            body_label: "Body",
+            req_tab: ReqTab::Body,
+            file: None,
             body_editor,
             edit_target: EditTarget::Source,
             status: String::new(),
@@ -270,38 +326,20 @@ impl BruApp {
         let req = file.to_request();
         self.method = req.as_ref().map(|r| r.method.clone()).unwrap_or_default();
         self.url = req.as_ref().map(|r| r.url.clone()).unwrap_or_default();
-        let (text, label, lang, target) = match req.as_ref().map(|r| &r.body) {
-            Some(Body::Json(s)) => (
-                s.clone(),
-                "Body (JSON)",
-                Lang::Json,
-                EditTarget::Body("body:json".into()),
-            ),
-            Some(Body::Text(s)) => (
-                s.clone(),
-                "Body",
-                Lang::Plain,
-                EditTarget::Body("body:text".into()),
-            ),
-            Some(Body::Xml(s)) => (
-                s.clone(),
-                "Body",
-                Lang::Plain,
-                EditTarget::Body("body:xml".into()),
-            ),
+        let (text, lang, target) = match req.as_ref().map(|r| &r.body) {
+            Some(Body::Json(s)) => (s.clone(), Lang::Json, EditTarget::Body("body:json".into())),
+            Some(Body::Text(s)) => (s.clone(), Lang::Plain, EditTarget::Body("body:text".into())),
+            Some(Body::Xml(s)) => (s.clone(), Lang::Plain, EditTarget::Body("body:xml".into())),
             // No isolated body: edit the raw .bru source.
-            _ => (
-                bru_lang::serialize(&file),
-                "Source",
-                Lang::Plain,
-                EditTarget::Source,
-            ),
+            _ => (bru_lang::serialize(&file), Lang::Plain, EditTarget::Source),
         };
-        self.body_label = label;
         self.edit_target = target;
+        self.req_tab = ReqTab::Body;
         self.status.clear();
+        self.response = None;
         self.body_editor
             .update(cx, |ed, cx| ed.set_text(&text, lang, cx));
+        self.file = Some(file);
         self.selected = Some(path);
     }
 
@@ -533,21 +571,52 @@ impl BruApp {
             .child(body)
     }
 
-    fn body_pane(&self) -> Div {
-        let header = div()
+    /// The clickable request sub-tab strip.
+    fn req_subtabs(&self, cx: &mut Context<Self>) -> Div {
+        let mut strip = div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
             .w_full()
             .px_2()
-            .py_1()
             .bg(theme::surface0())
             .border_b_1()
-            .border_color(theme::border2())
-            .child(tab(self.body_label, true));
+            .border_color(theme::border2());
+        for t in ReqTab::ALL {
+            let active = self.req_tab == t;
+            strip = strip.child(tab(t.label(), active).on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _ev: &MouseUpEvent, _w, cx| {
+                    this.req_tab = t;
+                    cx.notify();
+                }),
+            ));
+        }
+        strip
+    }
 
-        let content = div()
+    /// The content for the active request sub-tab.
+    fn req_content(&self) -> Div {
+        let inner = match self.req_tab {
+            ReqTab::Body => self.editor_view(),
+            ReqTab::Params => self.kv_view("params:query"),
+            ReqTab::Headers => self.kv_view("headers"),
+            ReqTab::Vars => self.kv_view("vars:pre-request"),
+            ReqTab::Auth => self.auth_view(),
+            ReqTab::Script => self.text_view("script:pre-request", "script"),
+            ReqTab::Source => self.source_view(),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .w_full()
+            .bg(theme::bg())
+            .child(inner)
+    }
+
+    fn editor_view(&self) -> gpui::AnyElement {
+        div()
             .id("body")
             .overflow_y_scroll()
             .flex_1()
@@ -556,16 +625,161 @@ impl BruApp {
             .font_family("monospace")
             .text_size(px(13.))
             .line_height(px(19.))
-            .child(self.body_editor.clone());
+            .child(self.body_editor.clone())
+            .into_any_element()
+    }
 
-        div()
-            .flex()
-            .flex_col()
+    /// Read-only table of a dictionary block (params/headers/vars/auth).
+    fn kv_view(&self, block: &str) -> gpui::AnyElement {
+        let rows = self
+            .file
+            .as_ref()
+            .and_then(|f| f.block(block))
+            .map(dict_rows)
+            .unwrap_or_default();
+        let mut col = div()
+            .id(SharedString::from(block.to_owned()))
+            .overflow_y_scroll()
             .flex_1()
-            .h_full()
-            .bg(theme::bg())
-            .child(header)
-            .child(content)
+            .w_full()
+            .p_3()
+            .gap_1();
+        if rows.is_empty() {
+            return col
+                .child(
+                    div()
+                        .text_color(theme::muted())
+                        .text_size(px(12.))
+                        .child("(empty)"),
+                )
+                .into_any_element();
+        }
+        for (k, v, disabled) in rows {
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_3()
+                    .child(
+                        div()
+                            .w(px(200.))
+                            .font_family("monospace")
+                            .text_size(px(12.))
+                            .text_color(if disabled {
+                                theme::muted()
+                            } else {
+                                theme::accent()
+                            })
+                            .child(k),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_family("monospace")
+                            .text_size(px(12.))
+                            .text_color(theme::text())
+                            .child(v),
+                    ),
+            );
+        }
+        col.into_any_element()
+    }
+
+    fn auth_view(&self) -> gpui::AnyElement {
+        match self
+            .file
+            .as_ref()
+            .and_then(|f| f.blocks.iter().find(|b| b.name.starts_with("auth:")))
+        {
+            Some(b) => {
+                let name = b.name.clone();
+                let mut col = div()
+                    .id("auth")
+                    .overflow_y_scroll()
+                    .flex_1()
+                    .w_full()
+                    .p_3()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_color(theme::subtext())
+                            .text_size(px(12.))
+                            .child(name),
+                    );
+                for (k, v, _) in dict_rows(b) {
+                    col = col.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .w(px(120.))
+                                    .font_family("monospace")
+                                    .text_size(px(12.))
+                                    .text_color(theme::accent())
+                                    .child(k),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .font_family("monospace")
+                                    .text_size(px(12.))
+                                    .text_color(theme::text())
+                                    .child(v),
+                            ),
+                    );
+                }
+                col.into_any_element()
+            }
+            None => div()
+                .p_3()
+                .text_color(theme::muted())
+                .child("No auth")
+                .into_any_element(),
+        }
+    }
+
+    fn text_view(&self, block: &str, id: &'static str) -> gpui::AnyElement {
+        let text = self
+            .file
+            .as_ref()
+            .and_then(|f| f.block(block))
+            .and_then(|b| match &b.content {
+                BlockContent::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "(empty)".to_string());
+        div()
+            .id(id)
+            .overflow_y_scroll()
+            .flex_1()
+            .w_full()
+            .p_3()
+            .font_family("monospace")
+            .text_size(px(12.))
+            .text_color(theme::subtext())
+            .child(text)
+            .into_any_element()
+    }
+
+    fn source_view(&self) -> gpui::AnyElement {
+        let text = self
+            .file
+            .as_ref()
+            .map(bru_lang::serialize)
+            .unwrap_or_default();
+        div()
+            .id("source")
+            .overflow_y_scroll()
+            .flex_1()
+            .w_full()
+            .p_3()
+            .font_family("monospace")
+            .text_size(px(12.))
+            .text_color(theme::subtext())
+            .child(text)
+            .into_any_element()
     }
 
     fn status_bar(&self) -> Div {
@@ -608,7 +822,8 @@ impl Render for BruApp {
             .flex_1()
             .h_full()
             .child(self.url_bar(cx))
-            .child(self.body_pane())
+            .child(self.req_subtabs(cx))
+            .child(self.req_content())
             .child(self.response_pane());
 
         div()
