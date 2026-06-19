@@ -146,6 +146,16 @@ fn folder_row(name: &str, depth: usize) -> Div {
         )
 }
 
+/// Whether a folder (or any descendant request/folder name) matches `query`.
+fn folder_matches(folder: &Folder, query: &str) -> bool {
+    folder.name.to_lowercase().contains(query)
+        || folder
+            .requests
+            .iter()
+            .any(|r| r.name.to_lowercase().contains(query))
+        || folder.folders.iter().any(|f| folder_matches(f, query))
+}
+
 fn status_color(s: u16) -> gpui::Hsla {
     match s {
         200..=299 => theme::green(),
@@ -285,6 +295,9 @@ struct BruApp {
     /// Recently-opened collections + a Home-screen toggle.
     recent: Vec<String>,
     home: bool,
+    /// Sidebar search filter.
+    search: Entity<CodeEditor>,
+    search_query: String,
 }
 
 /// One editable env row: two single-line editors + two flags.
@@ -760,6 +773,13 @@ impl BruApp {
         let collection = bru_lang::load_collection(&dir).ok();
         let curl_input = cx.new(|cx| CodeEditor::new(cx, ""));
         let timeout_input = cx.new(|cx| CodeEditor::single_line(cx, "30"));
+        let search = cx.new(|cx| CodeEditor::single_line(cx, ""));
+        // Live-filter the sidebar as the search box changes.
+        cx.subscribe(&search, |this, ed, _ev: &editor::Changed, cx| {
+            this.search_query = ed.read(cx).text().to_lowercase();
+            cx.notify();
+        })
+        .detach();
         Self {
             dir,
             collection,
@@ -791,11 +811,34 @@ impl BruApp {
             vault_error: None,
             recent: load_recent(),
             home: false,
+            search,
+            search_query: String::new(),
         }
     }
 
     fn go_home(&mut self, cx: &mut Context<Self>) {
         self.home = !self.home;
+        cx.notify();
+    }
+
+    /// Create a new request file in the collection root and open it.
+    fn new_request(&mut self, cx: &mut Context<Self>) {
+        let mut n = 1;
+        let mut path = self.dir.join("New Request.bru");
+        while path.exists() {
+            n += 1;
+            path = self.dir.join(format!("New Request {n}.bru"));
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("New Request");
+        let body = format!(
+            "meta {{\n  name: {stem}\n  type: http\n  seq: 1\n}}\n\nget {{\n  url: \n  body: none\n  auth: none\n}}\n"
+        );
+        if std::fs::write(&path, body).is_ok() {
+            if let Ok(tree) = bru_lang::load_collection(&self.dir) {
+                self.collection = Some(tree);
+            }
+            self.open_request(path, cx);
+        }
         cx.notify();
     }
 
@@ -1476,9 +1519,10 @@ impl BruApp {
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> Div {
+        let q = self.search_query.clone();
         let mut rows: Vec<Div> = Vec::new();
         if let Some(tree) = &self.collection {
-            self.push_folder(&tree.root, 0, cx, &mut rows);
+            self.push_folder(&tree.root, 0, &q, cx, &mut rows);
         } else {
             rows.push(
                 div()
@@ -1500,32 +1544,73 @@ impl BruApp {
             .p_2()
             .child(
                 div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
                     .px_1()
-                    .py_1()
-                    .text_color(theme::muted())
-                    .text_size(px(12.))
                     .child(
-                        self.collection
-                            .as_ref()
-                            .map(|c| c.name.to_uppercase())
-                            .unwrap_or_default(),
+                        div()
+                            .text_color(theme::muted())
+                            .text_size(px(12.))
+                            .child(
+                                self.collection
+                                    .as_ref()
+                                    .map(|c| c.name.to_uppercase())
+                                    .unwrap_or_default(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px_1()
+                            .text_color(theme::accent())
+                            .child("+")
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.new_request(cx)),
+                            ),
                     ),
             )
-            .children(rows)
+            .child(
+                div()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme::input_bg())
+                    .border_1()
+                    .border_color(theme::border1())
+                    .text_size(px(12.))
+                    .child(self.search.clone()),
+            )
+            .child(
+                div()
+                    .id("sidebar-rows")
+                    .overflow_y_scroll()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .children(rows),
+            )
     }
 
     fn push_folder(
         &self,
         folder: &Folder,
         depth: usize,
+        query: &str,
         cx: &mut Context<Self>,
         out: &mut Vec<Div>,
     ) {
         let mut subs: Vec<&Folder> = folder.folders.iter().collect();
         subs.sort_by_key(|f| f.name.to_lowercase());
         for sub in subs {
+            if !query.is_empty() && !folder_matches(sub, query) {
+                continue;
+            }
             out.push(folder_row(&sub.name, depth));
-            self.push_folder(sub, depth + 1, cx, out);
+            self.push_folder(sub, depth + 1, query, cx, out);
         }
         let mut reqs: Vec<&bru_core::RequestItem> = folder.requests.iter().collect();
         reqs.sort_by(|a, b| {
@@ -1535,6 +1620,9 @@ impl BruApp {
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
         for req in reqs {
+            if !query.is_empty() && !req.name.to_lowercase().contains(query) {
+                continue;
+            }
             let path = req.path.clone();
             let active = self.active_tab().map(|t| t.path.as_path()) == Some(path.as_path());
             let method = req.method.clone().unwrap_or_default();

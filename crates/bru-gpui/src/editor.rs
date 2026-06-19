@@ -26,6 +26,10 @@ pub enum Lang {
     Json,
 }
 
+/// Emitted on every content change, so a parent can react live (e.g. filtering).
+pub struct Changed;
+impl gpui::EventEmitter<Changed> for CodeEditor {}
+
 actions!(
     code_editor,
     [
@@ -282,6 +286,7 @@ impl CodeEditor {
         self.selected_range = at..at;
         self.selection_reversed = false;
         self.recompute_highlight();
+        cx.emit(Changed);
         cx.notify();
     }
 
