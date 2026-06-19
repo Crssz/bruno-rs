@@ -3324,7 +3324,33 @@ impl BruApp {
             .border_color(theme::border2());
         for rt in RespTab::ALL {
             let active = tab.resp_tab == rt;
-            strip = strip.child(tab_chip(rt.label(), active).on_mouse_up(
+            // Headers tab shows a count badge; Tests tab shows passed/total.
+            let label = match rt {
+                RespTab::Headers => {
+                    let n = tab
+                        .response
+                        .as_ref()
+                        .and_then(|o| o.response.as_ref())
+                        .map(|r| r.headers.len())
+                        .unwrap_or(0);
+                    if n > 0 {
+                        format!("Headers ({n})")
+                    } else {
+                        "Headers".to_string()
+                    }
+                }
+                RespTab::Tests => match &tab.response {
+                    Some(o) if !o.assertions.is_empty() || !o.tests.is_empty() => {
+                        let total = o.assertions.len() + o.tests.len();
+                        let passed = o.assertions.iter().filter(|a| a.passed).count()
+                            + o.tests.iter().filter(|t| t.passed).count();
+                        format!("Tests {passed}/{total}")
+                    }
+                    _ => "Tests".to_string(),
+                },
+                _ => rt.label().to_string(),
+            };
+            strip = strip.child(tab_chip(&label, active).on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
                     if let Some(i) = this.active {
@@ -3507,16 +3533,34 @@ impl BruApp {
                 scroll("resp-headers").child(col).into_any_element()
             }
             (Some(o), RespTab::Timeline) => {
-                let r = o.response.as_ref();
-                let txt = format!(
-                    "{} {}\n{}\nstatus: {}\ntime: {} ms\nsize: {}",
-                    tab.method.to_uppercase(),
-                    o.url,
-                    o.error.clone().unwrap_or_default(),
-                    r.map(|r| r.status).unwrap_or(0),
-                    r.map(|r| r.duration_ms).unwrap_or(0),
-                    r.map(|r| human_size(r.body.len())).unwrap_or_default(),
-                );
+                // curl-style trace: request line + request headers, then the
+                // response status + every response header, then timing/size.
+                let mut txt = format!("> {} {}\n", tab.method.to_uppercase(), o.url);
+                for line in edit::dict_to_lines(&tab.file, "headers").lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('~') {
+                        continue;
+                    }
+                    if let Some((k, v)) = line.split_once(':') {
+                        txt.push_str(&format!("> {}: {}\n", k.trim(), v.trim()));
+                    }
+                }
+                if let Some(e) = &o.error {
+                    if !e.is_empty() {
+                        txt.push_str(&format!("! {e}\n"));
+                    }
+                }
+                if let Some(r) = o.response.as_ref() {
+                    txt.push_str(&format!("\n< {} {}\n", r.status, r.status_text));
+                    for (k, v) in &r.headers {
+                        txt.push_str(&format!("< {k}: {v}\n"));
+                    }
+                    txt.push_str(&format!(
+                        "\ntime: {} ms\nsize: {}",
+                        r.duration_ms,
+                        human_size(r.body.len())
+                    ));
+                }
                 scroll("resp-timeline")
                     .font_family("monospace")
                     .text_size(px(12.))
