@@ -23,6 +23,17 @@ pub fn set_active_url(file: &mut BruFile, url: &str) {
     }
 }
 
+/// Change the HTTP method by renaming the verb block (standard verbs only;
+/// a custom `http` block is left untouched).
+pub fn set_method(file: &mut BruFile, method: &str) {
+    if let Some(i) = method_block_index(file) {
+        let m = method.to_lowercase();
+        if HTTP_VERBS.contains(&m.as_str()) {
+            file.blocks[i].name = m;
+        }
+    }
+}
+
 /// Set or insert an inline `key: value` entry, preserving order on update.
 fn set_inline_entry(entries: &mut Vec<Entry>, key: &str, value: &str) {
     if let Some(e) = entries.iter_mut().find(|e| e.key.name() == key) {

@@ -143,6 +143,37 @@ fn folder_row(name: &str, depth: usize) -> Div {
         )
 }
 
+fn status_color(s: u16) -> gpui::Hsla {
+    match s {
+        200..=299 => theme::green(),
+        300..=399 => theme::blue(),
+        400..=499 => theme::orange(),
+        _ => theme::red(),
+    }
+}
+
+fn human_size(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// Cycle to the next HTTP method (click-to-change in the URL bar).
+fn next_method(m: &str) -> String {
+    const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+    let cur = m.to_uppercase();
+    let i = METHODS
+        .iter()
+        .position(|x| *x == cur)
+        .map(|i| (i + 1) % METHODS.len())
+        .unwrap_or(0);
+    METHODS[i].to_string()
+}
+
 fn short_method(m: &str) -> String {
     let m = m.to_ascii_uppercase();
     match m.as_str() {
@@ -244,11 +275,38 @@ struct EnvEditor {
     error: Option<String>,
 }
 
+/// Response sub-tabs.
+#[derive(Clone, Copy, PartialEq)]
+enum RespTab {
+    Response,
+    Headers,
+    Timeline,
+    Tests,
+}
+
+impl RespTab {
+    const ALL: [RespTab; 4] = [
+        RespTab::Response,
+        RespTab::Headers,
+        RespTab::Timeline,
+        RespTab::Tests,
+    ];
+    fn label(self) -> &'static str {
+        match self {
+            RespTab::Response => "Response",
+            RespTab::Headers => "Headers",
+            RespTab::Timeline => "Timeline",
+            RespTab::Tests => "Tests",
+        }
+    }
+}
+
 /// One open request tab: all per-request state (was inline on BruApp).
 struct OpenTab {
     path: PathBuf,
     method: String,
     req_tab: ReqTab,
+    resp_tab: RespTab,
     /// The parsed request (source of truth; edits are applied into it).
     file: BruFile,
     /// The shared editor for the active sub-tab's block.
@@ -257,7 +315,8 @@ struct OpenTab {
     url_input: Entity<CodeEditor>,
     edit_kind: EditKind,
     sending: bool,
-    response: Option<String>,
+    /// The last response (full outcome, for the response sub-tabs).
+    response: Option<bru_engine::RunOutcome>,
 }
 
 impl OpenTab {
@@ -276,6 +335,7 @@ impl OpenTab {
             path,
             method,
             req_tab: ReqTab::Body,
+            resp_tab: RespTab::Response,
             file,
             body_editor,
             url_input,
@@ -392,14 +452,25 @@ impl OpenTab {
 
 /// Run a request to completion on a fresh tokio runtime (called on a worker
 /// thread). Returns the formatted response or an error string.
-fn run_blocking(file: BruFile, dir: PathBuf, script_dir: Option<PathBuf>) -> Result<String, String> {
-    let rt = tokio::runtime::Builder::new_current_thread()
+fn run_blocking(
+    file: BruFile,
+    dir: PathBuf,
+    script_dir: Option<PathBuf>,
+) -> bru_engine::RunOutcome {
+    let errout = |e: String| bru_engine::RunOutcome::errored("request".to_string(), e);
+    let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| e.to_string())?;
+    {
+        Ok(rt) => rt,
+        Err(e) => return errout(e.to_string()),
+    };
     rt.block_on(async move {
         let opts = bru_http::SendOptions::default();
-        let client = bru_http::HttpClient::new(&opts).map_err(|e| e.to_string())?;
+        let client = match bru_http::HttpClient::new(&opts) {
+            Ok(c) => c,
+            Err(e) => return errout(e.to_string()),
+        };
         let mut ctx = bru_engine::RunContext {
             vars: bru_engine::base_vars(&dir, None),
             client,
@@ -407,8 +478,7 @@ fn run_blocking(file: BruFile, dir: PathBuf, script_dir: Option<PathBuf>) -> Res
             script_dir,
             ..Default::default()
         };
-        let outcome = bru_engine::run_request(&file, &mut ctx).await;
-        Ok(format_outcome(&outcome))
+        bru_engine::run_request(&file, &mut ctx).await
     })
 }
 
@@ -858,15 +928,16 @@ impl BruApp {
             let result = rx.await;
             let _ = this.update(cx, |this, cx| {
                 // Tab may have moved/closed while in flight — re-find by path.
-                let (status, body) = match result {
-                    Ok(Ok(b)) => ("Response received", Some(b)),
-                    Ok(Err(e)) => ("Send failed", Some(format!("Error: {e}"))),
-                    Err(_) => ("Send cancelled", None),
+                let status = match &result {
+                    Ok(o) if o.error.is_none() => "Response received",
+                    Ok(_) => "Request error",
+                    Err(_) => "Send cancelled",
                 };
                 if let Some(tab) = this.tabs.iter_mut().find(|t| t.path == path) {
                     tab.sending = false;
-                    if let Some(b) = body {
-                        tab.response = Some(b);
+                    if let Ok(outcome) = result {
+                        tab.resp_tab = RespTab::Response;
+                        tab.response = Some(outcome);
                     }
                 }
                 this.status = status.into();
@@ -1044,7 +1115,18 @@ impl BruApp {
                     .text_color(theme::method_color(&method))
                     .text_size(px(12.))
                     .font_family("monospace")
-                    .child(method),
+                    .child(method)
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                            if let Some(i) = this.active {
+                                let next = next_method(&this.tabs[i].method);
+                                edit::set_method(&mut this.tabs[i].file, &next);
+                                this.tabs[i].method = next;
+                                cx.notify();
+                            }
+                        }),
+                    ),
             )
             .child(
                 div()
@@ -1091,34 +1173,182 @@ impl BruApp {
             )
     }
 
-    fn response_pane(&self, tab: &OpenTab) -> Div {
-        let header = div()
+    fn response_pane(&self, tab: &OpenTab, cx: &mut Context<Self>) -> Div {
+        // Sub-tab strip + status/time/size summary.
+        let mut strip = div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
             .w_full()
             .px_2()
-            .py_1()
             .bg(theme::surface0())
             .border_b_1()
-            .border_color(theme::border2())
-            .child(tab_chip("Response", true));
-        let body = div()
-            .id("resp")
-            .overflow_y_scroll()
-            .flex_1()
-            .w_full()
-            .p_3()
-            .font_family("monospace")
-            .text_size(px(13.))
-            .line_height(px(19.))
-            .text_color(theme::subtext())
-            .child(
-                tab.response
-                    .clone()
-                    .unwrap_or_else(|| "No response yet \u{2014} press Send.".to_string()),
-            );
+            .border_color(theme::border2());
+        for rt in RespTab::ALL {
+            let active = tab.resp_tab == rt;
+            strip = strip.child(tab_chip(rt.label(), active).on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                    if let Some(i) = this.active {
+                        this.tabs[i].resp_tab = rt;
+                    }
+                    cx.notify();
+                }),
+            ));
+        }
+        if let Some(r) = tab.response.as_ref().and_then(|o| o.response.as_ref()) {
+            strip = strip
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(status_color(r.status))
+                        .child(format!("{} {}", r.status, r.status_text)),
+                )
+                .child(
+                    div()
+                        .px_2()
+                        .text_size(px(12.))
+                        .text_color(theme::subtext())
+                        .child(format!("{} ms", r.duration_ms)),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme::subtext())
+                        .child(human_size(r.body.len())),
+                );
+        }
+
+        let scroll = |id: &'static str| {
+            div()
+                .id(id)
+                .overflow_y_scroll()
+                .flex_1()
+                .w_full()
+                .p_3()
+        };
+        let content: gpui::AnyElement = match (&tab.response, tab.resp_tab) {
+            (None, _) => div()
+                .p_3()
+                .text_color(theme::muted())
+                .child("No response yet \u{2014} press Send.")
+                .into_any_element(),
+            (Some(o), RespTab::Response) => scroll("resp-body")
+                .font_family("monospace")
+                .text_size(px(13.))
+                .line_height(px(19.))
+                .text_color(theme::subtext())
+                .child(format_outcome(o))
+                .into_any_element(),
+            (Some(o), RespTab::Headers) => {
+                let mut col = div().flex().flex_col().gap_1();
+                match &o.response {
+                    Some(r) => {
+                        for (k, v) in &r.headers {
+                            col = col.child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .w(px(200.))
+                                            .font_family("monospace")
+                                            .text_size(px(12.))
+                                            .text_color(theme::accent())
+                                            .child(k.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .font_family("monospace")
+                                            .text_size(px(12.))
+                                            .text_color(theme::text())
+                                            .child(v.clone()),
+                                    ),
+                            );
+                        }
+                    }
+                    None => {
+                        col = col.child(div().text_color(theme::muted()).child("(no response)"))
+                    }
+                }
+                scroll("resp-headers").child(col).into_any_element()
+            }
+            (Some(o), RespTab::Timeline) => {
+                let r = o.response.as_ref();
+                let txt = format!(
+                    "{} {}\n{}\nstatus: {}\ntime: {} ms\nsize: {}",
+                    tab.method.to_uppercase(),
+                    o.url,
+                    o.error.clone().unwrap_or_default(),
+                    r.map(|r| r.status).unwrap_or(0),
+                    r.map(|r| r.duration_ms).unwrap_or(0),
+                    r.map(|r| human_size(r.body.len())).unwrap_or_default(),
+                );
+                scroll("resp-timeline")
+                    .font_family("monospace")
+                    .text_size(px(12.))
+                    .text_color(theme::subtext())
+                    .child(txt)
+                    .into_any_element()
+            }
+            (Some(o), RespTab::Tests) => {
+                let mut col = div().flex().flex_col().gap_1();
+                if o.assertions.is_empty() && o.tests.is_empty() {
+                    col = col.child(
+                        div()
+                            .text_color(theme::muted())
+                            .text_size(px(12.))
+                            .child("No assertions or tests."),
+                    );
+                }
+                for a in &o.assertions {
+                    let (m, c) = if a.passed {
+                        ("\u{2713}", theme::green())
+                    } else {
+                        ("\u{2717}", theme::red())
+                    };
+                    col = col.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .child(div().text_color(c).child(m))
+                            .child(
+                                div()
+                                    .font_family("monospace")
+                                    .text_size(px(12.))
+                                    .text_color(theme::text())
+                                    .child(format!("{} {} {}", a.expr, a.operator, a.expected)),
+                            ),
+                    );
+                }
+                for t in &o.tests {
+                    let (m, c) = if t.passed {
+                        ("\u{2713}", theme::green())
+                    } else {
+                        ("\u{2717}", theme::red())
+                    };
+                    col = col.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .child(div().text_color(c).child(m))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(theme::text())
+                                    .child(format!("test: {}", t.name)),
+                            ),
+                    );
+                }
+                scroll("resp-tests").child(col).into_any_element()
+            }
+        };
+
         div()
             .flex()
             .flex_col()
@@ -1127,8 +1357,8 @@ impl BruApp {
             .bg(theme::bg())
             .border_t_1()
             .border_color(theme::border2())
-            .child(header)
-            .child(body)
+            .child(strip)
+            .child(content)
     }
 
     /// The clickable request sub-tab strip.
@@ -1663,7 +1893,7 @@ impl Render for BruApp {
                 .child(self.url_bar(tab, cx))
                 .child(self.req_subtabs(tab, cx))
                 .child(self.req_content(tab))
-                .child(self.response_pane(tab))
+                .child(self.response_pane(tab, cx))
         } else {
             div()
                 .flex()
