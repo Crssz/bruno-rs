@@ -1873,6 +1873,33 @@ impl BruApp {
         }
     }
 
+    /// Open a folder's `folder.bru` as a tab (folder-level headers/auth/vars/
+    /// scripts), creating a minimal one if absent.
+    fn ctx_folder_settings(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = self.ctx_menu.take() else {
+            return;
+        };
+        let bru = menu.target.join("folder.bru");
+        if !bru.exists() {
+            let name = menu.name;
+            let _ = std::fs::write(&bru, format!("meta {{\n  name: {name}\n  seq: 1\n}}\n"));
+            self.reload_collection(cx);
+        }
+        self.open_request(bru, cx);
+        cx.notify();
+    }
+
+    /// Open the collection's `collection.bru` settings as a tab.
+    fn open_collection_settings(&mut self, cx: &mut Context<Self>) {
+        let bru = self.dir.join("collection.bru");
+        if !bru.exists() {
+            let _ = std::fs::write(&bru, "meta {\n  name: Collection\n}\n");
+            self.reload_collection(cx);
+        }
+        self.open_request(bru, cx);
+        cx.notify();
+    }
+
     /// Move the menu's request up/down among its siblings (rewrites meta.seq).
     fn ctx_move(&mut self, delta: i64, cx: &mut Context<Self>) {
         let Some(menu) = self.ctx_menu.take() else {
@@ -2045,6 +2072,10 @@ impl BruApp {
                 .child(item("Run Folder").on_mouse_up(
                     MouseButton::Left,
                     cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_run(cx)),
+                ))
+                .child(item("Settings").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_folder_settings(cx)),
                 ));
             if self.clipboard_item.is_some() {
                 card = card.child(item("Paste").on_mouse_up(
@@ -3205,6 +3236,10 @@ impl BruApp {
             .child(chip("Dev Tools").on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.toggle_devtools(cx)),
+            ))
+            .child(chip("Settings").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_collection_settings(cx)),
             ))
             .child(chip("Prefs").on_mouse_up(
                 MouseButton::Left,
