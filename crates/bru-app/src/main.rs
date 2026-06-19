@@ -370,6 +370,8 @@ struct BruApp {
     /// JSONPath response-filter input + its current query.
     resp_filter: Entity<CodeEditor>,
     resp_filter_query: String,
+    /// Show the response body raw (no pretty-print / filter) when true.
+    resp_raw: bool,
     /// Root focus handle, so app-level key actions dispatch.
     focus_handle: FocusHandle,
     /// Command palette (Ctrl+K jump-to-request): open flag + input + query.
@@ -1284,6 +1286,7 @@ impl BruApp {
             confirm_close: None,
             resp_filter,
             resp_filter_query: String::new(),
+            resp_raw: false,
             focus_handle: cx.focus_handle(),
             palette_open: false,
             palette_input,
@@ -3300,6 +3303,14 @@ impl BruApp {
         cx.notify();
     }
 
+    fn clear_response(&mut self, cx: &mut Context<Self>) {
+        if let Some(i) = self.active {
+            self.tabs[i].response = None;
+            self.status.clear();
+            cx.notify();
+        }
+    }
+
     fn response_pane(&self, tab: &OpenTab, window: &mut Window, cx: &mut Context<Self>) -> Div {
         // Sub-tab strip + status/time/size summary.
         let mut strip = div()
@@ -3373,6 +3384,15 @@ impl BruApp {
                                 .child(self.resp_filter.clone()),
                         ),
                 )
+                .child(
+                    ghost_btn(if self.resp_raw { "Pretty" } else { "Raw" }).on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                            this.resp_raw = !this.resp_raw;
+                            cx.notify();
+                        }),
+                    ),
+                )
                 .child(ghost_btn("Copy").on_mouse_up(
                     MouseButton::Left,
                     cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.copy_response(cx)),
@@ -3380,6 +3400,10 @@ impl BruApp {
                 .child(ghost_btn("Save").on_mouse_up(
                     MouseButton::Left,
                     cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.save_response(cx)),
+                ))
+                .child(ghost_btn("Clear").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.clear_response(cx)),
                 ));
         }
 
@@ -3391,15 +3415,15 @@ impl BruApp {
                 .child("No response yet \u{2014} press Send.")
                 .into_any_element(),
             (Some(o), RespTab::Response) => {
-                let is_json = o
-                    .response
-                    .as_ref()
-                    .map(|r| {
-                        r.headers.iter().any(|(k, v)| {
-                            k.eq_ignore_ascii_case("content-type") && v.contains("json")
+                let is_json = !self.resp_raw
+                    && o.response
+                        .as_ref()
+                        .map(|r| {
+                            r.headers.iter().any(|(k, v)| {
+                                k.eq_ignore_ascii_case("content-type") && v.contains("json")
+                            })
                         })
-                    })
-                    .unwrap_or(false);
+                        .unwrap_or(false);
                 match (is_json, o.response.as_ref()) {
                     (true, Some(r)) => {
                         let raw = String::from_utf8_lossy(&r.body).to_string();
@@ -3430,6 +3454,14 @@ impl BruApp {
                             .child(StyledText::new(pretty).with_default_highlights(&base, spans))
                             .into_any_element()
                     }
+                    // Raw view (or non-JSON with a body): show the bytes as text.
+                    (_, Some(r)) if self.resp_raw || !r.body.is_empty() => scroll("resp-body")
+                        .font_family("monospace")
+                        .text_size(px(13.))
+                        .line_height(px(19.))
+                        .text_color(theme::text())
+                        .child(String::from_utf8_lossy(&r.body).to_string())
+                        .into_any_element(),
                     _ => scroll("resp-body")
                         .font_family("monospace")
                         .text_size(px(13.))
