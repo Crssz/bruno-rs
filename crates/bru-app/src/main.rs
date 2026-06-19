@@ -1193,6 +1193,28 @@ impl BruApp {
         }
     }
 
+    /// Scaffold a new Bruno collection under `parent` (bruno.json + an empty
+    /// environments/ dir) and open it.
+    fn create_collection(&mut self, parent: &Path, cx: &mut Context<Self>) {
+        let mut dir = parent.join("New Collection");
+        let mut n = 1;
+        while dir.exists() {
+            n += 1;
+            dir = parent.join(format!("New Collection {n}"));
+        }
+        let name = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("New Collection");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let bruno =
+                format!("{{\n  \"version\": \"1\",\n  \"name\": \"{name}\",\n  \"type\": \"collection\"\n}}\n");
+            let _ = std::fs::write(dir.join("bruno.json"), bruno);
+            let _ = std::fs::create_dir_all(dir.join("environments"));
+            self.load_collection(dir, cx);
+        }
+    }
+
     // ── active environment selector ───────────────────────────────────────────
     fn open_env_menu(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
         self.env_menu = Some(pos);
@@ -2484,6 +2506,14 @@ impl BruApp {
                 cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
                     if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                         this.load_collection(dir, cx);
+                    }
+                }),
+            ))
+            .child(chip("New Collection").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                    if let Some(parent) = rfd::FileDialog::new().pick_folder() {
+                        this.create_collection(&parent, cx);
                     }
                 }),
             ))
