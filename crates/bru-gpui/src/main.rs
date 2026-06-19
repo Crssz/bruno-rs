@@ -5,6 +5,7 @@ mod edit;
 mod editor;
 mod envfs;
 mod highlight;
+mod import;
 mod theme;
 
 use std::path::{Path, PathBuf};
@@ -259,6 +260,9 @@ struct BruApp {
     /// Cookies observed from response Set-Cookie headers this session.
     cookies: Vec<CookieEntry>,
     cookies_open: bool,
+    /// curl-import overlay (paste a curl command).
+    curl_open: bool,
+    curl_input: Entity<CodeEditor>,
 }
 
 /// One editable env row: two single-line editors + two flags.
@@ -675,8 +679,9 @@ fn run_folder_blocking(files: Vec<PathBuf>, vars_base: PathBuf) -> Vec<RunResult
 }
 
 impl BruApp {
-    fn new(_cx: &mut Context<Self>, dir: PathBuf) -> Self {
+    fn new(cx: &mut Context<Self>, dir: PathBuf) -> Self {
         let collection = bru_lang::load_collection(&dir).ok();
+        let curl_input = cx.new(|cx| CodeEditor::new(cx, ""));
         Self {
             dir,
             collection,
@@ -690,7 +695,84 @@ impl BruApp {
             runner_results: Vec::new(),
             cookies: Vec::new(),
             cookies_open: false,
+            curl_open: false,
+            curl_input,
         }
+    }
+
+    /// Load (or reload) a collection from `dir`, replacing open tabs.
+    fn load_collection(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        match bru_lang::load_collection(&dir) {
+            Ok(tree) => {
+                self.collection = Some(tree);
+                self.dir = dir;
+                self.tabs.clear();
+                self.active = None;
+                self.env = None;
+                self.status = "Loaded collection".into();
+            }
+            Err(e) => self.status = format!("Failed to load: {e}"),
+        }
+        cx.notify();
+    }
+
+    /// Pick a Postman v2.1 JSON and import it into a new collection.
+    fn import_postman(&mut self, cx: &mut Context<Self>) {
+        let Some(file) = rfd::FileDialog::new()
+            .add_filter("Postman collection", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        match std::fs::read_to_string(&file) {
+            Ok(json) => {
+                let parent = file
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from("."));
+                match import::import_postman(&json, &parent) {
+                    Ok(dir) => self.load_collection(dir, cx),
+                    Err(e) => {
+                        self.status = format!("Import failed: {e}");
+                        cx.notify();
+                    }
+                }
+            }
+            Err(e) => {
+                self.status = format!("Read failed: {e}");
+                cx.notify();
+            }
+        }
+    }
+
+    fn open_curl(&mut self, cx: &mut Context<Self>) {
+        self.curl_open = true;
+        cx.notify();
+    }
+    fn close_curl(&mut self, cx: &mut Context<Self>) {
+        self.curl_open = false;
+        cx.notify();
+    }
+    /// Parse the pasted curl command, write it as a request in the collection,
+    /// and open it.
+    fn import_curl(&mut self, cx: &mut Context<Self>) {
+        let text = self.curl_input.read(cx).text().to_string();
+        let Some((name, bru)) = import::curl_to_bru(&text) else {
+            self.status = "No URL in curl command".into();
+            cx.notify();
+            return;
+        };
+        let path = self.dir.join(format!("{}.bru", envfs::sanitize(&name)));
+        if std::fs::write(&path, bru).is_ok() {
+            self.curl_open = false;
+            if let Some(tree) = bru_lang::load_collection(&self.dir).ok() {
+                self.collection = Some(tree);
+            }
+            self.open_request(path, cx);
+        } else {
+            self.status = "Could not write request".into();
+        }
+        cx.notify();
     }
 
     fn open_cookies(&mut self, cx: &mut Context<Self>) {
@@ -1077,8 +1159,22 @@ impl BruApp {
             .border_b_1()
             .border_color(theme::border1())
             .child(icon_chip("\u{2302}"))
-            .child(chip("Open Collection"))
-            .child(chip("New"))
+            .child(chip("Open Collection").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        this.load_collection(dir, cx);
+                    }
+                }),
+            ))
+            .child(chip("Import").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.import_postman(cx)),
+            ))
+            .child(chip("curl").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_curl(cx)),
+            ))
             .child(chip("Run").on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
@@ -1533,6 +1629,76 @@ impl BruApp {
                     .line_height(px(19.))
                     .child(tab.body_editor.clone()),
             )
+    }
+
+    /// The curl-import overlay (paste a curl command).
+    fn curl_overlay(&self, cx: &mut Context<Self>) -> Div {
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(15.))
+                    .text_color(theme::text())
+                    .child("Import curl"),
+            )
+            .child(solid_btn("Import").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.import_curl(cx)),
+            ))
+            .child(ghost_btn("Close").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.close_curl(cx)),
+            ));
+        let editor = div()
+            .id("curl-input")
+            .overflow_y_scroll()
+            .flex_1()
+            .w_full()
+            .p_2()
+            .rounded_md()
+            .bg(theme::input_bg())
+            .border_1()
+            .border_color(theme::border1())
+            .font_family("monospace")
+            .text_size(px(12.))
+            .child(self.curl_input.clone());
+        let card = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w(px(680.))
+            .h(px(340.))
+            .p_4()
+            .rounded_md()
+            .bg(theme::mantle())
+            .border_1()
+            .border_color(theme::border2())
+            .occlude()
+            .child(header)
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(theme::muted())
+                    .child("Paste a curl command:"),
+            )
+            .child(editor);
+        div()
+            .absolute()
+            .inset_0()
+            .bg(gpui::rgba(0x00000099))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.close_curl(cx)),
+            )
+            .child(card)
     }
 
     /// The cookies overlay (captured from response Set-Cookie headers).
@@ -2174,6 +2340,9 @@ impl Render for BruApp {
         }
         if self.cookies_open {
             root = root.child(self.cookies_overlay(cx));
+        }
+        if self.curl_open {
+            root = root.child(self.curl_overlay(cx));
         }
         root
     }
