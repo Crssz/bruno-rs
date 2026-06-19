@@ -90,6 +90,8 @@ pub struct CodeEditor {
     single_line: bool,
     /// Render each glyph as a same-byte-length mask char (for secret values).
     masked: bool,
+    /// Block edits (still selectable + copyable) — for the response viewer.
+    read_only: bool,
     /// Cached tree-sitter highlight spans (recomputed on every content change).
     spans: Vec<(Range<usize>, HighlightStyle)>,
     // Layout caches (filled during paint) for mouse mapping.
@@ -109,6 +111,7 @@ impl CodeEditor {
             lang: Lang::Plain,
             single_line: false,
             masked: false,
+            read_only: false,
             spans: Vec::new(),
             line_layouts: Vec::new(),
             bounds: None,
@@ -138,6 +141,13 @@ impl CodeEditor {
             self.masked = masked;
             cx.notify();
         }
+    }
+
+    /// A read-only editor (selectable + copyable, no edits) — the response view.
+    pub fn read_only(cx: &mut Context<Self>, text: &str) -> Self {
+        let mut ed = Self::new(cx, text);
+        ed.read_only = true;
+        ed
     }
 
     /// Replace the (single-line) content, keeping single-line mode.
@@ -313,6 +323,9 @@ impl CodeEditor {
 
     // ── editing ─────────────────────────────────────────────────────────────
     fn replace(&mut self, new_text: &str, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         let owned;
         let new_text = if self.single_line && new_text.contains('\n') {
             owned = new_text.replace('\n', " ");

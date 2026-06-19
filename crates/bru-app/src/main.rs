@@ -91,8 +91,8 @@ impl ReqTab {
 }
 use gpui::{
     actions, div, prelude::*, px, size, App, Bounds, Context, Div, Entity, FocusHandle, Focusable,
-    KeyBinding, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, StyledText, Window,
-    WindowBounds, WindowOptions,
+    KeyBinding, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, Window, WindowBounds,
+    WindowOptions,
 };
 use gpui_platform::application;
 
@@ -377,6 +377,8 @@ struct BruApp {
     resp_filter_query: String,
     /// Show the response body raw (no pretty-print / filter) when true.
     resp_raw: bool,
+    /// Read-only editor for the response body (selectable + copyable).
+    resp_editor: Entity<CodeEditor>,
     /// Root focus handle, so app-level key actions dispatch.
     focus_handle: FocusHandle,
     /// Command palette (Ctrl+K jump-to-request): open flag + input + query.
@@ -1360,6 +1362,7 @@ impl BruApp {
             resp_filter,
             resp_filter_query: String::new(),
             resp_raw: false,
+            resp_editor: cx.new(|cx| CodeEditor::read_only(cx, "")),
             focus_handle: cx.focus_handle(),
             palette_open: false,
             palette_input,
@@ -3518,7 +3521,7 @@ impl BruApp {
         }
     }
 
-    fn response_pane(&self, tab: &OpenTab, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn response_pane(&self, tab: &OpenTab, _window: &mut Window, cx: &mut Context<Self>) -> Div {
         // Sub-tab strip + status/time/size summary.
         let mut strip = div()
             .flex()
@@ -3648,61 +3651,50 @@ impl BruApp {
                 .child("No response yet \u{2014} press Send.")
                 .into_any_element(),
             (Some(o), RespTab::Response) => {
-                let is_json = !self.resp_raw
-                    && o.response
-                        .as_ref()
-                        .map(|r| {
-                            r.headers.iter().any(|(k, v)| {
-                                k.eq_ignore_ascii_case("content-type") && v.contains("json")
-                            })
-                        })
-                        .unwrap_or(false);
-                match (is_json, o.response.as_ref()) {
-                    (true, Some(r)) => {
+                // Compute the displayed body (pretty JSON + JSONPath filter, or
+                // raw), then push it into the read-only selectable editor only
+                // when it changes (so a live text selection survives re-renders).
+                let (displayed, lang) = match o.response.as_ref() {
+                    Some(r) => {
                         let raw = String::from_utf8_lossy(&r.body).to_string();
-                        let pretty = match serde_json::from_str::<serde_json::Value>(&raw) {
-                            Ok(v) => {
-                                // Apply the JSONPath filter, if any.
-                                let shown = if self.resp_filter_query.is_empty() {
-                                    Some(v)
-                                } else {
-                                    json_path(&v, &self.resp_filter_query)
-                                };
-                                match shown {
-                                    Some(val) => serde_json::to_string_pretty(&val).unwrap_or(raw),
-                                    None => "(no match)".to_string(),
+                        let is_json = !self.resp_raw
+                            && r.headers.iter().any(|(k, v)| {
+                                k.eq_ignore_ascii_case("content-type") && v.contains("json")
+                            });
+                        if is_json {
+                            match serde_json::from_str::<serde_json::Value>(&raw) {
+                                Ok(v) => {
+                                    let shown = if self.resp_filter_query.is_empty() {
+                                        Some(v)
+                                    } else {
+                                        json_path(&v, &self.resp_filter_query)
+                                    };
+                                    match shown {
+                                        Some(val) => (
+                                            serde_json::to_string_pretty(&val).unwrap_or(raw),
+                                            Lang::Json,
+                                        ),
+                                        None => ("(no match)".to_string(), Lang::Plain),
+                                    }
                                 }
+                                Err(_) => (raw, Lang::Plain),
                             }
-                            Err(_) => raw,
-                        };
-                        let mut base = window.text_style();
-                        base.font_family = "monospace".into();
-                        base.color = theme::text();
-                        base.font_size = px(13.).into();
-                        let spans = highlight::json(&pretty);
-                        scroll("resp-body")
-                            .font_family("monospace")
-                            .text_size(px(13.))
-                            .line_height(px(19.))
-                            .child(StyledText::new(pretty).with_default_highlights(&base, spans))
-                            .into_any_element()
+                        } else {
+                            (raw, Lang::Plain)
+                        }
                     }
-                    // Raw view (or non-JSON with a body): show the bytes as text.
-                    (_, Some(r)) if self.resp_raw || !r.body.is_empty() => scroll("resp-body")
-                        .font_family("monospace")
-                        .text_size(px(13.))
-                        .line_height(px(19.))
-                        .text_color(theme::text())
-                        .child(String::from_utf8_lossy(&r.body).to_string())
-                        .into_any_element(),
-                    _ => scroll("resp-body")
-                        .font_family("monospace")
-                        .text_size(px(13.))
-                        .line_height(px(19.))
-                        .text_color(theme::subtext())
-                        .child(format_outcome(o))
-                        .into_any_element(),
+                    None => (format_outcome(o), Lang::Plain),
+                };
+                if self.resp_editor.read(cx).text() != displayed {
+                    self.resp_editor
+                        .update(cx, |ed, cx| ed.set_text(&displayed, lang, cx));
                 }
+                scroll("resp-body")
+                    .font_family("monospace")
+                    .text_size(px(13.))
+                    .line_height(px(19.))
+                    .child(self.resp_editor.clone())
+                    .into_any_element()
             }
             (Some(o), RespTab::Headers) => {
                 let mut col = div().flex().flex_col().gap_1();
