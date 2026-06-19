@@ -2475,6 +2475,36 @@ impl BruApp {
             )
     }
 
+    /// Raw bytes of the active tab's last response, if any.
+    fn response_bytes(&self) -> Option<Vec<u8>> {
+        self.active_tab()
+            .and_then(|t| t.response.as_ref())
+            .and_then(|o| o.response.as_ref())
+            .map(|r| r.body.clone())
+    }
+
+    fn copy_response(&mut self, cx: &mut Context<Self>) {
+        if let Some(bytes) = self.response_bytes() {
+            let s = String::from_utf8_lossy(&bytes).to_string();
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(s));
+            self.status = "Copied response to clipboard".into();
+            cx.notify();
+        }
+    }
+
+    fn save_response(&mut self, cx: &mut Context<Self>) {
+        let Some(bytes) = self.response_bytes() else {
+            return;
+        };
+        if let Some(path) = rfd::FileDialog::new().save_file() {
+            self.status = match std::fs::write(&path, &bytes) {
+                Ok(()) => "Saved response".into(),
+                Err(e) => format!("Save failed: {e}"),
+            };
+        }
+        cx.notify();
+    }
+
     fn response_pane(&self, tab: &OpenTab, window: &mut Window, cx: &mut Context<Self>) -> Div {
         // Sub-tab strip + status/time/size summary.
         let mut strip = div()
@@ -2519,7 +2549,15 @@ impl BruApp {
                         .text_size(px(12.))
                         .text_color(theme::subtext())
                         .child(human_size(r.body.len())),
-                );
+                )
+                .child(ghost_btn("Copy").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.copy_response(cx)),
+                ))
+                .child(ghost_btn("Save").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.save_response(cx)),
+                ));
         }
 
         let scroll = |id: &'static str| div().id(id).overflow_y_scroll().flex_1().w_full().p_3();
