@@ -1031,7 +1031,7 @@ impl BruApp {
         let path = self.dir.join(format!("{}.bru", envfs::sanitize(&name)));
         if std::fs::write(&path, bru).is_ok() {
             self.curl_open = false;
-            if let Some(tree) = bru_lang::load_collection(&self.dir).ok() {
+            if let Ok(tree) = bru_lang::load_collection(&self.dir) {
                 self.collection = Some(tree);
             }
             self.open_request(path, cx);
