@@ -3,6 +3,7 @@
 // request's real method/URL/body (JSON bodies tree-sitter-highlighted).
 mod edit;
 mod editor;
+mod envfs;
 mod highlight;
 mod theme;
 
@@ -153,6 +154,49 @@ fn short_method(m: &str) -> String {
 }
 
 /// A tab label (request / response sub-tabs).
+/// A clickable checkbox box (gpui has no checkbox primitive).
+fn check_box(on: bool) -> Div {
+    div()
+        .w(px(14.))
+        .h(px(14.))
+        .rounded_sm()
+        .border_1()
+        .border_color(theme::border2())
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(on, |d| {
+            d.bg(theme::accent()).child(
+                div()
+                    .text_size(px(9.))
+                    .text_color(theme::bg())
+                    .child("\u{2713}"),
+            )
+        })
+}
+
+fn ghost_btn(label: &str) -> Div {
+    div()
+        .px_3()
+        .py_1()
+        .rounded_md()
+        .text_size(px(13.))
+        .text_color(theme::text())
+        .bg(theme::surface0())
+        .child(label.to_string())
+}
+
+fn solid_btn(label: &str) -> Div {
+    div()
+        .px_4()
+        .py_1()
+        .rounded_md()
+        .text_size(px(13.))
+        .bg(theme::accent())
+        .text_color(theme::bg())
+        .child(label.to_string())
+}
+
 fn tab_chip(label: &str, active: bool) -> Div {
     div()
         .px_3()
@@ -174,6 +218,25 @@ struct BruApp {
     tabs: Vec<OpenTab>,
     active: Option<usize>,
     status: String,
+    /// The environment-manager overlay, if open.
+    env: Option<EnvEditor>,
+}
+
+/// One editable env row: two single-line editors + two flags.
+struct EnvRowState {
+    name: Entity<CodeEditor>,
+    value: Entity<CodeEditor>,
+    enabled: bool,
+    secret: bool,
+}
+
+/// Working state for the environment-manager overlay.
+struct EnvEditor {
+    names: Vec<String>,
+    selected: String,
+    rename: Entity<CodeEditor>,
+    rows: Vec<EnvRowState>,
+    error: Option<String>,
 }
 
 /// One open request tab: all per-request state (was inline on BruApp).
@@ -387,7 +450,212 @@ impl BruApp {
             tabs: Vec::new(),
             active: None,
             status: String::new(),
+            env: None,
         }
+    }
+
+    // ── environment manager ──────────────────────────────────────────────────
+    fn env_build_rows(&self, name: &str, cx: &mut Context<Self>) -> Vec<EnvRowState> {
+        envfs::load_env_rows(&self.dir, name)
+            .into_iter()
+            .map(|r| EnvRowState {
+                name: cx.new(|cx| CodeEditor::single_line(cx, &r.name)),
+                value: cx.new(|cx| CodeEditor::single_line(cx, &r.value)),
+                enabled: r.enabled,
+                secret: r.secret,
+            })
+            .collect()
+    }
+
+    fn env_collect_rows(&self, ed: &EnvEditor, cx: &App) -> Vec<envfs::EnvRow> {
+        ed.rows
+            .iter()
+            .map(|r| envfs::EnvRow {
+                name: r.name.read(cx).text().trim().to_string(),
+                value: r.value.read(cx).text().to_string(),
+                enabled: r.enabled,
+                secret: r.secret,
+            })
+            .filter(|r| !r.name.is_empty())
+            .collect()
+    }
+
+    fn env_open(&mut self, cx: &mut Context<Self>) {
+        let names = envfs::scan_envs(&self.dir);
+        let first = names.first().cloned().unwrap_or_default();
+        let rows = self.env_build_rows(&first, cx);
+        let rename = cx.new(|cx| CodeEditor::single_line(cx, &first));
+        self.env = Some(EnvEditor {
+            names,
+            selected: first,
+            rename,
+            rows,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    fn env_close(&mut self, cx: &mut Context<Self>) {
+        self.env = None;
+        cx.notify();
+    }
+
+    fn env_select(&mut self, name: String, cx: &mut Context<Self>) {
+        let rows = self.env_build_rows(&name, cx);
+        if let Some(ed) = &mut self.env {
+            ed.rename.update(cx, |li, cx| li.set_line(&name, cx));
+            ed.selected = name;
+            ed.rows = rows;
+            ed.error = None;
+        }
+        cx.notify();
+    }
+
+    fn env_add_row(&mut self, cx: &mut Context<Self>) {
+        let name = cx.new(|cx| CodeEditor::single_line(cx, ""));
+        let value = cx.new(|cx| CodeEditor::single_line(cx, ""));
+        if let Some(ed) = &mut self.env {
+            ed.rows.push(EnvRowState {
+                name,
+                value,
+                enabled: true,
+                secret: false,
+            });
+        }
+        cx.notify();
+    }
+
+    fn env_remove_row(&mut self, i: usize, cx: &mut Context<Self>) {
+        if let Some(ed) = &mut self.env {
+            if i < ed.rows.len() {
+                ed.rows.remove(i);
+            }
+        }
+        cx.notify();
+    }
+
+    fn env_toggle_enabled(&mut self, i: usize, cx: &mut Context<Self>) {
+        if let Some(ed) = &mut self.env {
+            if let Some(r) = ed.rows.get_mut(i) {
+                r.enabled = !r.enabled;
+            }
+        }
+        cx.notify();
+    }
+
+    fn env_toggle_secret(&mut self, i: usize, cx: &mut Context<Self>) {
+        if let Some(ed) = &mut self.env {
+            if let Some(r) = ed.rows.get_mut(i) {
+                r.secret = !r.secret;
+            }
+        }
+        cx.notify();
+    }
+
+    fn env_save(&mut self, cx: &mut Context<Self>) {
+        let Some(ed) = self.env.as_ref() else { return };
+        if ed.selected.is_empty() {
+            if let Some(ed) = &mut self.env {
+                ed.error = Some("Select or create an environment first".into());
+            }
+            cx.notify();
+            return;
+        }
+        let rows = self.env_collect_rows(ed, cx);
+        let sel = ed.selected.clone();
+        let res = envfs::save_env(&self.dir, &sel, &rows);
+        if let Some(ed) = &mut self.env {
+            ed.error = res.err();
+        }
+        cx.notify();
+    }
+
+    fn env_new(&mut self, cx: &mut Context<Self>) {
+        let existing = envfs::scan_envs(&self.dir);
+        let mut name = "New Environment".to_string();
+        let mut n = 1;
+        while existing.iter().any(|e| e == &name) {
+            n += 1;
+            name = format!("New Environment {n}");
+        }
+        match envfs::create_env(&self.dir, &name) {
+            Ok(()) => {
+                let names = envfs::scan_envs(&self.dir);
+                let rows = self.env_build_rows(&name, cx);
+                let rename = cx.new(|cx| CodeEditor::single_line(cx, &name));
+                if let Some(ed) = &mut self.env {
+                    ed.names = names;
+                    ed.rename = rename;
+                    ed.selected = name;
+                    ed.rows = rows;
+                    ed.error = None;
+                }
+            }
+            Err(e) => {
+                if let Some(ed) = &mut self.env {
+                    ed.error = Some(e);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn env_delete(&mut self, name: String, cx: &mut Context<Self>) {
+        let _ = envfs::delete_env(&self.dir, &name);
+        let names = envfs::scan_envs(&self.dir);
+        let reselect = self.env.as_ref().map(|e| e.selected == name).unwrap_or(false);
+        let target = if reselect {
+            names.first().cloned().unwrap_or_default()
+        } else {
+            self.env
+                .as_ref()
+                .map(|e| e.selected.clone())
+                .unwrap_or_default()
+        };
+        let rows = self.env_build_rows(&target, cx);
+        let rename = cx.new(|cx| CodeEditor::single_line(cx, &target));
+        if let Some(ed) = &mut self.env {
+            ed.names = names;
+            ed.selected = target;
+            ed.rename = rename;
+            ed.rows = rows;
+        }
+        cx.notify();
+    }
+
+    fn env_duplicate(&mut self, name: String, cx: &mut Context<Self>) {
+        let _ = envfs::duplicate_env(&self.dir, &name);
+        let names = envfs::scan_envs(&self.dir);
+        if let Some(ed) = &mut self.env {
+            ed.names = names;
+        }
+        cx.notify();
+    }
+
+    fn env_rename_apply(&mut self, cx: &mut Context<Self>) {
+        let (old, new) = match self.env.as_ref() {
+            Some(ed) => (ed.selected.clone(), ed.rename.read(cx).text().trim().to_string()),
+            None => return,
+        };
+        if old.is_empty() || new.is_empty() || old == new {
+            return;
+        }
+        match envfs::rename_env(&self.dir, &old, &new) {
+            Ok(()) => {
+                let names = envfs::scan_envs(&self.dir);
+                if let Some(ed) = &mut self.env {
+                    ed.names = names;
+                    ed.selected = new;
+                    ed.error = None;
+                }
+            }
+            Err(e) => {
+                if let Some(ed) = &mut self.env {
+                    ed.error = Some(e);
+                }
+            }
+        }
+        cx.notify();
     }
 
     fn active_tab(&self) -> Option<&OpenTab> {
@@ -470,7 +738,7 @@ impl BruApp {
         }
     }
 
-    fn top_bar(&self) -> Div {
+    fn top_bar(&self, cx: &mut Context<Self>) -> Div {
         let name = self
             .collection
             .as_ref()
@@ -499,7 +767,10 @@ impl BruApp {
             )
             .child(div().flex_1())
             .child(div().text_color(theme::muted()).text_size(px(12.)).child("Env:"))
-            .child(chip("Prod"))
+            .child(chip("Environments").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.env_open(cx)),
+            ))
             .child(icon_chip("Vault"))
             .child(icon_chip("Eye"))
             .child(icon_chip("Theme"))
@@ -740,6 +1011,260 @@ impl BruApp {
             )
     }
 
+    /// The environment-manager overlay (scrim + card).
+    fn env_overlay(&self, cx: &mut Context<Self>) -> Div {
+        let ed = self.env.as_ref().expect("env overlay with env=None");
+
+        // Left: env list with New / per-env duplicate + delete.
+        let mut list = div().flex().flex_col().gap_1().w(px(220.)).child(
+            div()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .text_size(px(12.))
+                .text_color(theme::accent())
+                .child("+ New Environment")
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.env_new(cx)),
+                ),
+        );
+        for name in &ed.names {
+            let active = ed.selected == *name;
+            let (n_sel, n_dup, n_del) = (name.clone(), name.clone(), name.clone());
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .text_size(px(12.))
+                            .when(active, |d| d.bg(theme::surface0()))
+                            .text_color(if active {
+                                theme::text()
+                            } else {
+                                theme::subtext()
+                            })
+                            .child(name.clone())
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                    this.env_select(n_sel.clone(), cx)
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px_1()
+                            .text_size(px(11.))
+                            .text_color(theme::muted())
+                            .child("\u{29C9}")
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                    this.env_duplicate(n_dup.clone(), cx)
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px_1()
+                            .text_size(px(11.))
+                            .text_color(theme::red())
+                            .child("\u{2715}")
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                    this.env_delete(n_del.clone(), cx)
+                                }),
+                            ),
+                    ),
+            );
+        }
+        let left = div()
+            .id("env-list")
+            .overflow_y_scroll()
+            .w(px(220.))
+            .h_full()
+            .child(list);
+
+        // Right: rename + variables table + error + Save.
+        let right: Div = if ed.selected.is_empty() {
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme::muted())
+                        .child("Select or create an environment."),
+                )
+        } else {
+            let rename_row = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(240.))
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(theme::input_bg())
+                        .border_1()
+                        .border_color(theme::border1())
+                        .text_size(px(12.))
+                        .font_family("monospace")
+                        .child(ed.rename.clone()),
+                )
+                .child(ghost_btn("Rename").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.env_rename_apply(cx)),
+                ));
+            let cell = |child: Entity<CodeEditor>| {
+                div()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme::input_bg())
+                    .border_1()
+                    .border_color(theme::border1())
+                    .text_size(px(12.))
+                    .font_family("monospace")
+                    .child(child)
+            };
+            let mut table = div().flex().flex_col().gap_1();
+            for (i, r) in ed.rows.iter().enumerate() {
+                table = table.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(check_box(r.enabled).on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                this.env_toggle_enabled(i, cx)
+                            }),
+                        ))
+                        .child(cell(r.name.clone()).w(px(180.)))
+                        .child(cell(r.value.clone()).flex_1())
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .child(check_box(r.secret).on_mouse_up(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                        this.env_toggle_secret(i, cx)
+                                    }),
+                                ))
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(theme::muted())
+                                        .child("secret"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .px_1()
+                                .text_color(theme::red())
+                                .child("\u{2715}")
+                                .on_mouse_up(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                        this.env_remove_row(i, cx)
+                                    }),
+                                ),
+                        ),
+                );
+            }
+            table = table.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme::accent())
+                    .child("+ Add Variable")
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.env_add_row(cx)),
+                    ),
+            );
+            let mut col = div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .gap_2()
+                .child(rename_row)
+                .child(div().id("env-table").overflow_y_scroll().flex_1().child(table));
+            if let Some(err) = &ed.error {
+                col = col.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme::red())
+                        .child(err.clone()),
+                );
+            }
+            col.child(
+                div().flex().flex_row().justify_end().child(solid_btn("Save").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.env_save(cx)),
+                )),
+            )
+        };
+
+        let card = div()
+            .w(px(800.))
+            .h(px(480.))
+            .p_4()
+            .rounded_md()
+            .bg(theme::mantle())
+            .border_1()
+            .border_color(theme::border2())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(15.))
+                            .text_color(theme::text())
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child("Environments"),
+                    )
+                    .child(ghost_btn("Close").on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.env_close(cx)),
+                    )),
+            )
+            .child(div().flex().flex_row().gap_3().flex_1().child(left).child(right));
+
+        div()
+            .absolute()
+            .inset_0()
+            .bg(gpui::rgba(0x000000aa))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(card)
+    }
+
     /// The strip of open request tabs (click to focus, × to close).
     fn tab_strip(&self, cx: &mut Context<Self>) -> Div {
         let mut strip = div()
@@ -865,13 +1390,14 @@ impl Render for BruApp {
             .child(strip)
             .child(content);
 
-        div()
+        let mut root = div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
             .bg(theme::bg())
             .text_color(theme::text())
-            .child(self.top_bar())
+            .child(self.top_bar(cx))
             .child(
                 div()
                     .flex()
@@ -881,7 +1407,11 @@ impl Render for BruApp {
                     .child(self.sidebar(cx))
                     .child(center),
             )
-            .child(self.status_bar())
+            .child(self.status_bar());
+        if self.env.is_some() {
+            root = root.child(self.env_overlay(cx));
+        }
+        root
     }
 }
 
