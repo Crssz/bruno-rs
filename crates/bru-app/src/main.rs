@@ -120,15 +120,15 @@ fn flatten_requests(folder: &Folder, out: &mut Vec<(String, PathBuf)>) {
     }
 }
 
-/// A pill/button used in the chrome (ghost style).
+/// A subtle toolbar button (ghost until hovered) — Bruno's chrome controls.
 fn chip(label: &str) -> Div {
     div()
         .px_3()
         .py_1()
         .rounded_md()
-        .bg(theme::surface0())
-        .text_color(theme::text())
+        .text_color(theme::subtext())
         .text_size(px(13.))
+        .hover(|s| s.bg(theme::surface0()).text_color(theme::text()))
         .child(label.to_string())
 }
 
@@ -304,6 +304,9 @@ fn ghost_btn(label: &str) -> Div {
         .text_size(px(13.))
         .text_color(theme::text())
         .bg(theme::surface0())
+        .border_1()
+        .border_color(theme::border1())
+        .hover(|s| s.border_color(theme::border2()))
         .child(label.to_string())
 }
 
@@ -315,6 +318,7 @@ fn solid_btn(label: &str) -> Div {
         .text_size(px(13.))
         .bg(theme::accent())
         .text_color(theme::bg())
+        .hover(|s| s.opacity(0.92))
         .child(label.to_string())
 }
 
@@ -415,6 +419,10 @@ struct BruApp {
     palette_open: bool,
     palette_input: Entity<CodeEditor>,
     palette_query: String,
+    /// Request-pane width (px) for the request|response split; None = even 50/50.
+    split_req_w: Option<f32>,
+    /// True while the split divider is being dragged.
+    split_dragging: bool,
 }
 
 /// A right-click menu over a sidebar entry, anchored at the click point.
@@ -1415,6 +1423,8 @@ impl BruApp {
             palette_open: false,
             palette_input,
             palette_query: String::new(),
+            split_req_w: None,
+            split_dragging: false,
         }
     }
 
@@ -5526,6 +5536,38 @@ impl Render for BruApp {
             let tab = &self.tabs[i];
             // The URL bar spans the full width; below it the request pane (left)
             // and response pane (right) share a horizontal split — Bruno's layout.
+            // Request pane: fixed width once the split has been dragged, else
+            // an even half. The divider between the panes is draggable.
+            let req_pane = {
+                let p = div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(self.req_subtabs(tab, cx))
+                    .child(self.req_content(tab, cx));
+                match self.split_req_w {
+                    Some(w) => p.w(px(w)),
+                    None => p.flex_1(),
+                }
+            };
+            let divider = div()
+                .w(px(6.))
+                .h_full()
+                .bg(if self.split_dragging {
+                    theme::accent()
+                } else {
+                    theme::border1()
+                })
+                .hover(|s| s.bg(theme::accent()))
+                .cursor(gpui::CursorStyle::ResizeLeftRight)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseDownEvent, _w, cx| {
+                        this.split_dragging = true;
+                        cx.notify();
+                    }),
+                );
             div()
                 .flex()
                 .flex_col()
@@ -5539,18 +5581,8 @@ impl Render for BruApp {
                         .flex_1()
                         .min_h_0()
                         .w_full()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .flex_1()
-                                .min_w_0()
-                                .min_h_0()
-                                .border_r_1()
-                                .border_color(theme::border1())
-                                .child(self.req_subtabs(tab, cx))
-                                .child(self.req_content(tab, cx)),
-                        )
+                        .child(req_pane)
+                        .child(divider)
                         .child(
                             div()
                                 .flex()
@@ -5585,6 +5617,25 @@ impl Render for BruApp {
             .on_action(cx.listener(Self::on_send_action))
             .on_action(cx.listener(Self::on_escape_action))
             .on_action(cx.listener(Self::on_palette_action))
+            .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, cx| {
+                if this.split_dragging {
+                    let total = f32::from(window.viewport_size().width);
+                    // The split row begins just after the fixed 280px sidebar.
+                    let x = f32::from(ev.position.x);
+                    let max = (total - 280.0 - 260.0).max(240.0);
+                    this.split_req_w = Some((x - 280.0).clamp(240.0, max));
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                    if this.split_dragging {
+                        this.split_dragging = false;
+                        cx.notify();
+                    }
+                }),
+            )
             .relative()
             .flex()
             .flex_col()
