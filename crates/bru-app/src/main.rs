@@ -328,6 +328,9 @@ struct BruApp {
     dirty: HashSet<PathBuf>,
     /// Close-confirmation for a dirty tab (the tab index).
     confirm_close: Option<usize>,
+    /// JSONPath response-filter input + its current query.
+    resp_filter: Entity<CodeEditor>,
+    resp_filter_query: String,
 }
 
 /// A right-click menu over a sidebar entry, anchored at the click point.
@@ -596,6 +599,94 @@ fn run_blocking(
         };
         bru_engine::run_request(&file, &mut ctx).await
     })
+}
+
+/// A step in a JSONPath-ish query.
+enum PathStep {
+    Key(String),
+    Index(usize),
+    Wild,
+}
+
+/// Tokenize a JSONPath-ish query (`$.a.b[0].c[*]`) into steps. Ported from iced.
+fn json_path_tokens(q: &str) -> Vec<PathStep> {
+    fn flush(buf: &mut String, steps: &mut Vec<PathStep>) {
+        let s = buf.trim();
+        if !s.is_empty() {
+            steps.push(if s == "*" {
+                PathStep::Wild
+            } else {
+                PathStep::Key(s.to_string())
+            });
+        }
+        buf.clear();
+    }
+    let mut steps = Vec::new();
+    let mut buf = String::new();
+    let mut chars = q.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '.' => flush(&mut buf, &mut steps),
+            '[' => {
+                flush(&mut buf, &mut steps);
+                let mut inner = String::new();
+                for d in chars.by_ref() {
+                    if d == ']' {
+                        break;
+                    }
+                    inner.push(d);
+                }
+                let inner = inner.trim().trim_matches(|c| c == '"' || c == '\'');
+                if inner == "*" {
+                    steps.push(PathStep::Wild);
+                } else if let Ok(i) = inner.parse::<usize>() {
+                    steps.push(PathStep::Index(i));
+                } else if !inner.is_empty() {
+                    steps.push(PathStep::Key(inner.to_string()));
+                }
+            }
+            _ => buf.push(c),
+        }
+    }
+    flush(&mut buf, &mut steps);
+    steps
+}
+
+/// Resolve a JSONPath-ish query against a value (supports `.key`, `[i]`, `[*]`).
+fn json_path(v: &serde_json::Value, query: &str) -> Option<serde_json::Value> {
+    use serde_json::Value as J;
+    let q = query.trim();
+    let q = q.strip_prefix('$').unwrap_or(q);
+    let mut cur: Vec<J> = vec![v.clone()];
+    for step in json_path_tokens(q) {
+        let mut next = Vec::new();
+        for node in &cur {
+            match (&step, node) {
+                (PathStep::Key(k), J::Object(m)) => {
+                    if let Some(child) = m.get(k) {
+                        next.push(child.clone());
+                    }
+                }
+                (PathStep::Index(i), J::Array(a)) => {
+                    if let Some(child) = a.get(*i) {
+                        next.push(child.clone());
+                    }
+                }
+                (PathStep::Wild, J::Array(a)) => next.extend(a.iter().cloned()),
+                (PathStep::Wild, J::Object(m)) => next.extend(m.values().cloned()),
+                _ => {}
+            }
+        }
+        cur = next;
+        if cur.is_empty() {
+            return None;
+        }
+    }
+    match cur.len() {
+        0 => None,
+        1 => cur.into_iter().next(),
+        _ => Some(J::Array(cur)),
+    }
 }
 
 /// The text content of a `BlockContent::Text` block, or empty.
@@ -909,6 +1000,13 @@ impl BruApp {
             cx.notify();
         })
         .detach();
+        let resp_filter = cx.new(|cx| CodeEditor::single_line(cx, ""));
+        // Live JSONPath filter of the response body.
+        cx.subscribe(&resp_filter, |this, ed, _ev: &editor::Changed, cx| {
+            this.resp_filter_query = ed.read(cx).text().trim().to_string();
+            cx.notify();
+        })
+        .detach();
         Self {
             dir,
             collection,
@@ -951,6 +1049,8 @@ impl BruApp {
             collapsed: HashSet::new(),
             dirty: HashSet::new(),
             confirm_close: None,
+            resp_filter,
+            resp_filter_query: String::new(),
         }
     }
 
@@ -2662,6 +2762,34 @@ impl BruApp {
                         .text_color(theme::subtext())
                         .child(human_size(r.body.len())),
                 )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(theme::muted())
+                                .font_family("monospace")
+                                .child("$"),
+                        )
+                        .child(
+                            div()
+                                .w(px(170.))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(theme::input_bg())
+                                .border_1()
+                                .border_color(theme::border1())
+                                .font_family("monospace")
+                                .text_size(px(12.))
+                                .child(self.resp_filter.clone()),
+                        ),
+                )
                 .child(ghost_btn("Copy").on_mouse_up(
                     MouseButton::Left,
                     cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.copy_response(cx)),
@@ -2692,10 +2820,21 @@ impl BruApp {
                 match (is_json, o.response.as_ref()) {
                     (true, Some(r)) => {
                         let raw = String::from_utf8_lossy(&r.body).to_string();
-                        let pretty = serde_json::from_str::<serde_json::Value>(&raw)
-                            .ok()
-                            .and_then(|v| serde_json::to_string_pretty(&v).ok())
-                            .unwrap_or(raw);
+                        let pretty = match serde_json::from_str::<serde_json::Value>(&raw) {
+                            Ok(v) => {
+                                // Apply the JSONPath filter, if any.
+                                let shown = if self.resp_filter_query.is_empty() {
+                                    Some(v)
+                                } else {
+                                    json_path(&v, &self.resp_filter_query)
+                                };
+                                match shown {
+                                    Some(val) => serde_json::to_string_pretty(&val).unwrap_or(raw),
+                                    None => "(no match)".to_string(),
+                                }
+                            }
+                            Err(_) => raw,
+                        };
                         let mut base = window.text_style();
                         base.font_family = "monospace".into();
                         base.color = theme::text();
