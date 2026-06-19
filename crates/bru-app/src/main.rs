@@ -306,6 +306,10 @@ struct BruApp {
     rename: Option<RenameState>,
     /// Delete confirmation: (target, is_dir, display name).
     confirm_delete: Option<(PathBuf, bool, String)>,
+    /// The active environment applied to sends/runs (None = no environment).
+    selected_env: Option<String>,
+    /// Env-picker dropdown anchored at this point (None = closed).
+    env_menu: Option<Point<Pixels>>,
 }
 
 /// A right-click menu over a sidebar entry, anchored at the click point.
@@ -523,6 +527,7 @@ fn run_blocking(
     script_dir: Option<PathBuf>,
     opts: bru_http::SendOptions,
     global_vars: HashMap<String, String>,
+    env: Option<String>,
 ) -> bru_engine::RunOutcome {
     let errout = |e: String| bru_engine::RunOutcome::errored("request".to_string(), e);
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -537,9 +542,9 @@ fn run_blocking(
             Ok(c) => c,
             Err(e) => return errout(e.to_string()),
         };
-        // Vault secrets are the base layer; collection vars override them.
+        // Vault secrets are the base layer; collection + selected-env vars override.
         let mut vars = global_vars;
-        for (k, v) in bru_engine::base_vars(&dir, None) {
+        for (k, v) in bru_engine::base_vars(&dir, env.as_deref()) {
             vars.insert(k, v);
         }
         let mut ctx = bru_engine::RunContext {
@@ -768,6 +773,7 @@ fn run_folder_blocking(
     vars_base: PathBuf,
     opts: bru_http::SendOptions,
     global_vars: HashMap<String, String>,
+    env: Option<String>,
 ) -> Vec<RunResult> {
     let err_row = |name: &str, e: String| RunResult {
         name: name.to_string(),
@@ -789,7 +795,7 @@ fn run_folder_blocking(
             Err(e) => return vec![err_row("client", e.to_string())],
         };
         let mut vars = global_vars;
-        for (k, v) in bru_engine::base_vars(&vars_base, None) {
+        for (k, v) in bru_engine::base_vars(&vars_base, env.as_deref()) {
             vars.insert(k, v);
         }
         let mut ctx = bru_engine::RunContext {
@@ -890,7 +896,82 @@ impl BruApp {
             ctx_menu: None,
             rename: None,
             confirm_delete: None,
+            selected_env: None,
+            env_menu: None,
         }
+    }
+
+    // ── active environment selector ───────────────────────────────────────────
+    fn open_env_menu(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        self.env_menu = Some(pos);
+        cx.notify();
+    }
+    fn close_env_menu(&mut self, cx: &mut Context<Self>) {
+        if self.env_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+    fn select_env(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.selected_env = name;
+        self.env_menu = None;
+        cx.notify();
+    }
+
+    /// The active-environment dropdown (anchored under the toolbar chip).
+    fn env_menu_overlay(&self, cx: &mut Context<Self>) -> Div {
+        let Some(pos) = self.env_menu else {
+            return div();
+        };
+        let item = |label: String, active: bool| {
+            div()
+                .px_3()
+                .py_1()
+                .text_size(px(12.))
+                .text_color(if active {
+                    theme::accent()
+                } else {
+                    theme::text()
+                })
+                .hover(|s| s.bg(theme::surface0()))
+                .child(label)
+        };
+        let mut card = div()
+            .absolute()
+            .left(pos.x)
+            .top(pos.y)
+            .occlude()
+            .flex()
+            .flex_col()
+            .py_1()
+            .w(px(200.))
+            .rounded_md()
+            .bg(theme::mantle())
+            .border_1()
+            .border_color(theme::border2())
+            .child(
+                item("No Environment".into(), self.selected_env.is_none()).on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.select_env(None, cx)),
+                ),
+            );
+        for name in envfs::scan_envs(&self.dir) {
+            let active = self.selected_env.as_deref() == Some(name.as_str());
+            let n = name.clone();
+            card = card.child(item(name, active).on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                    this.select_env(Some(n.clone()), cx)
+                }),
+            ));
+        }
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseDownEvent, _w, cx| this.close_env_menu(cx)),
+            )
+            .child(card)
     }
 
     fn go_home(&mut self, cx: &mut Context<Self>) {
@@ -1577,9 +1658,10 @@ impl BruApp {
         let vars_base = self.dir.clone();
         let opts = self.send_options();
         let globals = self.vault_vars();
+        let env = self.selected_env.clone();
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_folder_blocking(files, vars_base, opts, globals));
+            let _ = tx.send(run_folder_blocking(files, vars_base, opts, globals, env));
         });
         cx.spawn(async move |this, cx| {
             let result = rx.await;
@@ -1847,11 +1929,12 @@ impl BruApp {
         let script_dir = path.parent().map(Path::to_path_buf);
         let opts = self.send_options();
         let globals = self.vault_vars();
+        let env = self.selected_env.clone();
         self.tabs[i].sending = true;
         self.status = "Sending\u{2026}".into();
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_blocking(file, dir, script_dir, opts, globals));
+            let _ = tx.send(run_blocking(file, dir, script_dir, opts, globals, env));
         });
         cx.spawn(async move |this, cx| {
             let result = rx.await;
@@ -1995,12 +2078,24 @@ impl BruApp {
                     .child("\u{2022} main"),
             )
             .child(div().flex_1())
-            .child(
-                div()
-                    .text_color(theme::muted())
-                    .text_size(px(12.))
-                    .child("Env:"),
-            )
+            .child({
+                let label = match &self.selected_env {
+                    Some(e) => format!("Env: {e}"),
+                    None => "Env: none".to_string(),
+                };
+                chip(&label)
+                    .text_color(if self.selected_env.is_some() {
+                        theme::accent()
+                    } else {
+                        theme::muted()
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, ev: &MouseDownEvent, _w, cx| {
+                            this.open_env_menu(ev.position, cx);
+                        }),
+                    )
+            })
             .child(chip("Environments").on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.env_open(cx)),
@@ -3805,6 +3900,9 @@ impl Render for BruApp {
         }
         if self.rename.is_some() {
             root = root.child(self.rename_overlay(cx));
+        }
+        if self.env_menu.is_some() {
+            root = root.child(self.env_menu_overlay(cx));
         }
         // The context menu sits on top so it overlays everything else.
         if self.ctx_menu.is_some() {

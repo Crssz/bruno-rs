@@ -5,3 +5,6 @@
 *.pdb
 *.log
 .DS_Store
+
+# local reference snapshot of the deleted iced app (for porting)
+.iced-ref/
