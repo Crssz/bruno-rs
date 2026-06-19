@@ -3182,7 +3182,7 @@ impl BruApp {
             .w_full()
             .px_3()
             .py_2()
-            .bg(theme::mantle())
+            .bg(theme::bg())
             .border_b_1()
             .border_color(theme::border1())
             .child(icon_chip("\u{2302}").on_mouse_up(
@@ -3235,16 +3235,42 @@ impl BruApp {
             )
             .child(div().flex_1())
             .child({
-                let label = match &self.selected_env {
-                    Some(e) => format!("Env: {e}"),
-                    None => "Env: none".to_string(),
+                // Bruno's environment selector: a bordered pill with a status dot
+                // (green when an env is active) + caret.
+                let (label, has) = match &self.selected_env {
+                    Some(e) => (e.clone(), true),
+                    None => ("No Environment".to_string(), false),
                 };
-                chip(&label)
-                    .text_color(if self.selected_env.is_some() {
-                        theme::accent()
-                    } else {
-                        theme::muted()
-                    })
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme::surface0())
+                    .border_1()
+                    .border_color(theme::border1())
+                    .text_size(px(12.))
+                    .child(
+                        div()
+                            .w(px(7.))
+                            .h(px(7.))
+                            .rounded_full()
+                            .bg(if has { theme::green() } else { theme::muted() }),
+                    )
+                    .child(
+                        div()
+                            .text_color(if has { theme::text() } else { theme::muted() })
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme::muted())
+                            .text_size(px(10.))
+                            .child("\u{25BE}"),
+                    )
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, ev: &MouseDownEvent, _w, cx| {
@@ -3647,9 +3673,9 @@ impl BruApp {
             .items_center()
             .w_full()
             .px_2()
-            .bg(theme::surface0())
+            .bg(theme::bg())
             .border_b_1()
-            .border_color(theme::border2());
+            .border_color(theme::border1());
         for rt in RespTab::ALL {
             let active = tab.resp_tab == rt;
             // Headers tab shows a count badge; Tests tab shows passed/total.
@@ -3835,15 +3861,24 @@ impl BruApp {
                     .into_any_element()
             }
             (Some(o), RespTab::Headers) => {
-                let mut col = div().flex().flex_col().gap_1();
+                let mut col = div()
+                    .flex()
+                    .flex_col()
+                    .border_1()
+                    .border_color(theme::border0())
+                    .rounded_md()
+                    .overflow_hidden();
                 match &o.response {
                     Some(r) => {
-                        for (k, v) in &r.headers {
+                        for (i, (k, v)) in r.headers.iter().enumerate() {
                             col = col.child(
                                 div()
                                     .flex()
                                     .flex_row()
                                     .gap_2()
+                                    .px_2()
+                                    .py_1()
+                                    .when(i % 2 == 1, |d| d.bg(theme::mantle()))
                                     .child(
                                         div()
                                             .w(px(200.))
@@ -3855,6 +3890,7 @@ impl BruApp {
                                     .child(
                                         div()
                                             .flex_1()
+                                            .min_w_0()
                                             .font_family("monospace")
                                             .text_size(px(12.))
                                             .text_color(theme::text())
@@ -3864,7 +3900,8 @@ impl BruApp {
                         }
                     }
                     None => {
-                        col = col.child(div().text_color(theme::muted()).child("(no response)"))
+                        col = col
+                            .child(div().p_2().text_color(theme::muted()).child("(no response)"))
                     }
                 }
                 scroll("resp-headers").child(col).into_any_element()
