@@ -417,6 +417,8 @@ struct BruApp {
     sidebar_dragging: bool,
     /// Method-picker dropdown anchored at this point (None = closed).
     method_menu: Option<Point<Pixels>>,
+    /// Body/auth mode dropdown: (anchor, is_body). None = closed.
+    mode_menu: Option<(Point<Pixels>, bool)>,
 }
 
 /// A right-click menu over a sidebar entry, anchored at the click point.
@@ -958,12 +960,6 @@ fn auth_block_name(mode: &str) -> Option<&'static str> {
     })
 }
 
-/// Next mode in a cycle list after `current` (wraps to the start).
-fn cycle_next(list: &[&str], current: &str) -> String {
-    let i = list.iter().position(|m| *m == current).unwrap_or(0);
-    list[(i + 1) % list.len()].to_string()
-}
-
 /// Build structured grid rows (name/value single-line editors + enabled) from a
 /// Dict block, for the params/headers tabs.
 fn build_kv_rows(file: &BruFile, block: &str, cx: &mut Context<BruApp>) -> Vec<KvRow> {
@@ -1422,6 +1418,7 @@ impl BruApp {
             sidebar_w: 280.0,
             sidebar_dragging: false,
             method_menu: None,
+            mode_menu: None,
         }
     }
 
@@ -1559,6 +1556,7 @@ impl BruApp {
             || self.ctx_menu.take().is_some()
             || self.env_menu.take().is_some()
             || self.method_menu.take().is_some()
+            || self.mode_menu.take().is_some()
         {
             // one of the lightweight popovers was closed
         } else if self.curl_open {
@@ -1667,6 +1665,85 @@ impl BruApp {
         }
         self.method_menu = None;
         cx.notify();
+    }
+
+    fn open_mode_menu(&mut self, pos: Point<Pixels>, is_body: bool, cx: &mut Context<Self>) {
+        self.mode_menu = Some((pos, is_body));
+        cx.notify();
+    }
+    fn close_mode_menu(&mut self, cx: &mut Context<Self>) {
+        if self.mode_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+    fn pick_mode(&mut self, mode: &str, is_body: bool, cx: &mut Context<Self>) {
+        if is_body {
+            self.set_body_mode(mode, cx);
+        } else {
+            self.set_auth_mode(mode, cx);
+        }
+        self.mode_menu = None;
+        cx.notify();
+    }
+
+    /// The body/auth mode dropdown (anchored under the sub-tab-strip chip).
+    fn mode_menu_overlay(&self, cx: &mut Context<Self>) -> Div {
+        let Some((pos, is_body)) = self.mode_menu else {
+            return div();
+        };
+        let (list, field) = if is_body {
+            (BODY_MODES, "body")
+        } else {
+            (AUTH_MODES, "auth")
+        };
+        let cur = self
+            .active_tab()
+            .and_then(|t| edit::method_field(&t.file, field))
+            .unwrap_or_else(|| "none".into());
+        let mut card = div()
+            .absolute()
+            .left(pos.x)
+            .top(pos.y)
+            .occlude()
+            .flex()
+            .flex_col()
+            .py_1()
+            .w(px(170.))
+            .rounded_md()
+            .bg(theme::mantle())
+            .border_1()
+            .border_color(theme::border2());
+        for m in list {
+            let m = *m;
+            let active = m == cur;
+            card = card.child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_size(px(12.))
+                    .text_color(if active {
+                        theme::accent()
+                    } else {
+                        theme::text()
+                    })
+                    .hover(|s| s.bg(theme::surface0()))
+                    .child(m)
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                            this.pick_mode(m, is_body, cx)
+                        }),
+                    ),
+            );
+        }
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseDownEvent, _w, cx| this.close_mode_menu(cx)),
+            )
+            .child(card)
     }
 
     /// The method-picker dropdown (anchored under the URL-bar method badge).
@@ -4106,27 +4183,19 @@ impl BruApp {
         // A mode-cycle chip pinned right when the Body/Auth tab is active.
         if matches!(tab.req_tab, ReqTab::Body | ReqTab::Auth) {
             let is_body = tab.req_tab == ReqTab::Body;
-            let (field, list, prefix) = if is_body {
-                ("body", BODY_MODES, "Body")
+            let (field, prefix) = if is_body {
+                ("body", "Body")
             } else {
-                ("auth", AUTH_MODES, "Auth")
+                ("auth", "Auth")
             };
             let cur = edit::method_field(&tab.file, field).unwrap_or_else(|| "none".into());
             strip =
                 strip
                     .child(div().flex_1())
-                    .child(chip(&format!("{prefix}: {cur}")).on_mouse_up(
+                    .child(chip(&format!("{prefix}: {cur}")).on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
-                            let Some(i) = this.active else { return };
-                            let cur =
-                                edit::method_field(&this.tabs[i].file, field).unwrap_or_default();
-                            let next = cycle_next(list, &cur);
-                            if is_body {
-                                this.set_body_mode(&next, cx);
-                            } else {
-                                this.set_auth_mode(&next, cx);
-                            }
+                        cx.listener(move |this, ev: &MouseDownEvent, _w, cx| {
+                            this.open_mode_menu(ev.position, is_body, cx);
                         }),
                     ));
         }
@@ -5772,6 +5841,9 @@ impl Render for BruApp {
         }
         if self.method_menu.is_some() {
             root = root.child(self.method_menu_overlay(cx));
+        }
+        if self.mode_menu.is_some() {
+            root = root.child(self.mode_menu_overlay(cx));
         }
         if self.palette_open {
             root = root.child(self.palette_overlay(cx));
