@@ -292,6 +292,8 @@ struct BruApp {
     vault_input: Entity<CodeEditor>,
     vault_rows: Vec<(Entity<CodeEditor>, Entity<CodeEditor>)>,
     vault_error: Option<String>,
+    /// Reveal-secrets eye: when true, secret values render in clear (vault + env).
+    reveal_secrets: bool,
     /// Recently-opened collections + a Home-screen toggle.
     recent: Vec<String>,
     home: bool,
@@ -813,6 +815,7 @@ impl BruApp {
             vault_input: cx.new(|cx| CodeEditor::single_line(cx, "")),
             vault_rows: Vec::new(),
             vault_error: None,
+            reveal_secrets: false,
             recent: load_recent(),
             home: false,
             search,
@@ -866,6 +869,7 @@ impl BruApp {
     }
     fn vault_unlock(&mut self, cx: &mut Context<Self>) {
         let pw = self.vault_input.read(cx).text().to_string();
+        let reveal = self.reveal_secrets;
         match vault::load(&pw) {
             Ok(map) => {
                 let mut rows: Vec<(String, String)> =
@@ -876,7 +880,13 @@ impl BruApp {
                     .map(|(k, v)| {
                         (
                             cx.new(|cx| CodeEditor::single_line(cx, &k)),
-                            cx.new(|cx| CodeEditor::single_line(cx, &v)),
+                            cx.new(|cx| {
+                                if reveal {
+                                    CodeEditor::single_line(cx, &v)
+                                } else {
+                                    CodeEditor::masked_line(cx, &v)
+                                }
+                            }),
                         )
                     })
                     .collect();
@@ -895,10 +905,34 @@ impl BruApp {
         cx.notify();
     }
     fn vault_add_row(&mut self, cx: &mut Context<Self>) {
+        let reveal = self.reveal_secrets;
         self.vault_rows.push((
             cx.new(|cx| CodeEditor::single_line(cx, "")),
-            cx.new(|cx| CodeEditor::single_line(cx, "")),
+            cx.new(|cx| {
+                if reveal {
+                    CodeEditor::single_line(cx, "")
+                } else {
+                    CodeEditor::masked_line(cx, "")
+                }
+            }),
         ));
+        cx.notify();
+    }
+
+    /// Flip the reveal-secrets eye and re-mask/unmask every value editor live.
+    fn toggle_reveal_secrets(&mut self, cx: &mut Context<Self>) {
+        self.reveal_secrets = !self.reveal_secrets;
+        let reveal = self.reveal_secrets;
+        for (_, v) in &self.vault_rows {
+            v.update(cx, |ed, cx| ed.set_masked(!reveal, cx));
+        }
+        if let Some(env) = &self.env {
+            for row in &env.rows {
+                if row.secret {
+                    row.value.update(cx, |ed, cx| ed.set_masked(!reveal, cx));
+                }
+            }
+        }
         cx.notify();
     }
     fn vault_remove_row(&mut self, i: usize, cx: &mut Context<Self>) {
@@ -1121,11 +1155,18 @@ impl BruApp {
 
     // ── environment manager ──────────────────────────────────────────────────
     fn env_build_rows(&self, name: &str, cx: &mut Context<Self>) -> Vec<EnvRowState> {
+        let reveal = self.reveal_secrets;
         envfs::load_env_rows(&self.dir, name)
             .into_iter()
             .map(|r| EnvRowState {
                 name: cx.new(|cx| CodeEditor::single_line(cx, &r.name)),
-                value: cx.new(|cx| CodeEditor::single_line(cx, &r.value)),
+                value: cx.new(|cx| {
+                    if r.secret && !reveal {
+                        CodeEditor::masked_line(cx, &r.value)
+                    } else {
+                        CodeEditor::single_line(cx, &r.value)
+                    }
+                }),
                 enabled: r.enabled,
                 secret: r.secret,
             })
@@ -1209,9 +1250,12 @@ impl BruApp {
     }
 
     fn env_toggle_secret(&mut self, i: usize, cx: &mut Context<Self>) {
+        let reveal = self.reveal_secrets;
         if let Some(ed) = &mut self.env {
             if let Some(r) = ed.rows.get_mut(i) {
                 r.secret = !r.secret;
+                let mask = r.secret && !reveal;
+                r.value.update(cx, |ed, cx| ed.set_masked(mask, cx));
             }
         }
         cx.notify();
@@ -2023,7 +2067,16 @@ impl BruApp {
                     .child("Secrets Vault"),
             )
             .when(unlocked, |d| {
-                d.child(ghost_btn("Lock").on_mouse_up(
+                let eye = if self.reveal_secrets {
+                    "\u{1F441} Hide"
+                } else {
+                    "\u{1F441} Reveal"
+                };
+                d.child(ghost_btn(eye).on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.toggle_reveal_secrets(cx)),
+                ))
+                .child(ghost_btn("Lock").on_mouse_up(
                     MouseButton::Left,
                     cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.vault_lock(cx)),
                 ))
@@ -2949,6 +3002,19 @@ impl BruApp {
                             .font_weight(gpui::FontWeight::BOLD)
                             .child("Environments"),
                     )
+                    .child({
+                        let eye = if self.reveal_secrets {
+                            "\u{1F441} Hide"
+                        } else {
+                            "\u{1F441} Reveal"
+                        };
+                        ghost_btn(eye).on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                                this.toggle_reveal_secrets(cx)
+                            }),
+                        )
+                    })
                     .child(ghost_btn("Close").on_mouse_up(
                         MouseButton::Left,
                         cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.env_close(cx)),

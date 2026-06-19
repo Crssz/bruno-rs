@@ -88,6 +88,8 @@ pub struct CodeEditor {
     lang: Lang,
     /// One line tall; Enter/Tab suppressed, paste/IME strip newlines. For the URL.
     single_line: bool,
+    /// Render each glyph as a same-byte-length mask char (for secret values).
+    masked: bool,
     /// Cached tree-sitter highlight spans (recomputed on every content change).
     spans: Vec<(Range<usize>, HighlightStyle)>,
     // Layout caches (filled during paint) for mouse mapping.
@@ -106,6 +108,7 @@ impl CodeEditor {
             is_selecting: false,
             lang: Lang::Plain,
             single_line: false,
+            masked: false,
             spans: Vec::new(),
             line_layouts: Vec::new(),
             bounds: None,
@@ -120,6 +123,21 @@ impl CodeEditor {
         let mut ed = Self::new(cx, text);
         ed.single_line = true;
         ed
+    }
+
+    /// A single-line variant whose glyphs render masked (for secret values).
+    pub fn masked_line(cx: &mut Context<Self>, text: &str) -> Self {
+        let mut ed = Self::single_line(cx, text);
+        ed.masked = true;
+        ed
+    }
+
+    /// Toggle masked rendering (e.g. a reveal-secrets eye). Content is unchanged.
+    pub fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {
+        if self.masked != masked {
+            self.masked = masked;
+            cx.notify();
+        }
     }
 
     /// Replace the (single-line) content, keeping single-line mode.
@@ -576,6 +594,26 @@ fn build_line_runs(
     runs
 }
 
+/// Replace each character with a mask glyph of the **same UTF-8 byte length**,
+/// so every byte-offset computation (cursor, selection, hit-testing) stays valid
+/// against the real `content` while the display hides it. Newlines pass through
+/// to keep line boundaries intact.
+fn mask_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        out.push(match ch {
+            '\n' => '\n',
+            _ => match ch.len_utf8() {
+                1 => '*',
+                2 => '\u{00B7}',  // · middle dot (2 bytes)
+                3 => '\u{2022}',  // • bullet (3 bytes)
+                _ => '\u{10000}', // 𐀀 (4 bytes) — fallback; secrets are ~never 4-byte
+            },
+        });
+    }
+    out
+}
+
 /// The custom element that shapes lines and paints cursor/selection.
 struct EditorElement {
     editor: Entity<CodeEditor>,
@@ -645,12 +683,17 @@ impl Element for EditorElement {
         let mut lines = Vec::new();
         for (i, line) in editor.content.split('\n').enumerate() {
             let runs = build_line_runs(line, starts[i], &editor.spans, &font, text_color);
-            let shaped = window.text_system().shape_line(
-                gpui::SharedString::from(line.to_string()),
-                font_size,
-                &runs,
-                None,
-            );
+            // Mask preserves each char's byte length, so `runs` (built from the
+            // real line) still line up with the shaped display string.
+            let display = if editor.masked {
+                mask_str(line)
+            } else {
+                line.to_string()
+            };
+            let shaped =
+                window
+                    .text_system()
+                    .shape_line(gpui::SharedString::from(display), font_size, &runs, None);
             lines.push((shaped, starts[i]));
         }
 
