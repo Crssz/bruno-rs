@@ -63,8 +63,8 @@ impl ReqTab {
     }
 }
 use gpui::{
-    div, prelude::*, px, size, App, Bounds, Context, Div, Entity, MouseButton, MouseDownEvent,
-    MouseUpEvent, Pixels, Point, StyledText, Window, WindowBounds, WindowOptions,
+    div, prelude::*, px, size, App, Bounds, Context, Div, Entity, Focusable, MouseButton,
+    MouseDownEvent, MouseUpEvent, Pixels, Point, StyledText, Window, WindowBounds, WindowOptions,
 };
 use gpui_platform::application;
 
@@ -729,6 +729,36 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Build a `curl` command for the request — method, URL, headers, and body —
+/// for the "</>" generate-code affordance (copied to the clipboard).
+fn to_curl(tab: &OpenTab, cx: &App) -> String {
+    let method = if tab.method.is_empty() {
+        "GET".to_string()
+    } else {
+        tab.method.to_uppercase()
+    };
+    let url = tab.url_input.read(cx).text().trim().to_string();
+    let mut out = format!("curl -X {method} '{url}'");
+    for line in edit::dict_to_lines(&tab.file, "headers").lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('~') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            out.push_str(&format!(" \\\n  -H '{}: {}'", k.trim(), v.trim()));
+        }
+    }
+    if let Some(b) = tab.file.blocks.iter().find(|b| b.name.starts_with("body:")) {
+        if let BlockContent::Text(body) = &b.content {
+            if !body.trim().is_empty() {
+                let esc = body.replace('\'', "'\\''");
+                out.push_str(&format!(" \\\n  --data '{esc}'"));
+            }
+        }
+    }
+    out
 }
 
 /// Run request files sequentially through one shared RunContext (Bruno's folder
@@ -2200,7 +2230,17 @@ impl BruApp {
                     .font_family("monospace")
                     .child(tab.url_input.clone()),
             )
-            .child(icon_chip("</>"))
+            .child(icon_chip("</>").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                    let curl = this.active_tab().map(|tab| to_curl(tab, cx));
+                    if let Some(curl) = curl {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(curl));
+                        this.status = "Copied curl to clipboard".into();
+                        cx.notify();
+                    }
+                }),
+            ))
             .child(chip("Save").on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _ev: &MouseUpEvent, _w, cx| {
@@ -3492,7 +3532,7 @@ impl BruApp {
                 div()
                     .text_size(px(28.))
                     .text_color(theme::accent())
-                    .child("bru-gpui"),
+                    .child("bruno-rs"),
             )
             .child(
                 div()
@@ -3644,7 +3684,7 @@ impl BruApp {
         strip
     }
 
-    fn status_bar(&self) -> Div {
+    fn status_bar(&self, cx: &mut Context<Self>) -> Div {
         div()
             .flex()
             .flex_row()
@@ -3664,9 +3704,21 @@ impl BruApp {
                     .child(self.status.clone()),
             )
             .child(div().flex_1())
-            .child(icon_chip("Search"))
-            .child(icon_chip("Cookies"))
-            .child(icon_chip("Dev Tools"))
+            .child(icon_chip("Search").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, window, cx| {
+                    let h = this.search.read(cx).focus_handle(cx);
+                    window.focus(&h, cx);
+                }),
+            ))
+            .child(icon_chip("Cookies").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_cookies(cx)),
+            ))
+            .child(icon_chip("Dev Tools").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.toggle_devtools(cx)),
+            ))
             .child(
                 div()
                     .text_color(theme::muted())
@@ -3726,7 +3778,7 @@ impl Render for BruApp {
                     .child(self.sidebar(cx))
                     .child(center),
             )
-            .child(self.status_bar());
+            .child(self.status_bar(cx));
         if self.env.is_some() {
             root = root.child(self.env_overlay(cx));
         }
