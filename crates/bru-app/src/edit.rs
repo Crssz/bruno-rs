@@ -210,6 +210,15 @@ pub fn set_meta_name(file: &mut BruFile, name: &str) {
     }
 }
 
+/// Set the `seq` entry of the `meta` block (used to reorder sibling requests).
+pub fn set_meta_seq(file: &mut BruFile, seq: i64) {
+    if let Some(b) = file.blocks.iter_mut().find(|b| b.name == "meta") {
+        if let BlockContent::Dict(entries) = &mut b.content {
+            set_inline_entry(entries, "seq", &seq.to_string());
+        }
+    }
+}
+
 /// Render a Dict block as editable `key: value` lines (`~` prefix for disabled).
 /// Empty string for an absent or non-Dict block.
 pub fn dict_to_lines(file: &BruFile, block: &str) -> String {

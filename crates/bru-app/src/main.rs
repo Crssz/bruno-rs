@@ -1128,6 +1128,16 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Rewrite a request file's `meta.seq` in place (for sibling reordering).
+fn set_seq_in_file(path: &Path, seq: i64) {
+    if let Ok(text) = std::fs::read_to_string(path) {
+        if let Ok(mut f) = bru_lang::parse(&text) {
+            edit::set_meta_seq(&mut f, seq);
+            let _ = std::fs::write(path, bru_lang::serialize(&f));
+        }
+    }
+}
+
 /// Reveal a path in the OS file manager (Explorer on Windows, Finder on macOS).
 fn reveal_in_file_manager(path: &Path) {
     #[cfg(target_os = "windows")]
@@ -1801,6 +1811,47 @@ impl BruApp {
         }
     }
 
+    /// Move the menu's request up/down among its siblings (rewrites meta.seq).
+    fn ctx_move(&mut self, delta: i64, cx: &mut Context<Self>) {
+        let Some(menu) = self.ctx_menu.take() else {
+            return;
+        };
+        let path = menu.target;
+        let Some(dir) = path.parent() else { return };
+        // Sibling requests in display order, via the loaded tree.
+        let mut reqs: Vec<(PathBuf, i64, String)> = {
+            let Some(tree) = &self.collection else { return };
+            let folder = if dir == self.dir {
+                Some(&tree.root)
+            } else {
+                find_folder(&tree.root, dir)
+            };
+            let Some(folder) = folder else { return };
+            folder
+                .requests
+                .iter()
+                .map(|r| (r.path.clone(), r.seq.unwrap_or(i64::MAX), r.name.clone()))
+                .collect()
+        };
+        reqs.sort_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then_with(|| a.2.to_lowercase().cmp(&b.2.to_lowercase()))
+        });
+        let Some(idx) = reqs.iter().position(|(p, _, _)| *p == path) else {
+            return;
+        };
+        let target = (idx as i64 + delta).clamp(0, reqs.len() as i64 - 1) as usize;
+        if target == idx {
+            return;
+        }
+        let item = reqs.remove(idx);
+        reqs.insert(target, item);
+        for (i, (p, _, _)) in reqs.iter().enumerate() {
+            set_seq_in_file(p, (i + 1) as i64);
+        }
+        self.reload_collection(cx);
+    }
+
     fn start_rename(&mut self, cx: &mut Context<Self>) {
         let Some(menu) = self.ctx_menu.take() else {
             return;
@@ -1948,6 +1999,14 @@ impl BruApp {
                 .child(item("Run").on_mouse_up(
                     MouseButton::Left,
                     cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_run_request(cx)),
+                ))
+                .child(item("Move Up").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_move(-1, cx)),
+                ))
+                .child(item("Move Down").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_move(1, cx)),
                 ));
         }
         card = card
