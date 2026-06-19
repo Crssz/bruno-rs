@@ -1999,6 +1999,20 @@ impl BruApp {
                 MouseButton::Left,
                 cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_prefs(cx)),
             ))
+            .child(
+                icon_chip(if theme::is_dark() {
+                    "\u{2600}" // ☀ — click for light
+                } else {
+                    "\u{263E}" // ☾ — click for dark
+                })
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|_this, _e: &MouseUpEvent, _w, cx| {
+                        theme::toggle();
+                        cx.notify();
+                    }),
+                ),
+            )
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> Div {

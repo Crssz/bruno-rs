@@ -9,6 +9,8 @@ use std::ops::Range;
 use gpui::{rgb, HighlightStyle, Hsla};
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
+use crate::theme;
+
 /// Capture names requested from tree-sitter; `configure` prefix-matches the
 /// grammar's query captures, so the most specific name wins.
 const NAMES: &[&str] = &[
@@ -25,14 +27,27 @@ const NAMES: &[&str] = &[
 ];
 
 fn color_for(name: &str) -> Hsla {
-    let hex = match name {
-        "string.special.key" | "property" => 0x89b4fa, // blue (JSON keys)
-        "string" => 0xa6e3a1,                          // green
-        "number" => 0xfab387,                          // peach
-        "constant.builtin" | "keyword" => 0xcba6f7,    // mauve (true/false/null)
-        "escape" => 0xf5c2e7,                          // pink
-        "comment" => 0x6c7086,                         // dim
-        _ => 0x9399b2,                                 // punctuation/other
+    // Catppuccin Mocha on dark; Latte (darker, white-bg-safe) on light.
+    let hex = if theme::is_dark() {
+        match name {
+            "string.special.key" | "property" => 0x89b4fa, // blue (JSON keys)
+            "string" => 0xa6e3a1,                          // green
+            "number" => 0xfab387,                          // peach
+            "constant.builtin" | "keyword" => 0xcba6f7,    // mauve (true/false/null)
+            "escape" => 0xf5c2e7,                          // pink
+            "comment" => 0x6c7086,                         // dim
+            _ => 0x9399b2,                                 // punctuation/other
+        }
+    } else {
+        match name {
+            "string.special.key" | "property" => 0x1e66f5,
+            "string" => 0x40a02b,
+            "number" => 0xc4520a,
+            "constant.builtin" | "keyword" => 0x8839ef,
+            "escape" => 0xd01884,
+            "comment" => 0x8c8fa1,
+            _ => 0x5c5f77,
+        }
     };
     rgb(hex).into()
 }
