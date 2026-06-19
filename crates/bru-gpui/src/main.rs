@@ -137,6 +137,48 @@ struct BruApp {
     body_editor: Entity<CodeEditor>,
     edit_target: EditTarget,
     status: String,
+    sending: bool,
+    response: Option<String>,
+}
+
+/// Run a request to completion on a fresh tokio runtime (called on a worker
+/// thread). Returns the formatted response or an error string.
+fn run_blocking(path: PathBuf, dir: PathBuf) -> Result<String, String> {
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let file = bru_lang::parse(&text).map_err(|e| e.to_string())?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(async move {
+        let opts = bru_http::SendOptions::default();
+        let client = bru_http::HttpClient::new(&opts).map_err(|e| e.to_string())?;
+        let mut ctx = bru_engine::RunContext {
+            vars: bru_engine::base_vars(&dir, None),
+            client,
+            send_options: opts,
+            script_dir: path.parent().map(Path::to_path_buf),
+            ..Default::default()
+        };
+        let outcome = bru_engine::run_request(&file, &mut ctx).await;
+        Ok(format_outcome(&outcome))
+    })
+}
+
+fn format_outcome(o: &bru_engine::RunOutcome) -> String {
+    if let Some(e) = &o.error {
+        return format!("Error: {e}");
+    }
+    match &o.response {
+        Some(r) => format!(
+            "{} {} \u{00B7} {} ms\n\n{}",
+            r.status,
+            r.status_text,
+            r.duration_ms,
+            String::from_utf8_lossy(&r.body)
+        ),
+        None => "(no response)".to_string(),
+    }
 }
 
 impl BruApp {
@@ -153,7 +195,43 @@ impl BruApp {
             body_editor,
             edit_target: EditTarget::Source,
             status: String::new(),
+            sending: false,
+            response: None,
         }
+    }
+
+    /// Send the selected request: run it on a worker thread (its own tokio
+    /// runtime) and deliver the result back to the UI via a oneshot + cx.spawn.
+    fn send(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.selected.clone() else {
+            return;
+        };
+        let dir = self.dir.clone();
+        self.sending = true;
+        self.status = "Sending\u{2026}".into();
+        let (tx, rx) = futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_blocking(path, dir));
+        });
+        cx.spawn(async move |this, cx| {
+            let result = rx.await;
+            let _ = this.update(cx, |this, cx| {
+                this.sending = false;
+                match result {
+                    Ok(Ok(body)) => {
+                        this.response = Some(body);
+                        this.status = "Response received".into();
+                    }
+                    Ok(Err(e)) => {
+                        this.response = Some(format!("Error: {e}"));
+                        this.status = "Send failed".into();
+                    }
+                    Err(_) => this.status = "Send cancelled".into(),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Write the editor's content back to disk (reconstructing the `.bru` when
@@ -398,8 +476,61 @@ impl BruApp {
                     .bg(theme::accent())
                     .text_color(theme::bg())
                     .text_size(px(13.))
-                    .child("Send \u{2192}"),
+                    .child(if self.sending {
+                        "Sending\u{2026}".to_string()
+                    } else {
+                        "Send \u{2192}".to_string()
+                    })
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _ev: &MouseUpEvent, _w, cx| {
+                            if !this.sending {
+                                this.send(cx);
+                                cx.notify();
+                            }
+                        }),
+                    ),
             )
+    }
+
+    fn response_pane(&self) -> Div {
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .px_2()
+            .py_1()
+            .bg(theme::surface0())
+            .border_b_1()
+            .border_color(theme::border2())
+            .child(tab("Response", true));
+        let body = div()
+            .id("resp")
+            .overflow_y_scroll()
+            .flex_1()
+            .w_full()
+            .p_3()
+            .font_family("monospace")
+            .text_size(px(13.))
+            .line_height(px(19.))
+            .text_color(theme::subtext())
+            .child(
+                self.response
+                    .clone()
+                    .unwrap_or_else(|| "No response yet \u{2014} press Send.".to_string()),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .w_full()
+            .bg(theme::bg())
+            .border_t_1()
+            .border_color(theme::border2())
+            .child(header)
+            .child(body)
     }
 
     fn body_pane(&self) -> Div {
@@ -477,7 +608,8 @@ impl Render for BruApp {
             .flex_1()
             .h_full()
             .child(self.url_bar(cx))
-            .child(self.body_pane());
+            .child(self.body_pane())
+            .child(self.response_pane());
 
         div()
             .flex()

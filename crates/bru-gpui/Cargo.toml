@@ -14,6 +14,12 @@ path = "src/main.rs"
 # Reuse the framework-agnostic crates unchanged (cross-workspace path deps).
 bru-core = { path = "../bru-core" }
 bru-lang = { path = "../bru-lang" }
+bru-http = { path = "../bru-http" }
+bru-engine = { path = "../bru-engine" }
+# Async send: run reqwest under its own tokio runtime on a thread, bridge the
+# result back to gpui's foreground via a futures oneshot.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "io-util"] }
+futures = "0.3"
 # gpui has no stable crates.io release; it's consumed from the Zed monorepo.
 # Pinned to a known-good commit (proven to build on Windows) so `main` drift
 # can't break us mid-migration.
