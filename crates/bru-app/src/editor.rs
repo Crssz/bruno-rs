@@ -703,10 +703,12 @@ impl Element for EditorElement {
             } else {
                 line.to_string()
             };
-            let shaped =
-                window
-                    .text_system()
-                    .shape_line(gpui::SharedString::from(display), font_size, &runs, None);
+            let shaped = window.text_system().shape_line(
+                gpui::SharedString::from(display),
+                font_size,
+                &runs,
+                None,
+            );
             lines.push((shaped, starts[i]));
         }
 

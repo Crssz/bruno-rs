@@ -1,4 +1,4 @@
-﻿// Phase 3a: real collection data. Loads a Bruno collection (the bundled sample,
+// Phase 3a: real collection data. Loads a Bruno collection (the bundled sample,
 // or a path arg), renders a clickable recursive sidebar, and shows the opened
 // request's real method/URL/body (JSON bodies tree-sitter-highlighted).
 mod edit;
@@ -242,7 +242,12 @@ fn hex_dump(bytes: &[u8]) -> String {
                 }
             })
             .collect();
-        out.push_str(&format!("{:08x}  {:<47}  {}\n", i * 16, hex.join(" "), ascii));
+        out.push_str(&format!(
+            "{:08x}  {:<47}  {}\n",
+            i * 16,
+            hex.join(" "),
+            ascii
+        ));
     }
     out
 }
@@ -724,10 +729,22 @@ impl OpenTab {
             }
             ReqTab::PostScript => {
                 let t = text_block(f, "script:post-response");
-                (t, Lang::Plain, EditKind::Body("script:post-response".into()))
+                (
+                    t,
+                    Lang::Plain,
+                    EditKind::Body("script:post-response".into()),
+                )
             }
-            ReqTab::Tests => (text_block(f, "tests"), Lang::Plain, EditKind::Body("tests".into())),
-            ReqTab::Docs => (text_block(f, "docs"), Lang::Plain, EditKind::Body("docs".into())),
+            ReqTab::Tests => (
+                text_block(f, "tests"),
+                Lang::Plain,
+                EditKind::Body("tests".into()),
+            ),
+            ReqTab::Docs => (
+                text_block(f, "docs"),
+                Lang::Plain,
+                EditKind::Body("docs".into()),
+            ),
             ReqTab::Source => (bru_lang::serialize(f), Lang::Plain, EditKind::Source),
         };
         self.edit_kind = kind;
@@ -1058,8 +1075,7 @@ fn load_prefs() -> (u64, bool, bool) {
 
 fn save_prefs(timeout: u64, insecure: bool, light: bool) {
     if let Some(p) = prefs_path() {
-        let json =
-            serde_json::json!({ "timeout": timeout, "insecure": insecure, "light": light });
+        let json = serde_json::json!({ "timeout": timeout, "insecure": insecure, "light": light });
         let _ = std::fs::write(p, json.to_string());
     }
 }
@@ -1322,8 +1338,7 @@ impl BruApp {
         let (pref_timeout, pref_insecure, light) = load_prefs();
         theme::set_dark(!light);
         let curl_input = cx.new(|cx| CodeEditor::new(cx, ""));
-        let timeout_input =
-            cx.new(|cx| CodeEditor::single_line(cx, &pref_timeout.to_string()));
+        let timeout_input = cx.new(|cx| CodeEditor::single_line(cx, &pref_timeout.to_string()));
         let search = cx.new(|cx| CodeEditor::single_line(cx, ""));
         // Live-filter the sidebar as the search box changes.
         cx.subscribe(&search, |this, ed, _ev: &editor::Changed, cx| {
@@ -1683,11 +1698,7 @@ impl BruApp {
                     .child("GLOBAL"),
             );
             card = card.child(
-                item(
-                    "No Global Env".into(),
-                    self.selected_global_env.is_none(),
-                )
-                .on_mouse_up(
+                item("No Global Env".into(), self.selected_global_env.is_none()).on_mouse_up(
                     MouseButton::Left,
                     cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.select_global_env(None, cx)),
                 ),
@@ -1858,7 +1869,10 @@ impl BruApp {
         let dest_dir = if menu.is_dir {
             menu.target.clone()
         } else {
-            menu.target.parent().map(Path::to_path_buf).unwrap_or(menu.target)
+            menu.target
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or(menu.target)
         };
         let Some((src, is_dir)) = self.clipboard_item.clone() else {
             return;
@@ -2268,12 +2282,10 @@ impl BruApp {
                         MouseButton::Left,
                         cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.cancel_delete(cx)),
                     ))
-                    .child(
-                        solid_btn("Delete").bg(theme::red()).on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.commit_delete(cx)),
-                        ),
-                    ),
+                    .child(solid_btn("Delete").bg(theme::red()).on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.commit_delete(cx)),
+                    )),
             );
         div()
             .absolute()
@@ -3945,21 +3957,23 @@ impl BruApp {
                 ("auth", AUTH_MODES, "Auth")
             };
             let cur = edit::method_field(&tab.file, field).unwrap_or_else(|| "none".into());
-            strip = strip.child(div().flex_1()).child(
-                chip(&format!("{prefix}: {cur}")).on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
-                        let Some(i) = this.active else { return };
-                        let cur = edit::method_field(&this.tabs[i].file, field).unwrap_or_default();
-                        let next = cycle_next(list, &cur);
-                        if is_body {
-                            this.set_body_mode(&next, cx);
-                        } else {
-                            this.set_auth_mode(&next, cx);
-                        }
-                    }),
-                ),
-            );
+            strip =
+                strip
+                    .child(div().flex_1())
+                    .child(chip(&format!("{prefix}: {cur}")).on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                            let Some(i) = this.active else { return };
+                            let cur =
+                                edit::method_field(&this.tabs[i].file, field).unwrap_or_default();
+                            let next = cycle_next(list, &cur);
+                            if is_body {
+                                this.set_body_mode(&next, cx);
+                            } else {
+                                this.set_auth_mode(&next, cx);
+                            }
+                        }),
+                    ));
         }
         strip
     }
@@ -4048,7 +4062,10 @@ impl BruApp {
             _ => "",
         };
         let (col1, col2) = if block == "assert" {
-            ("Expression  (e.g. res.status)", "Operator + Value  (e.g. eq 200)")
+            (
+                "Expression  (e.g. res.status)",
+                "Operator + Value  (e.g. eq 200)",
+            )
         } else {
             ("Name", "Value")
         };
@@ -4079,12 +4096,16 @@ impl BruApp {
                     .child(cell(row.name.clone(), Some(px(220.))))
                     .child(cell(row.value.clone(), None))
                     .child(
-                        div().px_1().text_color(theme::red()).child("\u{2715}").on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
-                                this.kv_remove_row(idx, cx)
-                            }),
-                        ),
+                        div()
+                            .px_1()
+                            .text_color(theme::red())
+                            .child("\u{2715}")
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                    this.kv_remove_row(idx, cx)
+                                }),
+                            ),
                     ),
             );
         }
@@ -5504,4 +5525,3 @@ fn main() {
         cx.activate(true);
     });
 }
-
