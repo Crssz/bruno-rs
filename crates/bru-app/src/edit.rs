@@ -49,6 +49,89 @@ fn set_inline_entry(entries: &mut Vec<Entry>, key: &str, value: &str) {
     }
 }
 
+/// Reconcile the `params:path` block with the `:name` tokens in `url`: add new
+/// tokens (empty value), drop removed ones, keep existing values, and never
+/// materialize an empty block. Ported from iced.
+pub fn sync_path_params(file: &mut BruFile, url: &str) {
+    let tokens = path_param_tokens(url);
+    let has_block = file.blocks.iter().any(|b| b.name == "params:path");
+    if tokens.is_empty() && !has_block {
+        return;
+    }
+    if !has_block {
+        file.blocks.push(Block {
+            name: "params:path".to_string(),
+            content: BlockContent::Dict(Vec::new()),
+        });
+    }
+    if let Some(b) = file.blocks.iter_mut().find(|b| b.name == "params:path") {
+        if let BlockContent::Dict(entries) = &mut b.content {
+            entries.retain(|e| tokens.iter().any(|t| t == e.key.name()));
+            for t in &tokens {
+                if !entries.iter().any(|e| e.key.name() == t) {
+                    entries.push(Entry {
+                        annotations: Vec::new(),
+                        disabled: false,
+                        local: false,
+                        key: Key::Bare(t.clone()),
+                        value: Value::Inline(String::new()),
+                    });
+                }
+            }
+        }
+    }
+    let empty = file
+        .block("params:path")
+        .map(|b| matches!(&b.content, BlockContent::Dict(e) if e.is_empty()))
+        .unwrap_or(false);
+    if empty {
+        file.blocks.retain(|b| b.name != "params:path");
+    }
+}
+
+/// Write edited values back to existing `params:path` entries (by name).
+pub fn apply_path_values(file: &mut BruFile, values: &[(String, String)]) {
+    if let Some(b) = file.blocks.iter_mut().find(|b| b.name == "params:path") {
+        if let BlockContent::Dict(entries) = &mut b.content {
+            for e in entries.iter_mut() {
+                if let Some((_, v)) = values.iter().find(|(n, _)| n == e.key.name()) {
+                    e.value = Value::Inline(v.clone());
+                }
+            }
+        }
+    }
+}
+
+/// Extract `:name` path-parameter tokens from a URL's path (before `?`).
+fn path_param_tokens(url: &str) -> Vec<String> {
+    let path = url.split('?').next().unwrap_or(url);
+    let bytes = path.as_bytes();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b':' {
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len()
+                && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'-')
+            {
+                j += 1;
+            }
+            if j > start {
+                let name = &path[start..j];
+                // Skip ports (`:8080`) — purely numeric tokens are not params.
+                if !name.chars().all(|c| c.is_ascii_digit()) && !out.iter().any(|t| t == name) {
+                    out.push(name.to_string());
+                }
+            }
+            i = j.max(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Read a Dict block as `(name, value, enabled)` rows for a structured grid.
 pub fn kv_block_rows(file: &BruFile, block: &str) -> Vec<(String, String, bool)> {
     match file.block(block).map(|b| &b.content) {

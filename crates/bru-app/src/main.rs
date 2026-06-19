@@ -431,6 +431,8 @@ struct OpenTab {
     edit_kind: EditKind,
     /// Row editors for the structured params/headers grid (when on those tabs).
     kv_rows: Vec<KvRow>,
+    /// URL-derived path params (name, value editor) shown on the Params tab.
+    path_rows: Vec<(String, Entity<CodeEditor>)>,
     sending: bool,
     /// The last response (full outcome, for the response sub-tabs).
     response: Option<bru_engine::RunOutcome>,
@@ -468,6 +470,7 @@ impl OpenTab {
             url_input,
             edit_kind: EditKind::None,
             kv_rows: Vec::new(),
+            path_rows: Vec::new(),
             sending: false,
             response: None,
         };
@@ -500,6 +503,17 @@ impl OpenTab {
         }
         let url = self.url_input.read(cx).text().trim().to_string();
         edit::set_active_url(&mut self.file, &url);
+        // Keep params:path in sync with the URL's :tokens, then persist any
+        // edited path-param values.
+        edit::sync_path_params(&mut self.file, &url);
+        if !self.path_rows.is_empty() {
+            let vals: Vec<(String, String)> = self
+                .path_rows
+                .iter()
+                .map(|(n, ed)| (n.clone(), ed.read(cx).text().to_string()))
+                .collect();
+            edit::apply_path_values(&mut self.file, &vals);
+        }
         match &self.edit_kind {
             EditKind::Body(block) => {
                 if let Some(b) = self.file.blocks.iter_mut().find(|b| &b.name == block) {
@@ -542,10 +556,22 @@ impl OpenTab {
         };
         if let Some(block) = kv_block {
             self.kv_rows = build_kv_rows(&self.file, block, cx);
+            // The Params tab also surfaces URL-derived path params.
+            self.path_rows = if block == "params:query" {
+                edit::kv_block_rows(&self.file, "params:path")
+                    .into_iter()
+                    .map(|(name, value, _)| {
+                        (name, cx.new(|cx| CodeEditor::single_line(cx, &value)))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             self.edit_kind = EditKind::Kv(block.to_string());
             return;
         }
         self.kv_rows = Vec::new();
+        self.path_rows = Vec::new();
         let f = &self.file;
         let (text, lang, kind) = match self.req_tab {
             ReqTab::Body => {
@@ -3414,6 +3440,35 @@ impl BruApp {
                     cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.kv_add_row(cx)),
                 ),
         );
+        let mut inner = div().flex().flex_col().gap_3().child(table);
+        // URL-derived path params (Params tab only): read-only name + value.
+        if !tab.path_rows.is_empty() {
+            let mut pt = div().flex().flex_col().gap_1().child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(theme::muted())
+                    .child("PATH PARAMS"),
+            );
+            for (name, ed) in &tab.path_rows {
+                pt = pt.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .w(px(220.))
+                                .font_family("monospace")
+                                .text_size(px(12.))
+                                .text_color(theme::accent())
+                                .child(format!(":{name}")),
+                        )
+                        .child(cell(ed.clone(), None)),
+                );
+            }
+            inner = inner.child(pt);
+        }
         div()
             .flex()
             .flex_col()
@@ -3427,7 +3482,7 @@ impl BruApp {
                     .flex_1()
                     .w_full()
                     .p_3()
-                    .child(table),
+                    .child(inner),
             )
     }
 
