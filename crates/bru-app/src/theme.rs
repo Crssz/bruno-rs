@@ -51,14 +51,49 @@ color!(green, 0x73e899, 0x1f9d57);
 color!(blue, 0x79c8f6, 0x2277b5);
 color!(orange, 0xf6ab79, 0xc06a23);
 color!(red, 0xe06552, 0xc0392b);
+// Extended hue palette (Bruno's per-mode hues) for method / protocol badges.
+color!(indigo, 0x79c8f6, 0x404aa6);
+color!(teal, 0x4ed9b8, 0x2e8a85);
+color!(cyan, 0x7fd6f3, 0x30a0b9);
+color!(purple, 0xd28bef, 0x8b41b2);
 
-/// HTTP method → badge color, matching the iced sidebar.
+// Gold tab underline (Bruno's `primary.strong`).
+color!(tab_underline, 0xeab455, 0xd58a2a);
+// Subtlest border (`border0`): card outlines, indent guides, tab seams.
+color!(border0, 0x2a2a2a, 0xefefef);
+
+// Bottom status bar.
+color!(statusbar_bg, 0x1e1e1e, 0xf6f6f6);
+color!(statusbar_border, 0x323233, 0xe9e9e9);
+color!(statusbar_text, 0xa9a9a9, 0x646464);
+
+/// Draft / unsaved indicator (Bruno's `draftColor`, identical in both modes).
+pub fn draft_dot() -> Hsla {
+    rgb(0xcc7b1b).into()
+}
+
+/// HTTP method → badge color, following Bruno's per-mode `request.methods` map.
 pub fn method_color(m: &str) -> Hsla {
     match m.to_ascii_uppercase().as_str() {
         "GET" => green(),
-        "POST" => orange(),
-        "PUT" | "PATCH" => blue(),
+        "POST" => {
+            if is_dark() {
+                indigo()
+            } else {
+                purple()
+            }
+        }
+        "PUT" => orange(),
+        "PATCH" => {
+            if is_dark() {
+                orange()
+            } else {
+                purple()
+            }
+        }
         "DELETE" => red(),
+        "OPTIONS" => teal(),
+        "HEAD" => cyan(),
         _ => subtext(),
     }
 }

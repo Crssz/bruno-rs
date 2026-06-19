@@ -3474,6 +3474,7 @@ impl BruApp {
         } else {
             tab.method.to_uppercase()
         };
+        let dirty = self.dirty.contains(&tab.path);
         div()
             .flex()
             .flex_row()
@@ -3482,44 +3483,55 @@ impl BruApp {
             .w_full()
             .px_2()
             .py_2()
-            .bg(theme::mantle())
+            .bg(theme::bg())
             .border_b_1()
             .border_color(theme::border1())
             .child(
+                // Method + URL share one bordered, rounded input group — Bruno's URL bar.
                 div()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .bg(theme::surface0())
-                    .text_color(theme::method_color(&method))
-                    .text_size(px(12.))
-                    .font_family("monospace")
-                    .child(method)
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
-                            if let Some(i) = this.active {
-                                let next = next_method(&this.tabs[i].method);
-                                edit::set_method(&mut this.tabs[i].file, &next);
-                                this.tabs[i].method = next;
-                                cx.notify();
-                            }
-                        }),
-                    ),
-            )
-            .child(
-                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
                     .flex_1()
-                    .px_2()
-                    .py_1()
+                    .min_w_0()
                     .rounded_md()
                     .bg(theme::input_bg())
                     .border_1()
                     .border_color(theme::border1())
-                    .text_color(theme::text())
-                    .text_size(px(13.))
-                    .font_family("monospace")
-                    .child(tab.url_input.clone()),
+                    .child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .border_r_1()
+                            .border_color(theme::border1())
+                            .text_color(theme::method_color(&method))
+                            .text_size(px(12.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_family("monospace")
+                            .child(method)
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                                    if let Some(i) = this.active {
+                                        let next = next_method(&this.tabs[i].method);
+                                        edit::set_method(&mut this.tabs[i].file, &next);
+                                        this.tabs[i].method = next;
+                                        cx.notify();
+                                    }
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .px_2()
+                            .py_1()
+                            .text_color(theme::text())
+                            .text_size(px(13.))
+                            .font_family("monospace")
+                            .child(tab.url_input.clone()),
+                    ),
             )
             .child(icon_chip("</>").on_mouse_up(
                 MouseButton::Left,
@@ -3532,13 +3544,36 @@ impl BruApp {
                     }
                 }),
             ))
-            .child(chip("Save").on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _ev: &MouseUpEvent, _w, cx| {
-                    this.save(cx);
-                    cx.notify();
-                }),
-            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme::surface0())
+                    .text_color(theme::text())
+                    .text_size(px(13.))
+                    .child("Save")
+                    .when(dirty, |d| {
+                        d.child(
+                            div()
+                                .w(px(6.))
+                                .h(px(6.))
+                                .rounded_full()
+                                .bg(theme::draft_dot()),
+                        )
+                    })
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _ev: &MouseUpEvent, _w, cx| {
+                            this.save(cx);
+                            cx.notify();
+                        }),
+                    ),
+            )
             .child(
                 div()
                     .px_3()
@@ -3547,6 +3582,7 @@ impl BruApp {
                     .bg(theme::accent())
                     .text_color(theme::bg())
                     .text_size(px(13.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .child(if tab.sending {
                         "Sending\u{2026}".to_string()
                     } else {
@@ -5311,65 +5347,61 @@ impl BruApp {
         let mut strip = div()
             .flex()
             .flex_row()
-            .items_center()
+            .items_end()
             .w_full()
-            .px_2()
-            .bg(theme::mantle())
+            .bg(theme::bg())
             .border_b_1()
-            .border_color(theme::border1());
+            .border_color(theme::border0());
         for (i, t) in self.tabs.iter().enumerate() {
             let active = self.active == Some(i);
             let dirty = self.dirty.contains(&t.path);
-            let title = if dirty {
-                format!("\u{25CF} {}", t.title())
-            } else {
-                t.title()
-            };
+            let mut tab = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px_3()
+                .py_1()
+                .when(active, |d| {
+                    d.border_b_1().border_color(theme::tab_underline())
+                });
+            // Unsaved tabs show Bruno's amber draft dot before the title.
+            if dirty {
+                tab = tab.child(
+                    div()
+                        .w(px(7.))
+                        .h(px(7.))
+                        .rounded_full()
+                        .bg(theme::draft_dot()),
+                );
+            }
             strip = strip.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
-                    .when(active, |d| {
-                        d.bg(theme::surface0())
-                            .border_b_1()
-                            .border_color(theme::accent())
-                    })
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(if dirty {
-                                theme::accent()
-                            } else if active {
-                                theme::text()
-                            } else {
-                                theme::muted()
-                            })
-                            .child(title)
-                            .on_mouse_up(
-                                MouseButton::Left,
-                                cx.listener(move |this, _ev: &MouseUpEvent, _w, cx| {
-                                    this.active = Some(i);
-                                    cx.notify();
-                                }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .px_1()
-                            .text_size(px(12.))
-                            .text_color(theme::muted())
-                            .child("\u{00D7}")
-                            .on_mouse_up(
-                                MouseButton::Left,
-                                cx.listener(move |this, _ev: &MouseUpEvent, _w, cx| {
-                                    this.request_close_tab(i, cx);
-                                }),
-                            ),
-                    ),
+                tab.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(if active { theme::text() } else { theme::muted() })
+                        .child(t.title())
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(move |this, _ev: &MouseUpEvent, _w, cx| {
+                                this.active = Some(i);
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .px_1()
+                        .text_size(px(12.))
+                        .text_color(theme::muted())
+                        .child("\u{00D7}")
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(move |this, _ev: &MouseUpEvent, _w, cx| {
+                                this.request_close_tab(i, cx);
+                            }),
+                        ),
+                ),
             );
         }
         strip
@@ -5384,13 +5416,13 @@ impl BruApp {
             .w_full()
             .px_3()
             .py_1()
-            .bg(theme::mantle())
+            .bg(theme::statusbar_bg())
             .border_t_1()
-            .border_color(theme::border1())
+            .border_color(theme::statusbar_border())
             .child(
                 div()
                     .px_2()
-                    .text_color(theme::green())
+                    .text_color(theme::statusbar_text())
                     .text_size(px(11.))
                     .child(self.status.clone()),
             )
@@ -5412,7 +5444,7 @@ impl BruApp {
             ))
             .child(
                 div()
-                    .text_color(theme::muted())
+                    .text_color(theme::statusbar_text())
                     .text_size(px(11.))
                     .child("v0.0.0"),
             )
@@ -5426,15 +5458,43 @@ impl Render for BruApp {
             self.home_screen(cx)
         } else if let Some(i) = self.active {
             let tab = &self.tabs[i];
+            // The URL bar spans the full width; below it the request pane (left)
+            // and response pane (right) share a horizontal split — Bruno's layout.
             div()
                 .flex()
                 .flex_col()
                 .flex_1()
-                .h_full()
+                .min_h_0()
                 .child(self.url_bar(tab, cx))
-                .child(self.req_subtabs(tab, cx))
-                .child(self.req_content(tab, cx))
-                .child(self.response_pane(tab, window, cx))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .min_h_0()
+                                .border_r_1()
+                                .border_color(theme::border1())
+                                .child(self.req_subtabs(tab, cx))
+                                .child(self.req_content(tab, cx)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .min_h_0()
+                                .child(self.response_pane(tab, window, cx)),
+                        ),
+                )
         } else {
             div()
                 .flex()
@@ -5465,6 +5525,8 @@ impl Render for BruApp {
             .size_full()
             .bg(theme::bg())
             .text_color(theme::text())
+            .font_family("Inter")
+            .text_size(px(13.))
             .child(self.top_bar(cx))
             .child(
                 div()
