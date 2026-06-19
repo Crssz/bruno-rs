@@ -1,0 +1,23 @@
+meta {
+  name: Create Issue
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/repos/usebruno/bruno/issues
+  body: json
+  auth: bearer
+}
+
+body:json {
+  {
+    "title": "Found a bug",
+    "body": "Steps to reproduce...",
+    "labels": ["bug", "triage"]
+  }
+}
+
+auth:bearer {
+  token: {{token}}
+}

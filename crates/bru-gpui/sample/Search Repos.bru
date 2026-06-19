@@ -1,0 +1,16 @@
+meta {
+  name: Search Repos
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/search/repositories?q=brun&sort=stars
+  body: none
+  auth: none
+}
+
+params:query {
+  q: brun
+  sort: stars
+}

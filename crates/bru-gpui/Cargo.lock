@@ -647,14 +647,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "bru-core"
+version = "0.0.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "serde_json",
+]
+
+[[package]]
 name = "bru-gpui"
 version = "0.0.0"
 dependencies = [
+ "bru-core",
+ "bru-lang",
  "gpui",
  "gpui_platform",
  "tree-sitter",
  "tree-sitter-highlight",
  "tree-sitter-json",
+]
+
+[[package]]
+name = "bru-lang"
+version = "0.0.0"
+dependencies = [
+ "bru-core",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

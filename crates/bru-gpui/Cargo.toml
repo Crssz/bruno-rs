@@ -11,6 +11,9 @@ name = "bru-gpui"
 path = "src/main.rs"
 
 [dependencies]
+# Reuse the framework-agnostic crates unchanged (cross-workspace path deps).
+bru-core = { path = "../bru-core" }
+bru-lang = { path = "../bru-lang" }
 # gpui has no stable crates.io release; it's consumed from the Zed monorepo.
 # Pinned to a known-good commit (proven to build on Windows) so `main` drift
 # can't break us mid-migration.
