@@ -49,6 +49,50 @@ fn set_inline_entry(entries: &mut Vec<Entry>, key: &str, value: &str) {
     }
 }
 
+/// Read a Dict block as `(name, value, enabled)` rows for a structured grid.
+pub fn kv_block_rows(file: &BruFile, block: &str) -> Vec<(String, String, bool)> {
+    match file.block(block).map(|b| &b.content) {
+        Some(BlockContent::Dict(entries)) => entries
+            .iter()
+            .map(|e| {
+                (
+                    e.key.name().to_string(),
+                    e.value.as_inline().to_string(),
+                    !e.disabled,
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Replace a Dict block from `(name, value, enabled)` grid rows (blank names
+/// dropped). Removes the block when no rows remain; creates it if absent.
+pub fn set_kv_block(file: &mut BruFile, block: &str, rows: &[(String, String, bool)]) {
+    let entries: Vec<Entry> = rows
+        .iter()
+        .filter(|(k, _, _)| !k.trim().is_empty())
+        .map(|(k, v, enabled)| Entry {
+            annotations: Vec::new(),
+            disabled: !enabled,
+            local: false,
+            key: Key::Bare(k.trim().to_string()),
+            value: Value::Inline(v.clone()),
+        })
+        .collect();
+    if entries.is_empty() {
+        file.blocks.retain(|b| b.name != block);
+        return;
+    }
+    match file.blocks.iter_mut().find(|b| b.name == block) {
+        Some(b) => b.content = BlockContent::Dict(entries),
+        None => file.blocks.push(Block {
+            name: block.to_string(),
+            content: BlockContent::Dict(entries),
+        }),
+    }
+}
+
 /// Set a `key: value` field on the active method block (e.g. the `body`/`auth`
 /// mode). No-op if there's no method block.
 pub fn set_method_field(file: &mut BruFile, key: &str, value: &str) {

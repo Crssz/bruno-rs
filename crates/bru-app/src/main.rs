@@ -22,10 +22,19 @@ enum EditKind {
     None,
     /// A raw-text block (a `body:*` or `script:*` block): set its text verbatim.
     Body(String),
-    /// A dictionary block (params/headers/vars/auth) edited as `key: value` lines.
+    /// A dictionary block (vars/auth/form-body) edited as `key: value` lines.
     Dict(String),
+    /// A dictionary block (params/headers) edited as a structured row grid.
+    Kv(String),
     /// The whole `.bru` source: reparse it on apply.
     Source,
+}
+
+/// One row of the structured params/headers grid.
+struct KvRow {
+    name: Entity<CodeEditor>,
+    value: Entity<CodeEditor>,
+    enabled: bool,
 }
 
 /// Request sub-tabs (Body is the editable editor; the rest show parsed data).
@@ -420,6 +429,8 @@ struct OpenTab {
     /// Single-line editor for the request URL.
     url_input: Entity<CodeEditor>,
     edit_kind: EditKind,
+    /// Row editors for the structured params/headers grid (when on those tabs).
+    kv_rows: Vec<KvRow>,
     sending: bool,
     /// The last response (full outcome, for the response sub-tabs).
     response: Option<bru_engine::RunOutcome>,
@@ -456,6 +467,7 @@ impl OpenTab {
             body_editor,
             url_input,
             edit_kind: EditKind::None,
+            kv_rows: Vec::new(),
             sending: false,
             response: None,
         };
@@ -502,12 +514,38 @@ impl OpenTab {
                 }
             }
             EditKind::Dict(block) => edit::lines_to_dict(&mut self.file, block, &text),
+            EditKind::Kv(block) => {
+                let rows: Vec<(String, String, bool)> = self
+                    .kv_rows
+                    .iter()
+                    .map(|r| {
+                        (
+                            r.name.read(cx).text().trim().to_string(),
+                            r.value.read(cx).text().to_string(),
+                            r.enabled,
+                        )
+                    })
+                    .collect();
+                edit::set_kv_block(&mut self.file, block, &rows);
+            }
             EditKind::None | EditKind::Source => {}
         }
     }
 
     /// Load the active sub-tab's block into the shared editor.
     fn load_active_tab(&mut self, cx: &mut Context<BruApp>) {
+        // Params/Headers use the structured row grid, not the shared text editor.
+        let kv_block = match self.req_tab {
+            ReqTab::Params => Some("params:query"),
+            ReqTab::Headers => Some("headers"),
+            _ => None,
+        };
+        if let Some(block) = kv_block {
+            self.kv_rows = build_kv_rows(&self.file, block, cx);
+            self.edit_kind = EditKind::Kv(block.to_string());
+            return;
+        }
+        self.kv_rows = Vec::new();
         let f = &self.file;
         let (text, lang, kind) = match self.req_tab {
             ReqTab::Body => {
@@ -767,6 +805,19 @@ fn auth_block_name(mode: &str) -> Option<&'static str> {
 fn cycle_next(list: &[&str], current: &str) -> String {
     let i = list.iter().position(|m| *m == current).unwrap_or(0);
     list[(i + 1) % list.len()].to_string()
+}
+
+/// Build structured grid rows (name/value single-line editors + enabled) from a
+/// Dict block, for the params/headers tabs.
+fn build_kv_rows(file: &BruFile, block: &str, cx: &mut Context<BruApp>) -> Vec<KvRow> {
+    edit::kv_block_rows(file, block)
+        .into_iter()
+        .map(|(k, v, enabled)| KvRow {
+            name: cx.new(|cx| CodeEditor::single_line(cx, &k)),
+            value: cx.new(|cx| CodeEditor::single_line(cx, &v)),
+            enabled,
+        })
+        .collect()
 }
 
 /// Rows `(key, value, disabled)` of a dictionary block.
@@ -2466,6 +2517,35 @@ impl BruApp {
         cx.notify();
     }
 
+    // ── structured params/headers grid ───────────────────────────────────────
+    fn kv_add_row(&mut self, cx: &mut Context<Self>) {
+        let Some(i) = self.active else { return };
+        let row = KvRow {
+            name: cx.new(|cx| CodeEditor::single_line(cx, "")),
+            value: cx.new(|cx| CodeEditor::single_line(cx, "")),
+            enabled: true,
+        };
+        self.tabs[i].kv_rows.push(row);
+        self.dirty.insert(self.tabs[i].path.clone());
+        cx.notify();
+    }
+    fn kv_remove_row(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(i) = self.active else { return };
+        if idx < self.tabs[i].kv_rows.len() {
+            self.tabs[i].kv_rows.remove(idx);
+            self.dirty.insert(self.tabs[i].path.clone());
+            cx.notify();
+        }
+    }
+    fn kv_toggle_row(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(i) = self.active else { return };
+        if let Some(r) = self.tabs[i].kv_rows.get_mut(idx) {
+            r.enabled = !r.enabled;
+            self.dirty.insert(self.tabs[i].path.clone());
+            cx.notify();
+        }
+    }
+
     /// Open a request as a tab, or focus it if already open.
     fn open_request(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if let Some(i) = self.tabs.iter().position(|t| t.path == path) {
@@ -3214,7 +3294,10 @@ impl BruApp {
     }
 
     /// The content for the active request sub-tab (the shared editor).
-    fn req_content(&self, tab: &OpenTab) -> Div {
+    fn req_content(&self, tab: &OpenTab, cx: &mut Context<Self>) -> Div {
+        if matches!(tab.edit_kind, EditKind::Kv(_)) {
+            return self.kv_grid(tab, cx);
+        }
         div()
             .flex()
             .flex_col()
@@ -3232,6 +3315,78 @@ impl BruApp {
                     .text_size(px(13.))
                     .line_height(px(19.))
                     .child(tab.body_editor.clone()),
+            )
+    }
+
+    /// The structured params/headers grid (enable toggle + name + value + ✕).
+    fn kv_grid(&self, tab: &OpenTab, cx: &mut Context<Self>) -> Div {
+        let cell = |child: Entity<CodeEditor>, w: Option<Pixels>| {
+            let d = div()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(theme::input_bg())
+                .border_1()
+                .border_color(theme::border1())
+                .font_family("monospace")
+                .text_size(px(12.))
+                .child(child);
+            match w {
+                Some(w) => d.w(w),
+                None => d.flex_1(),
+            }
+        };
+        let mut table = div().flex().flex_col().gap_1();
+        for (idx, row) in tab.kv_rows.iter().enumerate() {
+            table = table.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(check_box(row.enabled).on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                            this.kv_toggle_row(idx, cx)
+                        }),
+                    ))
+                    .child(cell(row.name.clone(), Some(px(220.))))
+                    .child(cell(row.value.clone(), None))
+                    .child(
+                        div().px_1().text_color(theme::red()).child("\u{2715}").on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                this.kv_remove_row(idx, cx)
+                            }),
+                        ),
+                    ),
+            );
+        }
+        table = table.child(
+            div()
+                .pt_1()
+                .text_size(px(12.))
+                .text_color(theme::accent())
+                .child("+ Add")
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.kv_add_row(cx)),
+                ),
+        );
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .w_full()
+            .bg(theme::bg())
+            .child(
+                div()
+                    .id("kv-grid")
+                    .overflow_y_scroll()
+                    .flex_1()
+                    .w_full()
+                    .p_3()
+                    .child(table),
             )
     }
 
@@ -4453,7 +4608,7 @@ impl Render for BruApp {
                 .h_full()
                 .child(self.url_bar(tab, cx))
                 .child(self.req_subtabs(tab, cx))
-                .child(self.req_content(tab))
+                .child(self.req_content(tab, cx))
                 .child(self.response_pane(tab, window, cx))
         } else {
             div()
