@@ -9,7 +9,27 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::fsops;
+use crate::envfs;
+
+/// Scaffold a new collection dir (bruno.json + environments/) under `parent`.
+fn create_collection(parent: &Path, name: &str) -> Result<PathBuf, String> {
+    let n = name.trim();
+    let dir = parent.join(envfs::sanitize(if n.is_empty() {
+        "Imported Collection"
+    } else {
+        n
+    }));
+    if dir.exists() {
+        return Err(format!("\"{}\" already exists", dir.display()));
+    }
+    std::fs::create_dir_all(dir.join("environments")).map_err(|e| e.to_string())?;
+    let esc = n.replace('\\', "\\\\").replace('"', "\\\"");
+    let json = format!(
+        "{{\n  \"version\": \"1\",\n  \"name\": \"{esc}\",\n  \"type\": \"collection\"\n}}\n"
+    );
+    std::fs::write(dir.join("bruno.json"), json).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
 
 // ── Postman v2.1 ─────────────────────────────────────────────────────────────
 
@@ -23,7 +43,7 @@ pub fn import_postman(json: &str, parent: &Path) -> Result<PathBuf, String> {
         .and_then(Value::as_str)
         .filter(|s| !s.trim().is_empty())
         .unwrap_or("Imported Collection");
-    let dir = fsops::create_collection(parent, name)?;
+    let dir = create_collection(parent, name)?;
     let items = v
         .get("item")
         .and_then(Value::as_array)
@@ -44,7 +64,7 @@ fn import_items(items: &[Value], dir: &Path) -> Result<(), String> {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or("item");
         if let Some(sub) = item.get("item").and_then(Value::as_array) {
-            let fdir = dir.join(fsops::sanitize(name));
+            let fdir = dir.join(envfs::sanitize(name));
             std::fs::create_dir_all(&fdir).map_err(|e| e.to_string())?;
             std::fs::write(
                 fdir.join("folder.bru"),
@@ -54,7 +74,7 @@ fn import_items(items: &[Value], dir: &Path) -> Result<(), String> {
             import_items(sub, &fdir)?;
         } else if let Some(req) = item.get("request") {
             let text = postman_request_bru(name, req, seq);
-            let path = unique_path(dir, &fsops::sanitize(name));
+            let path = unique_path(dir, &envfs::sanitize(name));
             std::fs::write(&path, text).map_err(|e| e.to_string())?;
             seq += 1;
         }

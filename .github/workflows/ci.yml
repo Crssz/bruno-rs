@@ -12,10 +12,13 @@ env:
 jobs:
   test:
     name: test (${{ matrix.os }})
+    # The desktop app builds on gpui, which has no first-class Linux story
+    # (needs X11/Vulkan/Wayland system libs the runners lack) and ships only for
+    # Windows + macOS — so CI matches the release targets rather than Ubuntu.
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

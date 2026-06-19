@@ -1,3 +1,6 @@
+# Desktop API client (the `bruno-rs` binary), built on gpui — Zed's GPU UI
+# framework — for a native editor with real tree-sitter syntax highlighting.
+# Replaced the original iced implementation (see git history) at parity.
 [package]
 name = "bru-app"
 version.workspace = true
@@ -10,17 +13,28 @@ name = "bruno-rs"
 path = "src/main.rs"
 
 [dependencies]
+# Framework-agnostic core crates, reused unchanged.
 bru-core.workspace = true
 bru-lang.workspace = true
-bru-engine.workspace = true
 bru-http.workspace = true
+bru-engine.workspace = true
 serde_json.workspace = true
-iced = { version = "0.14", features = ["tokio", "highlighter"] }
+# Async send: reqwest runs under its own tokio runtime on a worker thread, and
+# the result is bridged back to gpui's foreground via a futures oneshot.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "io-util"] }
+futures = "0.3"
+# gpui has no stable crates.io release; it's consumed from the Zed monorepo at a
+# pinned commit proven to build + run on Windows and macOS. `gpui_platform`
+# carries the platform entry point (`application()`) at this rev.
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", rev = "69b602c7" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform", rev = "69b602c7" }
+# Tree-sitter syntax highlighting — the reason for the gpui move.
+tree-sitter = "0.24"
+tree-sitter-highlight = "0.24"
+tree-sitter-json = "0.24"
+unicode-segmentation = "1"
 rfd = "0.15"
 # Secrets vault: AES-256-GCM at rest, key stretched from a master password.
 aes-gcm = "0.10"
 sha2 = "0.10"
 getrandom = "0.2"
-
-[dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros", "net", "io-util"] }

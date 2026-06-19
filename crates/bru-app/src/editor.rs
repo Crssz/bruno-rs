@@ -33,8 +33,24 @@ impl gpui::EventEmitter<Changed> for CodeEditor {}
 actions!(
     code_editor,
     [
-        Backspace, Delete, Left, Right, Up, Down, Home, End, Enter, Tab, SelectLeft, SelectRight,
-        SelectUp, SelectDown, SelectAll, Paste, Cut, Copy,
+        Backspace,
+        Delete,
+        Left,
+        Right,
+        Up,
+        Down,
+        Home,
+        End,
+        Enter,
+        Tab,
+        SelectLeft,
+        SelectRight,
+        SelectUp,
+        SelectDown,
+        SelectAll,
+        Paste,
+        Cut,
+        Copy,
     ]
 );
 
@@ -153,7 +169,10 @@ impl CodeEditor {
     }
 
     fn line_of(&self, offset: usize) -> usize {
-        self.content[..offset].bytes().filter(|b| *b == b'\n').count()
+        self.content[..offset]
+            .bytes()
+            .filter(|b| *b == b'\n')
+            .count()
     }
 
     fn prev_grapheme(&self, offset: usize) -> usize {
@@ -227,7 +246,11 @@ impl CodeEditor {
         self.move_to(o, cx);
     }
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
-        let o = if self.single_line { 0 } else { self.vertical(-1) };
+        let o = if self.single_line {
+            0
+        } else {
+            self.vertical(-1)
+        };
         self.move_to(o, cx);
     }
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
@@ -280,8 +303,7 @@ impl CodeEditor {
             new_text
         };
         let r = self.selected_range.clone();
-        self.content
-            .replace_range(r.clone(), new_text); // r is a valid char-boundary range
+        self.content.replace_range(r.clone(), new_text); // r is a valid char-boundary range
         let at = r.start + new_text.len();
         self.selected_range = at..at;
         self.selection_reversed = false;

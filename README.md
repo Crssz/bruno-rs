@@ -2,7 +2,8 @@
 
 A native-Rust rewrite of the [Bruno](https://github.com/usebruno/bruno) API client — a fast,
 single-binary, offline-first, git-native alternative to Postman/Insomnia. No Electron, no web
-stack: a pure-Rust core with an [iced](https://iced.rs) (wgpu) desktop GUI and a headless CLI.
+stack: a pure-Rust core with a [gpui](https://www.gpui.rs) (Zed's GPU UI framework) desktop GUI —
+native editor with real tree-sitter syntax highlighting — and a headless CLI.
 
 Collections are plain-text `.bru` files on disk, **byte-for-byte compatible** with Bruno — so your
 existing collections open here and `git diff` stays clean.
@@ -23,9 +24,10 @@ responses, and run collections headless in CI.
 | Post-response vars | ✅ capture `res.body.*` into variables for request chaining |
 | Scripting | ✅ pre/post/test JS in a QuickJS Safe-Mode sandbox — `bru.*` / `req` / `res` / `test` / `expect` + a `pm.*` Postman shim; time/memory/stack-limited |
 | Collection runner | ✅ `bru run <dir>`; **data-driven** via `--data <json\|csv>` (one iteration per row, row fields as vars) |
-| GUI | ✅ tree + **editable raw `.bru`** (validated Save) + send + response (status/timing/assertions/tests/console/body) |
+| GUI | ✅ multi-tab editor (**tree-sitter highlighted, fully editable** URL + every `.bru` block) + Save + send + response (status/timing/assertions/tests/console/body, JSON-highlighted) + environments + vault + cookies + devtools + collection runner + Home/recent + sidebar search |
+| Import | ✅ Postman v2.1 + cURL (in-app) · ⏳ OpenAPI / Insomnia |
 | CLI | ✅ `bru run <file-or-dir> [--env] [--insecure] [--data] [--iterations]` with pass/fail exit codes |
-| Postman import, GUI structured editors, NTLM/WSSE auth | ⏳ planned |
+| GUI structured form editors, NTLM/WSSE auth | ⏳ planned |
 
 ## Build & run
 
@@ -55,8 +57,8 @@ crates/
   bru-engine  orchestrator: vars -> interpolate -> send -> assert -> capture
   bru-script  QuickJS Safe-Mode sandbox + bru/req/res/test/expect/pm prelude
   bru-cli     `bru` — headless runner
-  bru-app     `bruno-rs` — iced (wgpu) desktop app
-  bru-import  Postman / OpenAPI / Insomnia / cURL import (planned)
+  bru-app     `bruno-rs` — gpui (Zed's GPU UI) desktop app: multi-tab editor w/ tree-sitter highlighting
+  bru-import  Postman / OpenAPI / Insomnia / cURL import (planned standalone crate; basic import lives in-app)
 ```
 
 The `.bru` codec is built on a **lossless block model**: it preserves a file's exact parse order and
