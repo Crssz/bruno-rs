@@ -94,7 +94,7 @@ use gpui::{
 use gpui_platform::application;
 
 // App-level keyboard actions (distinct namespace from the editor's actions).
-actions!(bru_app, [SaveTab, SendReq, CloseOverlay]);
+actions!(bru_app, [SaveTab, SendReq, CloseOverlay, OpenPalette]);
 
 /// Bind the app-level shortcuts once at startup (scoped to the BruApp root
 /// context so they fire even while a CodeEditor descendant holds focus).
@@ -102,8 +102,19 @@ fn bind_app_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-s", SaveTab, Some("BruApp")),
         KeyBinding::new("ctrl-enter", SendReq, Some("BruApp")),
+        KeyBinding::new("ctrl-k", OpenPalette, Some("BruApp")),
         KeyBinding::new("escape", CloseOverlay, Some("BruApp")),
     ]);
+}
+
+/// Flatten every request in a folder tree into `(name, path)` (recursive).
+fn flatten_requests(folder: &Folder, out: &mut Vec<(String, PathBuf)>) {
+    for sub in &folder.folders {
+        flatten_requests(sub, out);
+    }
+    for req in &folder.requests {
+        out.push((req.name.clone(), req.path.clone()));
+    }
 }
 
 /// A pill/button used in the chrome (ghost style).
@@ -359,6 +370,10 @@ struct BruApp {
     resp_filter_query: String,
     /// Root focus handle, so app-level key actions dispatch.
     focus_handle: FocusHandle,
+    /// Command palette (Ctrl+K jump-to-request): open flag + input + query.
+    palette_open: bool,
+    palette_input: Entity<CodeEditor>,
+    palette_query: String,
 }
 
 /// A right-click menu over a sidebar entry, anchored at the click point.
@@ -1195,6 +1210,12 @@ impl BruApp {
             cx.notify();
         })
         .detach();
+        let palette_input = cx.new(|cx| CodeEditor::single_line(cx, ""));
+        cx.subscribe(&palette_input, |this, ed, _ev: &editor::Changed, cx| {
+            this.palette_query = ed.read(cx).text().to_string();
+            cx.notify();
+        })
+        .detach();
         Self {
             dir,
             collection,
@@ -1240,6 +1261,9 @@ impl BruApp {
             resp_filter,
             resp_filter_query: String::new(),
             focus_handle: cx.focus_handle(),
+            palette_open: false,
+            palette_input,
+            palette_query: String::new(),
         }
     }
 
@@ -1254,10 +1278,123 @@ impl BruApp {
     fn on_escape_action(&mut self, _: &CloseOverlay, _w: &mut Window, cx: &mut Context<Self>) {
         self.close_topmost_overlay(cx);
     }
+    fn on_palette_action(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette_open = true;
+        let h = self.palette_input.read(cx).focus_handle(cx);
+        window.focus(&h, cx);
+        cx.notify();
+    }
+
+    /// The Ctrl+K jump-to-request command palette.
+    fn palette_overlay(&self, cx: &mut Context<Self>) -> Div {
+        let q = self.palette_query.to_lowercase();
+        let mut items: Vec<(String, PathBuf)> = Vec::new();
+        if let Some(tree) = &self.collection {
+            flatten_requests(&tree.root, &mut items);
+        }
+        let filtered: Vec<(String, PathBuf)> = items
+            .into_iter()
+            .filter(|(n, p)| {
+                q.is_empty()
+                    || n.to_lowercase().contains(&q)
+                    || p.to_string_lossy().to_lowercase().contains(&q)
+            })
+            .take(60)
+            .collect();
+        let mut list = div().flex().flex_col().gap_1();
+        for (name, path) in filtered {
+            let hint = path
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let p = path.clone();
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .hover(|s| s.bg(theme::surface0()))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(theme::text())
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(theme::muted())
+                            .child(hint),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                            this.open_request(p.clone(), cx);
+                            this.palette_open = false;
+                            cx.notify();
+                        }),
+                    ),
+            );
+        }
+        let card = div()
+            .w(px(520.))
+            .max_h(px(440.))
+            .p_3()
+            .rounded_md()
+            .bg(theme::mantle())
+            .border_1()
+            .border_color(theme::border2())
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme::input_bg())
+                    .border_1()
+                    .border_color(theme::border1())
+                    .text_size(px(13.))
+                    .child(self.palette_input.clone()),
+            )
+            .child(
+                div()
+                    .id("palette-list")
+                    .overflow_y_scroll()
+                    .flex_1()
+                    .child(list),
+            );
+        div()
+            .absolute()
+            .inset_0()
+            .bg(gpui::rgba(0x000000aa))
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(80.))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseDownEvent, _w, cx| {
+                    this.palette_open = false;
+                    cx.notify();
+                }),
+            )
+            .child(card)
+    }
 
     /// Esc closes the topmost open overlay/menu (in priority order).
     fn close_topmost_overlay(&mut self, cx: &mut Context<Self>) {
-        if self.confirm_close.take().is_some()
+        if self.palette_open {
+            self.palette_open = false;
+        } else if self.confirm_close.take().is_some()
             || self.confirm_delete.take().is_some()
             || self.rename.take().is_some()
             || self.ctx_menu.take().is_some()
@@ -4755,6 +4892,7 @@ impl Render for BruApp {
             .on_action(cx.listener(Self::on_save_action))
             .on_action(cx.listener(Self::on_send_action))
             .on_action(cx.listener(Self::on_escape_action))
+            .on_action(cx.listener(Self::on_palette_action))
             .relative()
             .flex()
             .flex_col()
@@ -4804,6 +4942,9 @@ impl Render for BruApp {
         }
         if self.env_menu.is_some() {
             root = root.child(self.env_menu_overlay(cx));
+        }
+        if self.palette_open {
+            root = root.child(self.palette_overlay(cx));
         }
         // The context menu sits on top so it overlays everything else.
         if self.ctx_menu.is_some() {
