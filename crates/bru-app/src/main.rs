@@ -1026,7 +1026,7 @@ struct CookieEntry {
     value: String,
 }
 
-/// `~/.bruno-rs/gpui-recent.json` â€” the recent-collections list.
+/// `~/.bruno-rs/gpui-recent.json` Ã¢â‚¬â€ the recent-collections list.
 fn recent_path() -> Option<PathBuf> {
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
     let dir = PathBuf::from(home).join(".bruno-rs");
@@ -1220,7 +1220,7 @@ fn reveal_in_file_manager(path: &Path) {
     }
 }
 
-/// Build a `curl` command for the request â€” method, URL, headers, and body â€”
+/// Build a `curl` command for the request Ã¢â‚¬â€ method, URL, headers, and body Ã¢â‚¬â€
 /// for the "</>" generate-code affordance (copied to the clipboard).
 fn to_curl(tab: &OpenTab, cx: &App) -> String {
     let method = if tab.method.is_empty() {
@@ -1517,6 +1517,7 @@ impl BruApp {
                 div()
                     .id("palette-list")
                     .overflow_y_scroll()
+                    .min_h_0()
                     .flex_1()
                     .child(list),
             );
@@ -1618,7 +1619,7 @@ impl BruApp {
         }
     }
 
-    // â”€â”€ active environment selector â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ active environment selector Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     fn open_env_menu(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
         self.env_menu = Some(pos);
         cx.notify();
@@ -1765,7 +1766,7 @@ impl BruApp {
         cx.notify();
     }
 
-    // â”€â”€ sidebar context menu â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ sidebar context menu Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     fn open_ctx_menu(
         &mut self,
         target: PathBuf,
@@ -2297,7 +2298,7 @@ impl BruApp {
             .child(card)
     }
 
-    // â”€â”€ secrets vault â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ secrets vault Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     /// Vault secrets as the lowest-precedence base vars for sends.
     fn vault_vars(&self) -> HashMap<String, String> {
         self.vault.clone().unwrap_or_default()
@@ -2567,7 +2568,7 @@ impl BruApp {
         cx.notify();
     }
 
-    // â”€â”€ collection runner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ collection runner Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     fn requests_under(&self, dir: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
         let Some(tree) = &self.collection else {
@@ -2620,7 +2621,7 @@ impl BruApp {
         .detach();
     }
 
-    // â”€â”€ environment manager â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ environment manager Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     /// The dir the env manager currently operates on (collection or globals).
     fn env_dir(&self) -> PathBuf {
         if self.env.as_ref().map(|e| e.global).unwrap_or(false) {
@@ -3009,7 +3010,7 @@ impl BruApp {
         cx.spawn(async move |this, cx| {
             let result = rx.await;
             let _ = this.update(cx, |this, cx| {
-                // Tab may have moved/closed while in flight â€” re-find by path.
+                // Tab may have moved/closed while in flight Ã¢â‚¬â€ re-find by path.
                 let status = match &result {
                     Ok(o) if o.error.is_none() => "Response received",
                     Ok(_) => "Request error",
@@ -3121,7 +3122,7 @@ impl BruApp {
         cx.notify();
     }
 
-    // â”€â”€ structured params/headers grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Ã¢â€â‚¬Ã¢â€â‚¬ structured params/headers grid Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     fn kv_add_row(&mut self, cx: &mut Context<Self>) {
         let Some(i) = self.active else { return };
         let row = KvRow {
@@ -3282,9 +3283,9 @@ impl BruApp {
             ))
             .child(
                 icon_chip(if theme::is_dark() {
-                    "\u{2600}" // â˜€ â€” click for light
+                    "\u{2600}" // Ã¢Ëœâ‚¬ Ã¢â‚¬â€ click for light
                 } else {
-                    "\u{263E}" // â˜¾ â€” click for dark
+                    "\u{263E}" // Ã¢ËœÂ¾ Ã¢â‚¬â€ click for dark
                 })
                 .on_mouse_up(
                     MouseButton::Left,
@@ -3385,8 +3386,9 @@ impl BruApp {
             .child(
                 div()
                     .id("sidebar-rows")
-                    .overflow_y_scroll()
                     .flex_1()
+                    .overflow_y_scroll()
+                    .min_h_0()
                     .flex()
                     .flex_col()
                     .gap_1()
@@ -3731,7 +3733,15 @@ impl BruApp {
                 ));
         }
 
-        let scroll = |id: &'static str| div().id(id).overflow_y_scroll().flex_1().w_full().p_3();
+        let scroll = |id: &'static str| {
+            div()
+                .id(id)
+                .overflow_y_scroll()
+                .min_h_0()
+                .flex_1()
+                .w_full()
+                .p_3()
+        };
         let content: gpui::AnyElement = match (&tab.response, tab.resp_tab) {
             (None, _) => div()
                 .p_3()
@@ -4001,6 +4011,7 @@ impl BruApp {
                         div()
                             .id(id)
                             .overflow_y_scroll()
+                            .min_h_0()
                             .flex_1()
                             .w_full()
                             .p_3()
@@ -4029,6 +4040,7 @@ impl BruApp {
                 div()
                     .id("body")
                     .overflow_y_scroll()
+                    .min_h_0()
                     .flex_1()
                     .w_full()
                     .p_3()
@@ -4039,7 +4051,7 @@ impl BruApp {
             )
     }
 
-    /// The structured params/headers grid (enable toggle + name + value + âœ•).
+    /// The structured params/headers grid (enable toggle + name + value + Ã¢Å“â€¢).
     fn kv_grid(&self, tab: &OpenTab, cx: &mut Context<Self>) -> Div {
         let cell = |child: Entity<CodeEditor>, w: Option<Pixels>| {
             let d = div()
@@ -4159,6 +4171,7 @@ impl BruApp {
                 div()
                     .id("kv-grid")
                     .overflow_y_scroll()
+                    .min_h_0()
                     .flex_1()
                     .w_full()
                     .p_3()
@@ -4297,6 +4310,7 @@ impl BruApp {
                         div()
                             .id("vault-table")
                             .overflow_y_scroll()
+                            .min_h_0()
                             .flex_1()
                             .child(table),
                     )
@@ -4471,6 +4485,7 @@ impl BruApp {
                 div()
                     .id("devtools-body")
                     .overflow_y_scroll()
+                    .min_h_0()
                     .flex_1()
                     .w_full()
                     .child(body),
@@ -4595,6 +4610,7 @@ impl BruApp {
         let editor = div()
             .id("curl-input")
             .overflow_y_scroll()
+            .min_h_0()
             .flex_1()
             .w_full()
             .p_2()
@@ -4665,6 +4681,7 @@ impl BruApp {
         let mut list = div()
             .id("cookies-list")
             .overflow_y_scroll()
+            .min_h_0()
             .flex()
             .flex_col()
             .gap_1()
@@ -4795,6 +4812,7 @@ impl BruApp {
         let mut list = div()
             .id("runner-list")
             .overflow_y_scroll()
+            .min_h_0()
             .flex()
             .flex_col()
             .gap_1()
@@ -4958,6 +4976,7 @@ impl BruApp {
         let left = div()
             .id("env-list")
             .overflow_y_scroll()
+            .min_h_0()
             .w(px(220.))
             .h_full()
             .child(list);
@@ -5075,6 +5094,7 @@ impl BruApp {
                         div()
                             .id("env-table")
                             .overflow_y_scroll()
+                            .min_h_0()
                             .flex_1()
                             .child(table),
                     );
@@ -5272,6 +5292,7 @@ impl BruApp {
                 div()
                     .id("home-recent")
                     .overflow_y_scroll()
+                    .min_h_0()
                     .h(px(240.))
                     .child(list),
             );
@@ -5285,7 +5306,7 @@ impl BruApp {
             .child(col)
     }
 
-    /// The strip of open request tabs (click to focus, Ã— to close).
+    /// The strip of open request tabs (click to focus, Ãƒâ€” to close).
     fn tab_strip(&self, cx: &mut Context<Self>) -> Div {
         let mut strip = div()
             .flex()
