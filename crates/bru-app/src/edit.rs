@@ -149,18 +149,46 @@ pub fn kv_block_rows(file: &BruFile, block: &str) -> Vec<(String, String, bool)>
     }
 }
 
-/// Replace a Dict block from `(name, value, enabled)` grid rows (blank names
-/// dropped). Removes the block when no rows remain; creates it if absent.
-pub fn set_kv_block(file: &mut BruFile, block: &str, rows: &[(String, String, bool)]) {
+/// Rebuild a Dict block from edited grid rows `(name, value, enabled, local)`,
+/// **merging onto existing entries by name** so anything the grid doesn't model
+/// survives: decorator `@annotations`, a quoted key, and an untouched non-inline
+/// value (multiline / list). A fresh inline entry is built only for a new or
+/// renamed name; the value is rewritten only when the user actually changed it.
+/// Blank names are dropped; removes the block when empty, creates it if absent.
+fn merge_dict_block(
+    file: &mut BruFile,
+    block: &str,
+    rows: impl Iterator<Item = (String, String, bool, bool)>,
+) {
+    let existing: Vec<Entry> = match file.block(block).map(|b| &b.content) {
+        Some(BlockContent::Dict(e)) => e.clone(),
+        _ => Vec::new(),
+    };
     let entries: Vec<Entry> = rows
-        .iter()
-        .filter(|(k, _, _)| !k.trim().is_empty())
-        .map(|(k, v, enabled)| Entry {
-            annotations: Vec::new(),
-            disabled: !enabled,
-            local: false,
-            key: Key::Bare(k.trim().to_string()),
-            value: Value::Inline(v.clone()),
+        .filter(|(k, _, _, _)| !k.trim().is_empty())
+        .map(|(k, v, enabled, local)| {
+            let name = k.trim();
+            match existing.iter().find(|e| e.key.name() == name) {
+                // Existing entry: keep its annotations / key form, update flags,
+                // and only replace the value if it actually changed (so a
+                // multiline/list value the grid flattened to "" is preserved).
+                Some(orig) => {
+                    let mut e = orig.clone();
+                    e.disabled = !enabled;
+                    e.local = local;
+                    if v != e.value.as_inline() {
+                        e.value = Value::Inline(v);
+                    }
+                    e
+                }
+                None => Entry {
+                    annotations: Vec::new(),
+                    disabled: !enabled,
+                    local,
+                    key: Key::Bare(name.to_string()),
+                    value: Value::Inline(v),
+                },
+            }
         })
         .collect();
     if entries.is_empty() {
@@ -174,6 +202,48 @@ pub fn set_kv_block(file: &mut BruFile, block: &str, rows: &[(String, String, bo
             content: BlockContent::Dict(entries),
         }),
     }
+}
+
+/// Replace a Dict block from `(name, value, enabled)` grid rows (blank names
+/// dropped). Removes the block when no rows remain; creates it if absent.
+/// Merges onto existing entries (see [`merge_dict_block`]); params/headers have
+/// no `local` flag, so it is always `false` here.
+pub fn set_kv_block(file: &mut BruFile, block: &str, rows: &[(String, String, bool)]) {
+    merge_dict_block(
+        file,
+        block,
+        rows.iter()
+            .map(|(k, v, en)| (k.clone(), v.clone(), *en, false)),
+    );
+}
+
+/// Read a vars block as `(name, value, enabled, local)` rows. Unlike
+/// [`kv_block_rows`], this carries the `local` (`@`) flag so the Vars grid can
+/// preserve it on round-trip (params/headers have no such flag).
+pub fn var_block_rows(file: &BruFile, block: &str) -> Vec<(String, String, bool, bool)> {
+    match file.block(block).map(|b| &b.content) {
+        Some(BlockContent::Dict(entries)) => entries
+            .iter()
+            .map(|e| {
+                (
+                    e.key.name().to_string(),
+                    e.value.as_inline().to_string(),
+                    !e.disabled,
+                    e.local,
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Replace a vars block from `(name, value, enabled, local)` grid rows, keeping
+/// the `local` flag (serialized as the `@` prefix). Merges onto existing entries
+/// (see [`merge_dict_block`]) so `@annotations`, quoted keys, and untouched
+/// multiline/list values are preserved. Blank names dropped; removes the block
+/// when empty, creates it (as Dict) if absent.
+pub fn set_var_block(file: &mut BruFile, block: &str, rows: &[(String, String, bool, bool)]) {
+    merge_dict_block(file, block, rows.iter().cloned());
 }
 
 /// Set a `key: value` field on the active method block (e.g. the `body`/`auth`
@@ -273,4 +343,108 @@ fn parse_line(line: &str) -> Option<Entry> {
         key: Key::Bare(key.to_string()),
         value: Value::Inline(value.to_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn var_block_rows_carries_local_and_enabled() {
+        let src = "vars:post-response {\n  @token: res.body.token\n  ~skip: nope\n  plain: x\n}\n";
+        let file = bru_lang::parse(src).expect("parse");
+        let rows = var_block_rows(&file, "vars:post-response");
+        assert_eq!(rows.len(), 3);
+        // @token → local, enabled
+        assert_eq!(
+            rows[0],
+            ("token".into(), "res.body.token".into(), true, true)
+        );
+        // ~skip → disabled, not local
+        assert_eq!(rows[1], ("skip".into(), "nope".into(), false, false));
+        // plain → enabled, not local
+        assert_eq!(rows[2], ("plain".into(), "x".into(), true, false));
+    }
+
+    #[test]
+    fn set_var_block_preserves_local_through_serialize() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        set_var_block(
+            &mut file,
+            "vars:post-response",
+            &[
+                ("token".into(), "res.body.token".into(), true, true),
+                ("audit".into(), "x".into(), false, false),
+            ],
+        );
+        let out = bru_lang::serialize(&file);
+        // local var keeps its @; disabled var keeps its ~.
+        assert!(out.contains("@token: res.body.token"), "got:\n{out}");
+        assert!(out.contains("~audit: x"), "got:\n{out}");
+    }
+
+    #[test]
+    fn set_var_block_empty_removes_block() {
+        let mut file = bru_lang::parse("vars:pre-request {\n  a: 1\n}\n").expect("parse");
+        set_var_block(&mut file, "vars:pre-request", &[]);
+        assert!(file.block("vars:pre-request").is_none());
+    }
+
+    #[test]
+    fn set_var_block_preserves_annotations_on_unchanged_value() {
+        let src = "vars:pre-request {\n  @description(\"hi\")\n  key: value\n}\n";
+        let mut file = bru_lang::parse(src).expect("parse");
+        // Round-trip the rows unchanged (what happens when the tab is merely viewed).
+        let rows = var_block_rows(&file, "vars:pre-request");
+        set_var_block(&mut file, "vars:pre-request", &rows);
+        let out = bru_lang::serialize(&file);
+        // The serializer re-quotes annotation values with single quotes.
+        assert!(
+            out.contains("@description('hi')"),
+            "annotation lost:\n{out}"
+        );
+        assert!(out.contains("key: value"), "value changed:\n{out}");
+    }
+
+    #[test]
+    fn set_var_block_keeps_annotation_when_value_edited() {
+        let src = "vars:pre-request {\n  @description(\"hi\")\n  key: old\n}\n";
+        let mut file = bru_lang::parse(src).expect("parse");
+        set_var_block(
+            &mut file,
+            "vars:pre-request",
+            &[("key".into(), "new".into(), true, false)],
+        );
+        let out = bru_lang::serialize(&file);
+        assert!(
+            out.contains("@description('hi')"),
+            "annotation lost:\n{out}"
+        );
+        assert!(out.contains("key: new"), "value not updated:\n{out}");
+    }
+
+    #[test]
+    fn set_var_block_preserves_quoted_key() {
+        let mut file = bru_lang::parse("vars:pre-request {\n  \"my var\": 1\n}\n").expect("parse");
+        let rows = var_block_rows(&file, "vars:pre-request");
+        assert_eq!(rows[0].0, "my var");
+        set_var_block(&mut file, "vars:pre-request", &rows);
+        let out = bru_lang::serialize(&file);
+        assert!(out.contains("\"my var\": 1"), "quotes lost:\n{out}");
+    }
+
+    #[test]
+    fn set_var_block_preserves_untouched_multiline_value() {
+        let mut file =
+            bru_lang::parse("vars:pre-request {\n  body: '''line1\nline2'''\n}\n").expect("parse");
+        // The grid flattens a multiline value to "" on read; an unchanged
+        // round-trip must keep the original form, not overwrite it with empty.
+        let rows = var_block_rows(&file, "vars:pre-request");
+        set_var_block(&mut file, "vars:pre-request", &rows);
+        let out = bru_lang::serialize(&file);
+        // The value survives as a multiline (not flattened to empty); the
+        // serializer indents continuation lines, so check the markers + content.
+        assert!(out.contains("'''line1"), "multiline start lost:\n{out}");
+        assert!(out.contains("line2'''"), "multiline end lost:\n{out}");
+    }
 }

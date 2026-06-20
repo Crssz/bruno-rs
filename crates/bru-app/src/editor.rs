@@ -11,9 +11,8 @@ use std::ops::Range;
 use gpui::{
     actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
     CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    Focusable, Font, GlobalElementId, HighlightStyle, Hsla, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, Style, TextRun,
-    UTF16Selection, Window,
+    Focusable, Font, GlobalElementId, Hsla, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, Style, TextRun, UTF16Selection, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -24,6 +23,7 @@ use crate::{highlight, theme};
 pub enum Lang {
     Plain,
     Json,
+    JavaScript,
 }
 
 /// Emitted on every content change, so a parent can react live (e.g. filtering).
@@ -92,8 +92,10 @@ pub struct CodeEditor {
     masked: bool,
     /// Block edits (still selectable + copyable) — for the response viewer.
     read_only: bool,
-    /// Cached tree-sitter highlight spans (recomputed on every content change).
-    spans: Vec<(Range<usize>, HighlightStyle)>,
+    /// Cached tree-sitter highlight spans as `(byte range, capture index)`,
+    /// recomputed on every content change. The capture index is resolved to a
+    /// color at paint time so a theme switch recolors syntax without a re-parse.
+    spans: Vec<(Range<usize>, usize)>,
     // Layout caches (filled during paint) for mouse mapping.
     line_layouts: Vec<ShapedLine>,
     bounds: Option<Bounds<Pixels>>,
@@ -171,6 +173,7 @@ impl CodeEditor {
     fn recompute_highlight(&mut self) {
         self.spans = match self.lang {
             Lang::Json => highlight::json(&self.content),
+            Lang::JavaScript => highlight::javascript(&self.content),
             Lang::Plain => Vec::new(),
         };
     }
@@ -566,12 +569,14 @@ impl CodeEditor {
 }
 
 /// Build per-line `TextRun`s from the cached highlight spans, filling gaps with
-/// the default color. `spans` must be sorted by start (tree-sitter emits them in
-/// document order) and non-overlapping.
+/// the default color. `spans` are `(byte range, capture index)`; the color is
+/// resolved per-paint via `highlight::color` (so a theme switch is live) and a
+/// capture with no dedicated color also falls back to `default`. `spans` must be
+/// sorted by start (tree-sitter emits them in document order) and non-overlapping.
 fn build_line_runs(
     line: &str,
     lstart: usize,
-    spans: &[(Range<usize>, HighlightStyle)],
+    spans: &[(Range<usize>, usize)],
     font: &Font,
     default: Hsla,
 ) -> Vec<TextRun> {
@@ -589,7 +594,7 @@ fn build_line_runs(
     };
     let mut runs = Vec::new();
     let mut pos = lstart;
-    for (range, style) in spans {
+    for (range, kind) in spans {
         if range.end <= lstart || range.start >= lend {
             continue;
         }
@@ -599,7 +604,7 @@ fn build_line_runs(
             runs.push(mk(s - pos, default));
         }
         if e > s {
-            runs.push(mk(e - s, style.color.unwrap_or(default)));
+            runs.push(mk(e - s, highlight::color(*kind).unwrap_or(default)));
         }
         if e > pos {
             pos = e;

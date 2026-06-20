@@ -39,6 +39,7 @@ embedded! {
     "icons/x.svg" => "../assets/icons/x.svg",
     "icons/folder.svg" => "../assets/icons/folder.svg",
     "icons/settings.svg" => "../assets/icons/settings.svg",
+    "icons/git-branch.svg" => "../assets/icons/git-branch.svg",
 }
 
 /// A 16px icon by short name (e.g. `icon("search")`). The caller sets the color

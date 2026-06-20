@@ -4,6 +4,7 @@
 mod edit;
 mod editor;
 mod envfs;
+mod git;
 mod highlight;
 mod icons;
 mod import;
@@ -32,6 +33,9 @@ enum EditKind {
     /// GraphQL: body:graphql (query) in the main editor, body:graphql:vars in
     /// the secondary editor.
     GraphQl,
+    /// The Vars tab: two structured tables (`vars:pre-request` +
+    /// `vars:post-response`), edited via `var_pre_rows` / `var_post_rows`.
+    Vars,
     /// The whole `.bru` source: reparse it on apply.
     Source,
 }
@@ -41,6 +45,16 @@ struct KvRow {
     name: Entity<CodeEditor>,
     value: Entity<CodeEditor>,
     enabled: bool,
+}
+
+/// One row of a Vars table (pre-request or post-response). Like [`KvRow`] but
+/// carries the `local` (`@`) flag so it round-trips (preserved, not editable —
+/// matching Bruno, which keeps the flag without a dedicated column).
+struct VarRow {
+    name: Entity<CodeEditor>,
+    value: Entity<CodeEditor>,
+    enabled: bool,
+    local: bool,
 }
 
 /// One labeled field of the structured Auth form (e.g. "Username" → `username`).
@@ -59,7 +73,6 @@ enum ReqTab {
     Auth,
     Assert,
     Vars,
-    PostVars,
     Script,
     PostScript,
     Tests,
@@ -68,14 +81,13 @@ enum ReqTab {
 }
 
 impl ReqTab {
-    const ALL: [ReqTab; 12] = [
+    const ALL: [ReqTab; 11] = [
         ReqTab::Params,
         ReqTab::Body,
         ReqTab::Headers,
         ReqTab::Auth,
         ReqTab::Assert,
         ReqTab::Vars,
-        ReqTab::PostVars,
         ReqTab::Script,
         ReqTab::PostScript,
         ReqTab::Tests,
@@ -90,7 +102,6 @@ impl ReqTab {
             ReqTab::Auth => "Auth",
             ReqTab::Assert => "Assert",
             ReqTab::Vars => "Vars",
-            ReqTab::PostVars => "Post Vars",
             ReqTab::Script => "Script",
             ReqTab::PostScript => "Post Script",
             ReqTab::Tests => "Tests",
@@ -448,6 +459,22 @@ struct BruApp {
     method_menu: Option<Point<Pixels>>,
     /// Body/auth mode dropdown: (anchor, is_body). None = closed.
     mode_menu: Option<(Point<Pixels>, bool)>,
+    /// Whether the collection dir is a git work tree (git present + inside repo).
+    /// Drives the status-bar chip independently of `git_status`, so a transient
+    /// `git status` failure doesn't hide the only entry point to the git overlay.
+    git_repo: bool,
+    /// Parsed git status (None = not a repo, or status couldn't be read yet).
+    git_status: Option<git::Status>,
+    /// Whether the git overlay (commit/push/pull panel) is open.
+    git_open: bool,
+    /// True while a git operation is running on a worker thread.
+    git_busy: bool,
+    /// The last git operation's result or error message.
+    git_output: String,
+    /// Commit-message input for the git overlay.
+    git_msg: Entity<CodeEditor>,
+    /// Arms the destructive "Discard all" button (two-click confirm).
+    git_confirm_discard: bool,
 }
 
 /// A right-click menu over a sidebar entry, anchored at the click point.
@@ -527,6 +554,9 @@ struct OpenTab {
     edit_kind: EditKind,
     /// Row editors for the structured params/headers grid (when on those tabs).
     kv_rows: Vec<KvRow>,
+    /// Vars-tab row editors: pre-request and post-response tables.
+    var_pre_rows: Vec<VarRow>,
+    var_post_rows: Vec<VarRow>,
     /// Field editors for the structured Auth form (when on the Auth tab).
     auth_rows: Vec<AuthFieldRow>,
     /// URL-derived path params (name, value editor) shown on the Params tab.
@@ -570,6 +600,8 @@ impl OpenTab {
             url_input,
             edit_kind: EditKind::None,
             kv_rows: Vec::new(),
+            var_pre_rows: Vec::new(),
+            var_post_rows: Vec::new(),
             auth_rows: Vec::new(),
             path_rows: Vec::new(),
             sending: false,
@@ -648,6 +680,12 @@ impl OpenTab {
                 set_text_block(&mut self.file, "body:graphql", text);
                 set_text_block(&mut self.file, "body:graphql:vars", vars);
             }
+            EditKind::Vars => {
+                let pre = collect_var_rows(&self.var_pre_rows, cx);
+                let post = collect_var_rows(&self.var_post_rows, cx);
+                edit::set_var_block(&mut self.file, "vars:pre-request", &pre);
+                edit::set_var_block(&mut self.file, "vars:post-response", &post);
+            }
             EditKind::AuthForm(block) => {
                 let mut lines = String::new();
                 for r in &self.auth_rows {
@@ -662,8 +700,21 @@ impl OpenTab {
 
     /// Load the active sub-tab's block into the shared editor.
     fn load_active_tab(&mut self, cx: &mut Context<BruApp>) {
-        // Cleared here; the structured-auth branch below repopulates it.
+        // Cleared here; the structured-auth / vars branches below repopulate them.
         self.auth_rows = Vec::new();
+        self.var_pre_rows = Vec::new();
+        self.var_post_rows = Vec::new();
+        // The Vars tab is two structured tables (pre-request + post-response) on
+        // one page (Bruno's layout), each preserving the `@local` flag.
+        if self.req_tab == ReqTab::Vars {
+            self.kv_rows = Vec::new();
+            self.path_rows = Vec::new();
+            let path = self.path.clone();
+            self.var_pre_rows = build_var_rows(&self.file, "vars:pre-request", &path, cx);
+            self.var_post_rows = build_var_rows(&self.file, "vars:post-response", &path, cx);
+            self.edit_kind = EditKind::Vars;
+            return;
+        }
         // Params/Headers/Assert + form/multipart bodies use the structured grid.
         let kv_block: Option<&str> = match self.req_tab {
             ReqTab::Params => Some("params:query"),
@@ -780,14 +831,9 @@ impl OpenTab {
                 Lang::Plain,
                 EditKind::Dict("headers".into()),
             ),
-            // Params/Headers/Assert are handled by the kv-grid early return above;
-            // this arm only exists to keep the match exhaustive.
-            ReqTab::Assert => (String::new(), Lang::Plain, EditKind::None),
-            ReqTab::Vars => (
-                edit::dict_to_lines(f, "vars:pre-request"),
-                Lang::Plain,
-                EditKind::Dict("vars:pre-request".into()),
-            ),
+            // Params/Headers/Assert/Vars are handled by early returns above; these
+            // arms only exist to keep the match exhaustive.
+            ReqTab::Assert | ReqTab::Vars => (String::new(), Lang::Plain, EditKind::None),
             ReqTab::Auth => {
                 let mode = edit::method_field(f, "auth").unwrap_or_default();
                 let block = auth_block_name(&mode).map(str::to_string).or_else(|| {
@@ -801,26 +847,25 @@ impl OpenTab {
                     None => (String::new(), Lang::Plain, EditKind::None),
                 }
             }
-            ReqTab::PostVars => (
-                edit::dict_to_lines(f, "vars:post-response"),
-                Lang::Plain,
-                EditKind::Dict("vars:post-response".into()),
-            ),
             ReqTab::Script => {
                 let t = text_block(f, "script:pre-request");
-                (t, Lang::Plain, EditKind::Body("script:pre-request".into()))
+                (
+                    t,
+                    Lang::JavaScript,
+                    EditKind::Body("script:pre-request".into()),
+                )
             }
             ReqTab::PostScript => {
                 let t = text_block(f, "script:post-response");
                 (
                     t,
-                    Lang::Plain,
+                    Lang::JavaScript,
                     EditKind::Body("script:post-response".into()),
                 )
             }
             ReqTab::Tests => (
                 text_block(f, "tests"),
-                Lang::Plain,
+                Lang::JavaScript,
                 EditKind::Body("tests".into()),
             ),
             ReqTab::Docs => (
@@ -1084,6 +1129,62 @@ fn build_kv_rows(file: &BruFile, block: &str, cx: &mut Context<BruApp>) -> Vec<K
             name: cx.new(|cx| CodeEditor::single_line(cx, &k)),
             value: cx.new(|cx| CodeEditor::single_line(cx, &v)),
             enabled,
+        })
+        .collect()
+}
+
+/// Whether a variable name is valid (Bruno's `variableNameRegex` = `^[\w-.]*$`):
+/// only letters, digits, `_`, `-`, `.`. Empty is treated as valid (no error).
+fn valid_var_name(name: &str) -> bool {
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+/// Subscribe a Vars-row editor so a keystroke marks the tab dirty and re-renders
+/// the parent (needed for live name validation, and so cell edits aren't lost).
+fn subscribe_var_editor(ed: &Entity<CodeEditor>, path: PathBuf, cx: &mut Context<BruApp>) {
+    cx.subscribe(ed, move |this, _ed, _ev: &editor::Changed, cx| {
+        this.dirty.insert(path.clone());
+        cx.notify();
+    })
+    .detach();
+}
+
+/// Build Vars-table rows from a vars Dict block, carrying the `local` flag. Each
+/// editor is subscribed so edits mark the tab dirty + drive live validation.
+fn build_var_rows(
+    file: &BruFile,
+    block: &str,
+    path: &Path,
+    cx: &mut Context<BruApp>,
+) -> Vec<VarRow> {
+    edit::var_block_rows(file, block)
+        .into_iter()
+        .map(|(k, v, enabled, local)| {
+            let name = cx.new(|cx| CodeEditor::single_line(cx, &k));
+            let value = cx.new(|cx| CodeEditor::single_line(cx, &v));
+            subscribe_var_editor(&name, path.to_path_buf(), cx);
+            subscribe_var_editor(&value, path.to_path_buf(), cx);
+            VarRow {
+                name,
+                value,
+                enabled,
+                local,
+            }
+        })
+        .collect()
+}
+
+/// Read Vars-table row editors back into `(name, value, enabled, local)` tuples.
+fn collect_var_rows(rows: &[VarRow], cx: &Context<BruApp>) -> Vec<(String, String, bool, bool)> {
+    rows.iter()
+        .map(|r| {
+            (
+                r.name.read(cx).text().trim().to_string(),
+                r.value.read(cx).text().to_string(),
+                r.enabled,
+                r.local,
+            )
         })
         .collect()
 }
@@ -1475,7 +1576,8 @@ impl BruApp {
             cx.notify();
         })
         .detach();
-        Self {
+        let git_msg = cx.new(|cx| CodeEditor::single_line(cx, ""));
+        let mut app = Self {
             dir,
             collection,
             tabs: Vec::new(),
@@ -1534,7 +1636,16 @@ impl BruApp {
             sidebar_dragging: false,
             method_menu: None,
             mode_menu: None,
-        }
+            git_repo: false,
+            git_status: None,
+            git_open: false,
+            git_busy: false,
+            git_output: String::new(),
+            git_msg,
+            git_confirm_discard: false,
+        };
+        app.refresh_git_status(cx);
+        app
     }
 
     fn on_save_action(&mut self, _: &SaveTab, _w: &mut Window, cx: &mut Context<Self>) {
@@ -1676,6 +1787,9 @@ impl BruApp {
             // one of the lightweight popovers was closed
         } else if self.curl_open {
             self.curl_open = false;
+        } else if self.git_open {
+            self.git_open = false;
+            self.git_confirm_discard = false;
         } else if self.vault_open {
             self.vault_open = false;
         } else if self.prefs_open {
@@ -2756,7 +2870,13 @@ impl BruApp {
                 self.active = None;
                 self.env = None;
                 self.home = false;
+                self.git_open = false;
+                self.git_confirm_discard = false;
+                self.git_output.clear();
+                self.git_repo = false;
+                self.git_status = None;
                 self.status = "Loaded collection".into();
+                self.refresh_git_status(cx);
             }
             Err(e) => self.status = format!("Failed to load: {e}"),
         }
@@ -2839,6 +2959,103 @@ impl BruApp {
     fn clear_cookies(&mut self, cx: &mut Context<Self>) {
         self.cookies.clear();
         cx.notify();
+    }
+
+    // ── git ───────────────────────────────────────────────────────────────────
+    /// Recompute the collection's git status on a worker thread (it may touch the
+    /// filesystem / index) and store the result. Tracks repo-ness separately from
+    /// the parsed status so a transient status error keeps the chip reachable.
+    fn refresh_git_status(&mut self, cx: &mut Context<Self>) {
+        let dir = self.dir.clone();
+        let queried = dir.clone();
+        let (tx, rx) = futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            let repo = git::is_repo(&dir);
+            let status = if repo { git::status(&dir).ok() } else { None };
+            let _ = tx.send((repo, status));
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok((repo, status)) = rx.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                // Ignore a result for a collection the user has since switched away
+                // from (worker threads can finish out of order).
+                if this.dir != queried {
+                    return;
+                }
+                this.git_repo = repo;
+                this.git_status = status;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn open_git(&mut self, cx: &mut Context<Self>) {
+        self.git_open = true;
+        self.git_confirm_discard = false;
+        self.refresh_git_status(cx);
+        cx.notify();
+    }
+    fn close_git(&mut self, cx: &mut Context<Self>) {
+        self.git_open = false;
+        self.git_confirm_discard = false;
+        cx.notify();
+    }
+
+    /// Run a mutating git operation on a worker thread (network ops would block
+    /// the UI otherwise), then refresh the status and surface the result.
+    fn git_run(&mut self, op: git::Op, cx: &mut Context<Self>) {
+        if self.git_busy {
+            return;
+        }
+        self.git_confirm_discard = false;
+        let dir = self.dir.clone();
+        self.git_busy = true;
+        self.git_output = format!("{}\u{2026}", op.label());
+        cx.notify();
+        let (tx, rx) = futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(git::run_op(&dir, &op));
+        });
+        cx.spawn(async move |this, cx| {
+            let result = rx.await;
+            let _ = this.update(cx, |this, cx| {
+                this.git_busy = false;
+                match result {
+                    Ok(Ok(msg)) => {
+                        this.git_output = msg;
+                        // A successful commit consumes the message input.
+                        this.git_msg.update(cx, |ed, cx| ed.set_line("", cx));
+                    }
+                    Ok(Err(e)) => this.git_output = e,
+                    Err(_) => this.git_output = "Operation cancelled".into(),
+                }
+                this.refresh_git_status(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Stage everything and commit with the overlay's message.
+    fn git_commit(&mut self, cx: &mut Context<Self>) {
+        let msg = self.git_msg.read(cx).text().trim().to_string();
+        if msg.is_empty() {
+            self.git_output = "Commit message is empty".into();
+            cx.notify();
+            return;
+        }
+        self.git_run(git::Op::Commit(msg), cx);
+    }
+
+    /// Discard tracked changes — armed by a first click, executed by the second.
+    fn git_discard(&mut self, cx: &mut Context<Self>) {
+        if self.git_confirm_discard {
+            self.git_run(git::Op::Discard, cx);
+        } else {
+            self.git_confirm_discard = true;
+            cx.notify();
+        }
     }
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ collection runner Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
@@ -3422,6 +3639,71 @@ impl BruApp {
             self.dirty.insert(self.tabs[i].path.clone());
             cx.notify();
         }
+    }
+
+    // ── Vars tables (pre-request + post-response) ──────────────────────────────
+    /// Mutable handle to one of the active tab's vars-row vectors.
+    fn var_rows_mut(&mut self, i: usize, post: bool) -> &mut Vec<VarRow> {
+        if post {
+            &mut self.tabs[i].var_post_rows
+        } else {
+            &mut self.tabs[i].var_pre_rows
+        }
+    }
+    fn var_add_row(&mut self, post: bool, cx: &mut Context<Self>) {
+        let Some(i) = self.active else { return };
+        let path = self.tabs[i].path.clone();
+        let name = cx.new(|cx| CodeEditor::single_line(cx, ""));
+        let value = cx.new(|cx| CodeEditor::single_line(cx, ""));
+        subscribe_var_editor(&name, path.clone(), cx);
+        subscribe_var_editor(&value, path.clone(), cx);
+        let row = VarRow {
+            name,
+            value,
+            enabled: true,
+            local: false,
+        };
+        self.var_rows_mut(i, post).push(row);
+        self.dirty.insert(path);
+        cx.notify();
+    }
+    /// Move a vars row up (`up == true`) or down by swapping with its neighbor.
+    fn var_move_row(&mut self, post: bool, idx: usize, up: bool, cx: &mut Context<Self>) {
+        let Some(i) = self.active else { return };
+        let path = self.tabs[i].path.clone();
+        let rows = self.var_rows_mut(i, post);
+        let j = match (up, idx) {
+            (true, 0) => return,
+            (true, _) => idx - 1,
+            (false, _) if idx + 1 >= rows.len() => return,
+            (false, _) => idx + 1,
+        };
+        if idx >= rows.len() {
+            return;
+        }
+        rows.swap(idx, j);
+        self.dirty.insert(path);
+        cx.notify();
+    }
+    fn var_remove_row(&mut self, post: bool, idx: usize, cx: &mut Context<Self>) {
+        let Some(i) = self.active else { return };
+        let path = self.tabs[i].path.clone();
+        let rows = self.var_rows_mut(i, post);
+        if idx >= rows.len() {
+            return;
+        }
+        rows.remove(idx);
+        self.dirty.insert(path);
+        cx.notify();
+    }
+    fn var_toggle_row(&mut self, post: bool, idx: usize, cx: &mut Context<Self>) {
+        let Some(i) = self.active else { return };
+        let path = self.tabs[i].path.clone();
+        let rows = self.var_rows_mut(i, post);
+        let Some(r) = rows.get_mut(idx) else { return };
+        r.enabled = !r.enabled;
+        self.dirty.insert(path);
+        cx.notify();
     }
 
     /// Open a request as a tab, or focus it if already open.
@@ -4428,6 +4710,9 @@ impl BruApp {
         if matches!(tab.edit_kind, EditKind::Kv(_)) {
             return self.kv_grid(tab, cx);
         }
+        if matches!(tab.edit_kind, EditKind::Vars) {
+            return self.vars_pane(tab, cx);
+        }
         if matches!(tab.edit_kind, EditKind::AuthForm(_)) {
             return self.auth_form(tab, cx);
         }
@@ -4692,6 +4977,220 @@ impl BruApp {
                     .p_3()
                     .child(inner),
             )
+    }
+
+    /// The Vars tab: two stacked structured tables (Pre Request + Post Response),
+    /// matching Bruno's single-page layout.
+    fn vars_pane(&self, tab: &OpenTab, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .w_full()
+            .bg(theme::bg())
+            .child(
+                div()
+                    .id("vars-pane")
+                    .overflow_y_scroll()
+                    .min_h_0()
+                    .flex_1()
+                    .w_full()
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(self.var_table(tab, false, cx))
+                    .child(self.var_table(tab, true, cx)),
+            )
+    }
+
+    /// One Vars table — pre-request (`post == false`) or post-response. The
+    /// post-response value column reads "Expr" (values are JS expressions). The
+    /// `@local` flag is preserved per row but not shown (matching Bruno).
+    fn var_table(&self, tab: &OpenTab, post: bool, cx: &mut Context<Self>) -> Div {
+        let rows = if post {
+            &tab.var_post_rows
+        } else {
+            &tab.var_pre_rows
+        };
+        let (title, value_col, hint) = if post {
+            (
+                "Post Response",
+                "Expr",
+                Some("JS expressions, evaluated against the response."),
+            )
+        } else {
+            ("Pre Request", "Value", None)
+        };
+        let cell = |child: Entity<CodeEditor>, w: Option<Pixels>, divider: bool| {
+            let d = div()
+                .px_2()
+                .py_1()
+                .font_family("monospace")
+                .text_size(px(12.))
+                .when(divider, |x| x.border_r_1().border_color(theme::border0()))
+                .child(child);
+            match w {
+                Some(w) => d.w(w),
+                None => d.flex_1(),
+            }
+        };
+        // One bordered table: a header row, then a gridlined row per entry.
+        let mut grid = div()
+            .flex()
+            .flex_col()
+            .border_1()
+            .border_color(theme::border0())
+            .rounded_md()
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .bg(theme::mantle())
+                    .border_b_1()
+                    .border_color(theme::border0())
+                    .text_size(px(10.))
+                    .text_color(theme::muted())
+                    .child(
+                        div()
+                            .w(px(234.))
+                            .px_2()
+                            .py_1()
+                            .border_r_1()
+                            .border_color(theme::border0())
+                            .child("Name"),
+                    )
+                    .child(div().flex_1().px_2().py_1().child(value_col)),
+            );
+        let len = rows.len();
+        let mut any_invalid = false;
+        for (idx, row) in rows.iter().enumerate() {
+            // Live name validation (Bruno's variableNameRegex). Validate the
+            // TRIMMED name — that's what gets persisted — so a stray trailing
+            // space isn't flagged as an error it would actually save fine.
+            let name = row.name.read(cx).text();
+            let trimmed = name.trim();
+            let name_invalid = !trimmed.is_empty() && !valid_var_name(trimmed);
+            any_invalid |= name_invalid;
+            let at_top = idx == 0;
+            let at_bottom = idx + 1 >= len;
+            // Signal invalid with a red background tint, not a thicker border, so
+            // the cell's box size (and the row height) stays constant.
+            let name_cell = div()
+                .w(px(212.))
+                .px_2()
+                .py_1()
+                .font_family("monospace")
+                .text_size(px(12.))
+                .border_r_1()
+                .border_color(theme::border0())
+                .when(name_invalid, |d| d.bg(gpui::rgba(0xe0655233)))
+                .child(row.name.clone());
+            grid = grid.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme::border0())
+                    .hover(|s| s.bg(theme::mantle()))
+                    .child(div().w(px(22.)).flex().justify_center().child(
+                        check_box(row.enabled).on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                this.var_toggle_row(post, idx, cx)
+                            }),
+                        ),
+                    ))
+                    .child(name_cell)
+                    .child(cell(row.value.clone(), None, false))
+                    // Reorder arrows: dimmed + inert at the list bounds.
+                    .child({
+                        let up = div()
+                            .px_1()
+                            .text_size(px(11.))
+                            .text_color(if at_top {
+                                theme::border2()
+                            } else {
+                                theme::muted()
+                            })
+                            .child("\u{2191}");
+                        if at_top {
+                            up
+                        } else {
+                            up.on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                    this.var_move_row(post, idx, true, cx)
+                                }),
+                            )
+                        }
+                    })
+                    .child({
+                        let down = div()
+                            .px_1()
+                            .text_size(px(11.))
+                            .text_color(if at_bottom {
+                                theme::border2()
+                            } else {
+                                theme::muted()
+                            })
+                            .child("\u{2193}");
+                        if at_bottom {
+                            down
+                        } else {
+                            down.on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                    this.var_move_row(post, idx, false, cx)
+                                }),
+                            )
+                        }
+                    })
+                    .child(
+                        div()
+                            .px_2()
+                            .text_color(theme::muted())
+                            .child("\u{2715}")
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                    this.var_remove_row(post, idx, cx)
+                                }),
+                            ),
+                    ),
+            );
+        }
+        let mut col = div().flex().flex_col().gap_2().w_full().child(
+            div()
+                .text_size(px(11.))
+                .text_color(theme::muted())
+                .child(title),
+        );
+        if let Some(h) = hint {
+            col = col.child(div().text_size(px(10.)).text_color(theme::muted()).child(h));
+        }
+        col = col.child(grid).child(
+            div()
+                .text_size(px(12.))
+                .text_color(theme::accent())
+                .child("+ Add")
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e: &MouseUpEvent, _w, cx| this.var_add_row(post, cx)),
+                ),
+        );
+        if any_invalid {
+            col = col.child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(theme::red())
+                    .child("Variable names may only contain letters, numbers, and - _ ."),
+            );
+        }
+        col
     }
 
     /// The secrets-vault overlay (unlock or manage).
@@ -5914,6 +6413,7 @@ impl BruApp {
                     .text_size(px(11.))
                     .child(self.status.clone()),
             )
+            .children(self.git_chip(cx))
             .child(div().flex_1())
             .child(icon_chip("Search").on_mouse_up(
                 MouseButton::Left,
@@ -5936,6 +6436,266 @@ impl BruApp {
                     .text_size(px(11.))
                     .child("v0.0.0"),
             )
+    }
+
+    /// The status-bar git chip: branch + ahead/behind + dirty dot. None when the
+    /// collection isn't a git repo. Shown even if `git status` couldn't be read
+    /// (falls back to a "git" label) so the overlay stays reachable. Clicking
+    /// opens the git overlay.
+    fn git_chip(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if !self.git_repo {
+            return None;
+        }
+        let label = match self.git_status.as_ref() {
+            Some(st) => {
+                let mut label = st.branch.clone();
+                if st.behind > 0 {
+                    label.push_str(&format!(" \u{2193}{}", st.behind));
+                }
+                if st.ahead > 0 {
+                    label.push_str(&format!(" \u{2191}{}", st.ahead));
+                }
+                if st.is_dirty() {
+                    label.push_str(" \u{2022}");
+                }
+                label
+            }
+            None => "git".to_string(),
+        };
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .hover(|s| s.bg(theme::surface0()))
+                .child(
+                    icons::icon("git-branch")
+                        .size(px(13.))
+                        .text_color(theme::statusbar_text()),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme::statusbar_text())
+                        .child(label),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_git(cx)),
+                ),
+        )
+    }
+
+    /// The git overlay: branch summary, changed-file list, commit input, and the
+    /// stage/commit/discard/fetch/pull/push actions.
+    fn git_overlay(&self, cx: &mut Context<Self>) -> Div {
+        let have_status = self.git_status.is_some();
+        let st = self.git_status.clone().unwrap_or_default();
+        let summary = if have_status {
+            let mut s = format!("On branch {}", st.branch);
+            if st.ahead > 0 || st.behind > 0 {
+                s.push_str(&format!(" (ahead {}, behind {})", st.ahead, st.behind));
+            }
+            s
+        } else {
+            "Could not read git status \u{2014} try Fetch, or reopen the collection.".to_string()
+        };
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .child(
+                icons::icon("git-branch")
+                    .size(px(16.))
+                    .text_color(theme::accent()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(15.))
+                    .text_color(theme::text())
+                    .child("Git"),
+            )
+            .child(ghost_btn("Close").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.close_git(cx)),
+            ));
+
+        // Changed-file list.
+        let mut files = div()
+            .id("git-files")
+            .overflow_y_scroll()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .w_full();
+        if st.files.is_empty() {
+            files = files.child(div().text_size(px(12.)).text_color(theme::muted()).child(
+                if have_status {
+                    "Working tree clean."
+                } else {
+                    "Status unavailable."
+                },
+            ));
+        }
+        for f in &st.files {
+            let color = if f.code.contains('?') {
+                theme::green() // untracked
+            } else if f.code.starts_with(' ') {
+                theme::orange() // unstaged change
+            } else {
+                theme::blue() // staged
+            };
+            files = files.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(28.))
+                            .font_family("monospace")
+                            .text_size(px(12.))
+                            .text_color(color)
+                            .child(f.code.replace(' ', "\u{00b7}")),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_family("monospace")
+                            .text_size(px(12.))
+                            .text_color(theme::text())
+                            .child(f.path.clone()),
+                    ),
+            );
+        }
+
+        let busy = self.git_busy;
+        // Local actions row.
+        let discard_label = if self.git_confirm_discard {
+            "Confirm discard"
+        } else {
+            "Discard all"
+        };
+        let local_actions = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .child(self.git_btn(cx, "Stage all", busy, |this, cx| {
+                this.git_run(git::Op::StageAll, cx)
+            }))
+            .child(self.git_btn(cx, "Commit", busy, |this, cx| this.git_commit(cx)))
+            .child(div().flex_1())
+            .child(
+                self.git_btn(cx, discard_label, busy, |this, cx| this.git_discard(cx))
+                    .text_color(theme::red()),
+            );
+
+        // Remote actions row.
+        let remote_actions = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .child(self.git_btn(cx, "Fetch", busy, |this, cx| {
+                this.git_run(git::Op::Fetch, cx)
+            }))
+            .child(self.git_btn(cx, "Pull", busy, |this, cx| this.git_run(git::Op::Pull, cx)))
+            .child(self.git_btn(cx, "Push", busy, |this, cx| this.git_run(git::Op::Push, cx)));
+
+        let card = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w(px(640.))
+            .h(px(520.))
+            .p_4()
+            .rounded_md()
+            .bg(theme::mantle())
+            .border_1()
+            .border_color(theme::border2())
+            .occlude()
+            .child(header)
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme::subtext())
+                    .child(summary),
+            )
+            .child(files)
+            .child(
+                div()
+                    .w_full()
+                    .border_1()
+                    .border_color(theme::border1())
+                    .rounded_md()
+                    .bg(theme::input_bg())
+                    .px_2()
+                    .py_1()
+                    .child(self.git_msg.clone()),
+            )
+            .child(local_actions)
+            .child(remote_actions)
+            .child(
+                // Fetch and error output can be multi-line; cap + scroll it so it
+                // never spills past the fixed-height card.
+                div()
+                    .id("git-output")
+                    .overflow_y_scroll()
+                    .max_h(px(120.))
+                    .text_size(px(12.))
+                    .font_family("monospace")
+                    .text_color(if busy {
+                        theme::accent()
+                    } else {
+                        theme::muted()
+                    })
+                    .child(self.git_output.clone()),
+            );
+        div()
+            .absolute()
+            .inset_0()
+            .bg(gpui::rgba(0x00000099))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.close_git(cx)),
+            )
+            .child(card)
+    }
+
+    /// A git overlay action button; dimmed + inert while a git op is running.
+    fn git_btn(
+        &self,
+        cx: &mut Context<Self>,
+        label: &str,
+        busy: bool,
+        handler: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> Div {
+        let mut b = ghost_btn(label);
+        if busy {
+            b = b.opacity(0.5);
+        } else {
+            b = b.on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| handler(this, cx)),
+            );
+        }
+        b
     }
 }
 
@@ -6114,6 +6874,9 @@ impl Render for BruApp {
         if self.vault_open {
             root = root.child(self.vault_overlay(cx));
         }
+        if self.git_open {
+            root = root.child(self.git_overlay(cx));
+        }
         if self.confirm_delete.is_some() {
             root = root.child(self.delete_overlay(cx));
         }
@@ -6170,4 +6933,21 @@ fn main() {
             .unwrap();
             cx.activate(true);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_var_name;
+
+    #[test]
+    fn var_name_validation_matches_bruno_regex() {
+        // Allowed: letters, digits, _, -, . (and empty = no error).
+        for ok in ["", "token", "base_url", "my-var", "a.b.c", "X1_2-3.4"] {
+            assert!(valid_var_name(ok), "should be valid: {ok:?}");
+        }
+        // Rejected: spaces and other punctuation.
+        for bad in ["my var", "a b", "tok!", "a/b", "a:b", "a$b", "café"] {
+            assert!(!valid_var_name(bad), "should be invalid: {bad:?}");
+        }
+    }
 }
