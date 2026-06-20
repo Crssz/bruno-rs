@@ -345,6 +345,134 @@ fn parse_line(line: &str) -> Option<Entry> {
     })
 }
 
+/// Set a `BlockContent::Text` block (create if absent + non-empty).
+pub fn set_text_block(file: &mut BruFile, name: &str, content: String) {
+    if let Some(b) = file.blocks.iter_mut().find(|b| b.name == name) {
+        b.content = BlockContent::Text(content);
+    } else if !content.trim().is_empty() {
+        file.blocks.push(Block {
+            name: name.to_string(),
+            content: BlockContent::Text(content),
+        });
+    }
+}
+
+/// The text content of a `BlockContent::Text` block, or empty.
+pub fn text_block(f: &BruFile, name: &str) -> String {
+    f.block(name)
+        .and_then(|b| match &b.content {
+            BlockContent::Text(s) => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Body modes the gpui editor can edit (text-based + url-encoded form). The
+/// structured types (multipartForm/graphql/file) need dedicated editors and are
+/// intentionally omitted from the cycle for now.
+pub const BODY_MODES: &[&str] = &[
+    "none",
+    "json",
+    "text",
+    "xml",
+    "sparql",
+    "formUrlEncoded",
+    "multipartForm",
+    "graphql",
+];
+pub const AUTH_MODES: &[&str] = &[
+    "none", "inherit", "basic", "bearer", "apikey", "oauth2", "digest", "awsv4",
+];
+
+/// The `body:<block>` name for a body mode, or None for `none`/unknown.
+pub fn body_block_name(mode: &str) -> Option<&'static str> {
+    Some(match mode {
+        "json" => "body:json",
+        "text" => "body:text",
+        "xml" => "body:xml",
+        "sparql" => "body:sparql",
+        "formUrlEncoded" => "body:form-urlencoded",
+        "multipartForm" => "body:multipart-form",
+        "graphql" => "body:graphql",
+        _ => return None,
+    })
+}
+
+/// The `auth:<block>` name for an auth mode, or None for none/inherit/unknown.
+pub fn auth_block_name(mode: &str) -> Option<&'static str> {
+    Some(match mode {
+        "basic" => "auth:basic",
+        "bearer" => "auth:bearer",
+        "apikey" => "auth:apikey",
+        "oauth2" => "auth:oauth2",
+        "digest" => "auth:digest",
+        "awsv4" => "auth:awsv4",
+        _ => return None,
+    })
+}
+
+/// The labeled fields of an auth mode's form: `(label, dict key, is secret)`.
+/// Keys mirror bru-core's `project_auth` projection. Empty = no structured form.
+pub fn auth_fields(mode: &str) -> &'static [(&'static str, &'static str, bool)] {
+    match mode {
+        "basic" | "digest" => &[
+            ("Username", "username", false),
+            ("Password", "password", true),
+        ],
+        "bearer" => &[("Token", "token", true)],
+        "apikey" => &[
+            ("Key", "key", false),
+            ("Value", "value", true),
+            ("Placement (header | queryparams)", "placement", false),
+        ],
+        "oauth2" => &[
+            (
+                "Grant Type (client_credentials | password)",
+                "grant_type",
+                false,
+            ),
+            ("Access Token URL", "access_token_url", false),
+            ("Client Id", "client_id", false),
+            ("Client Secret", "client_secret", true),
+            ("Scope", "scope", false),
+            ("Username", "username", false),
+            ("Password", "password", true),
+        ],
+        "awsv4" => &[
+            ("Access Key Id", "accessKeyId", true),
+            ("Secret Access Key", "secretAccessKey", true),
+            ("Session Token", "sessionToken", true),
+            ("Service", "service", false),
+            ("Region", "region", false),
+            ("Profile Name", "profileName", false),
+        ],
+        _ => &[],
+    }
+}
+/// Whether a variable name is valid (Bruno's `variableNameRegex` = `^[\w-.]*$`):
+/// only letters, digits, `_`, `-`, `.`. Empty is treated as valid (no error).
+pub fn valid_var_name(name: &str) -> bool {
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+/// Rows `(key, value, disabled)` of a dictionary block.
+#[allow(dead_code)]
+pub fn dict_rows(b: &bru_core::Block) -> Vec<(String, String, bool)> {
+    match &b.content {
+        BlockContent::Dict(entries) => entries
+            .iter()
+            .map(|e| {
+                (
+                    e.key.name().to_string(),
+                    e.value.as_inline().to_string(),
+                    e.disabled,
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +574,72 @@ mod tests {
         // serializer indents continuation lines, so check the markers + content.
         assert!(out.contains("'''line1"), "multiline start lost:\n{out}");
         assert!(out.contains("line2'''"), "multiline end lost:\n{out}");
+    }
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+
+    #[test]
+    fn text_block_round_trip() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        assert_eq!(text_block(&file, "body:json"), "");
+        set_text_block(&mut file, "body:json", "{\"a\":1}".to_string());
+        assert_eq!(text_block(&file, "body:json"), "{\"a\":1}");
+    }
+
+    #[test]
+    fn set_text_block_skips_creating_empty() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        set_text_block(&mut file, "body:text", "   ".to_string());
+        assert!(file.block("body:text").is_none());
+    }
+
+    #[test]
+    fn body_and_auth_block_names() {
+        assert_eq!(body_block_name("json"), Some("body:json"));
+        assert_eq!(body_block_name("graphql"), Some("body:graphql"));
+        assert_eq!(body_block_name("none"), None);
+        assert_eq!(body_block_name("bogus"), None);
+        assert_eq!(auth_block_name("basic"), Some("auth:basic"));
+        assert_eq!(auth_block_name("none"), None);
+        assert_eq!(auth_block_name("inherit"), None);
+    }
+
+    #[test]
+    fn auth_fields_shapes() {
+        assert!(auth_fields("none").is_empty());
+        let bearer = auth_fields("bearer");
+        assert_eq!(bearer.len(), 1);
+        assert_eq!(bearer[0], ("Token", "token", true));
+        let basic = auth_fields("basic");
+        assert_eq!(basic.len(), 2);
+        assert_eq!(basic[1], ("Password", "password", true));
+        assert_eq!(auth_fields("oauth2").len(), 7);
+    }
+
+    #[test]
+    fn valid_var_name_matches_bruno_regex() {
+        for ok in ["", "token", "base_url", "my-var", "a.b.c", "X1_2-3.4"] {
+            assert!(valid_var_name(ok), "should be valid: {ok:?}");
+        }
+        for bad in ["my var", "a b", "tok!", "a/b", "a:b", "a$b"] {
+            assert!(!valid_var_name(bad), "should be invalid: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn dict_rows_reads_entries_with_disabled_flag() {
+        let file = bru_lang::parse("headers {\n  a: 1\n  ~b: 2\n}\n").expect("parse");
+        let block = file.block("headers").expect("headers block");
+        let rows = dict_rows(block);
+        assert_eq!(
+            rows,
+            vec![
+                ("a".to_string(), "1".to_string(), false),
+                ("b".to_string(), "2".to_string(), true),
+            ]
+        );
     }
 }
