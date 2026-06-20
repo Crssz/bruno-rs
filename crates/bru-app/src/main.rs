@@ -3644,6 +3644,10 @@ impl BruApp {
             )
             .child(
                 div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
                     .w_full()
                     .px_2()
                     .py_1()
@@ -3652,7 +3656,13 @@ impl BruApp {
                     .border_1()
                     .border_color(theme::border1())
                     .text_size(px(12.))
-                    .child(self.search.clone()),
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme::muted())
+                            .child("\u{2315}"),
+                    )
+                    .child(div().flex_1().min_w_0().child(self.search.clone())),
             )
             .child(
                 div()
