@@ -48,7 +48,7 @@ struct KvRow {
 }
 
 /// One row of a Vars table (pre-request or post-response). Like [`KvRow`] but
-/// carries the `local` (`@`) flag so it round-trips (preserved, not editable —
+/// carries the `local` (`@`) flag so it round-trips (preserved, not editable â€”
 /// matching Bruno, which keeps the flag without a dedicated column).
 struct VarRow {
     name: Entity<CodeEditor>,
@@ -57,7 +57,64 @@ struct VarRow {
     local: bool,
 }
 
-/// One labeled field of the structured Auth form (e.g. "Username" → `username`).
+/// Which scope provides a template variable's effective value (precedence high→
+/// low: Request > Env > Collection > Global > Vault).
+#[derive(Clone, Copy, PartialEq)]
+enum VarScope {
+    Request,
+    Env,
+    Collection,
+    Global,
+    Vault,
+    /// A `{{$dynamic}}` var (e.g. `$guid`, `$timestamp`) generated per request.
+    Dynamic,
+}
+
+impl VarScope {
+    fn label(self) -> &'static str {
+        match self {
+            VarScope::Request => "Request",
+            VarScope::Env => "Env",
+            VarScope::Collection => "Collection",
+            VarScope::Global => "Global",
+            VarScope::Vault => "Vault",
+            VarScope::Dynamic => "Dynamic",
+        }
+    }
+    fn color(self) -> gpui::Hsla {
+        match self {
+            VarScope::Request => theme::teal(),
+            VarScope::Env => theme::green(),
+            VarScope::Collection => theme::blue(),
+            VarScope::Global => theme::purple(),
+            VarScope::Vault => theme::accent(),
+            VarScope::Dynamic => theme::cyan(),
+        }
+    }
+}
+
+/// Bruno dynamic variables (`{{$name}}`) the engine generates per request — shown
+/// in the popup as Dynamic rather than "unset". Mirrors `bru_core` `dynamic_var`.
+const DYNAMIC_VARS: &[&str] = &[
+    "$guid",
+    "$randomUUID",
+    "$timestamp",
+    "$isoTimestamp",
+    "$randomInt",
+];
+
+/// The hover popup for a `{{var}}`: its resolved value + originating scope.
+struct VarPopup {
+    name: String,
+    /// Resolved value (empty when `scope` is None = unset).
+    value: String,
+    scope: Option<VarScope>,
+    /// Secret (vault / secret env var): masked unless reveal-secrets is on.
+    secret: bool,
+    pos: Point<Pixels>,
+}
+
+/// One labeled field of the structured Auth form (e.g. "Username" â†’ `username`).
 struct AuthFieldRow {
     label: String,
     key: String,
@@ -141,7 +198,7 @@ fn flatten_requests(folder: &Folder, out: &mut Vec<(String, PathBuf)>) {
     }
 }
 
-/// A subtle toolbar button (ghost until hovered) — Bruno's chrome controls.
+/// A subtle toolbar button (ghost until hovered) â€” Bruno's chrome controls.
 fn chip(label: &str) -> Div {
     div()
         .px_3()
@@ -415,6 +472,14 @@ struct BruApp {
     search_query: String,
     /// Right-click context menu over a sidebar entry (None = closed).
     ctx_menu: Option<CtxMenu>,
+    /// Right-click menu over an open tab: (tab index, anchor). None = closed.
+    tab_menu: Option<(usize, Point<Pixels>)>,
+    /// Hover popup for a `{{var}}` (None = closed).
+    var_popup: Option<VarPopup>,
+    /// Cached non-request variable scopes (vault/global/collection/env), keyed by
+    /// name. Rebuilt by `refresh_vars` on collection/env/vault changes; request
+    /// vars are resolved live from the active tab.
+    var_scopes: HashMap<String, (VarScope, String, bool)>,
     /// Inline rename prompt (None = closed).
     rename: Option<RenameState>,
     /// Delete confirmation: (target, is_dir, display name).
@@ -433,6 +498,8 @@ struct BruApp {
     dirty: HashSet<PathBuf>,
     /// Close-confirmation for a dirty tab (the tab index).
     confirm_close: Option<usize>,
+    /// "Close All" confirmation when one or more tabs have unsaved edits.
+    confirm_close_all: bool,
     /// JSONPath response-filter input + its current query.
     resp_filter: Entity<CodeEditor>,
     resp_filter_query: String,
@@ -481,6 +548,9 @@ struct BruApp {
 struct CtxMenu {
     target: PathBuf,
     is_dir: bool,
+    /// The collection root (top of the sidebar): a reduced item set, no
+    /// rename/clone/delete.
+    root: bool,
     name: String,
     pos: Point<Pixels>,
 }
@@ -588,6 +658,8 @@ impl OpenTab {
                 cx.notify();
             })
             .detach();
+            // Hover a `{{var}}` in the URL / body to see its resolved value.
+            subscribe_hover(ed, cx);
         }
         let mut tab = Self {
             path,
@@ -728,13 +800,16 @@ impl OpenTab {
             _ => None,
         };
         if let Some(block) = kv_block {
-            self.kv_rows = build_kv_rows(&self.file, block, cx);
+            let path = self.path.clone();
+            self.kv_rows = build_kv_rows(&self.file, block, &path, cx);
             // The Params tab also surfaces URL-derived path params.
             self.path_rows = if block == "params:query" {
                 edit::kv_block_rows(&self.file, "params:path")
                     .into_iter()
                     .map(|(name, value, _)| {
-                        (name, cx.new(|cx| CodeEditor::single_line(cx, &value)))
+                        let ed = cx.new(|cx| CodeEditor::single_line(cx, &value));
+                        subscribe_grid_editor(&ed, path.clone(), cx);
+                        (name, ed)
                     })
                     .collect()
             } else {
@@ -1121,14 +1196,21 @@ fn auth_fields(mode: &str) -> &'static [(&'static str, &'static str, bool)] {
 }
 
 /// Build structured grid rows (name/value single-line editors + enabled) from a
-/// Dict block, for the params/headers tabs.
-fn build_kv_rows(file: &BruFile, block: &str, cx: &mut Context<BruApp>) -> Vec<KvRow> {
+/// Dict block, for the params/headers tabs. Each editor is subscribed so edits
+/// mark the tab dirty (and re-render) rather than being silently lost on close.
+fn build_kv_rows(file: &BruFile, block: &str, path: &Path, cx: &mut Context<BruApp>) -> Vec<KvRow> {
     edit::kv_block_rows(file, block)
         .into_iter()
-        .map(|(k, v, enabled)| KvRow {
-            name: cx.new(|cx| CodeEditor::single_line(cx, &k)),
-            value: cx.new(|cx| CodeEditor::single_line(cx, &v)),
-            enabled,
+        .map(|(k, v, enabled)| {
+            let name = cx.new(|cx| CodeEditor::single_line(cx, &k));
+            let value = cx.new(|cx| CodeEditor::single_line(cx, &v));
+            subscribe_grid_editor(&name, path.to_path_buf(), cx);
+            subscribe_grid_editor(&value, path.to_path_buf(), cx);
+            KvRow {
+                name,
+                value,
+                enabled,
+            }
         })
         .collect()
 }
@@ -1140,14 +1222,39 @@ fn valid_var_name(name: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
 }
 
-/// Subscribe a Vars-row editor so a keystroke marks the tab dirty and re-renders
-/// the parent (needed for live name validation, and so cell edits aren't lost).
-fn subscribe_var_editor(ed: &Entity<CodeEditor>, path: PathBuf, cx: &mut Context<BruApp>) {
+/// Subscribe a structured-grid cell editor (Vars / Params / Headers / â€¦) so a
+/// keystroke marks the tab dirty and re-renders the parent â€” otherwise cell
+/// edits are silently lost on close, and live name validation can't update.
+fn subscribe_grid_editor(ed: &Entity<CodeEditor>, path: PathBuf, cx: &mut Context<BruApp>) {
+    subscribe_hover(ed, cx);
     cx.subscribe(ed, move |this, _ed, _ev: &editor::Changed, cx| {
         this.dirty.insert(path.clone());
         cx.notify();
     })
     .detach();
+}
+
+/// Subscribe an editor so hovering a `{{var}}` in it shows the value popup.
+fn subscribe_hover(ed: &Entity<CodeEditor>, cx: &mut Context<BruApp>) {
+    cx.subscribe(ed, |this, _ed, ev: &editor::HoverVar, cx| {
+        this.on_hover_var(ev, cx)
+    })
+    .detach();
+}
+
+/// Collection-level `vars:pre-request` (enabled), read fresh from `collection.bru`.
+fn collection_vars(dir: &Path) -> Vec<(String, String)> {
+    let Ok(text) = std::fs::read_to_string(dir.join("collection.bru")) else {
+        return Vec::new();
+    };
+    let Ok(file) = bru_lang::parse(&text) else {
+        return Vec::new();
+    };
+    edit::var_block_rows(&file, "vars:pre-request")
+        .into_iter()
+        .filter(|(_, _, enabled, _)| *enabled)
+        .map(|(k, v, _, _)| (k, v))
+        .collect()
 }
 
 /// Build Vars-table rows from a vars Dict block, carrying the `local` flag. Each
@@ -1163,8 +1270,8 @@ fn build_var_rows(
         .map(|(k, v, enabled, local)| {
             let name = cx.new(|cx| CodeEditor::single_line(cx, &k));
             let value = cx.new(|cx| CodeEditor::single_line(cx, &v));
-            subscribe_var_editor(&name, path.to_path_buf(), cx);
-            subscribe_var_editor(&value, path.to_path_buf(), cx);
+            subscribe_grid_editor(&name, path.to_path_buf(), cx);
+            subscribe_grid_editor(&value, path.to_path_buf(), cx);
             VarRow {
                 name,
                 value,
@@ -1243,7 +1350,7 @@ struct CookieEntry {
     value: String,
 }
 
-/// `~/.bruno-rs/gpui-recent.json` Ã¢â‚¬â€ the recent-collections list.
+/// `~/.bruno-rs/gpui-recent.json` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the recent-collections list.
 fn recent_path() -> Option<PathBuf> {
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
     let dir = PathBuf::from(home).join(".bruno-rs");
@@ -1437,7 +1544,7 @@ fn reveal_in_file_manager(path: &Path) {
     }
 }
 
-/// Build a `curl` command for the request Ã¢â‚¬â€ method, URL, headers, and body Ã¢â‚¬â€
+/// Build a `curl` command for the request ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â method, URL, headers, and body ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â
 /// for the "</>" generate-code affordance (copied to the clipboard).
 fn to_curl(tab: &OpenTab, cx: &App) -> String {
     let method = if tab.method.is_empty() {
@@ -1612,6 +1719,9 @@ impl BruApp {
             search,
             search_query: String::new(),
             ctx_menu: None,
+            tab_menu: None,
+            var_popup: None,
+            var_scopes: HashMap::new(),
             rename: None,
             confirm_delete: None,
             selected_env: None,
@@ -1621,6 +1731,7 @@ impl BruApp {
             clipboard_item: None,
             dirty: HashSet::new(),
             confirm_close: None,
+            confirm_close_all: false,
             resp_filter,
             resp_filter_query: String::new(),
             resp_raw: false,
@@ -1645,6 +1756,7 @@ impl BruApp {
             git_confirm_discard: false,
         };
         app.refresh_git_status(cx);
+        app.refresh_vars();
         app
     }
 
@@ -1776,10 +1888,13 @@ impl BruApp {
     fn close_topmost_overlay(&mut self, cx: &mut Context<Self>) {
         if self.palette_open {
             self.palette_open = false;
-        } else if self.confirm_close.take().is_some()
+        } else if self.var_popup.take().is_some()
+            || self.confirm_close.take().is_some()
+            || std::mem::take(&mut self.confirm_close_all)
             || self.confirm_delete.take().is_some()
             || self.rename.take().is_some()
             || self.ctx_menu.take().is_some()
+            || self.tab_menu.take().is_some()
             || self.env_menu.take().is_some()
             || self.method_menu.take().is_some()
             || self.mode_menu.take().is_some()
@@ -1857,7 +1972,7 @@ impl BruApp {
         }
     }
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ active environment selector Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ active environment selector ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     fn open_env_menu(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
         self.env_menu = Some(pos);
         cx.notify();
@@ -1870,11 +1985,13 @@ impl BruApp {
     fn select_env(&mut self, name: Option<String>, cx: &mut Context<Self>) {
         self.selected_env = name;
         self.env_menu = None;
+        self.refresh_vars();
         cx.notify();
     }
     fn select_global_env(&mut self, name: Option<String>, cx: &mut Context<Self>) {
         self.selected_global_env = name;
         self.env_menu = None;
+        self.refresh_vars();
         cx.notify();
     }
 
@@ -2147,10 +2264,11 @@ impl BruApp {
         if let Ok(tree) = bru_lang::load_collection(&self.dir) {
             self.collection = Some(tree);
         }
+        self.refresh_vars();
         cx.notify();
     }
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ sidebar context menu Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ sidebar context menu ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     fn open_ctx_menu(
         &mut self,
         target: PathBuf,
@@ -2162,6 +2280,24 @@ impl BruApp {
         self.ctx_menu = Some(CtxMenu {
             target,
             is_dir,
+            root: false,
+            name,
+            pos,
+        });
+        cx.notify();
+    }
+
+    /// Open the collection-root context menu (anchored at the click point).
+    fn open_root_menu(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let name = self
+            .collection
+            .as_ref()
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+        self.ctx_menu = Some(CtxMenu {
+            target: self.dir.clone(),
+            is_dir: true,
+            root: true,
             name,
             pos,
         });
@@ -2234,6 +2370,30 @@ impl BruApp {
         };
         self.open_request(menu.target, cx);
         self.send(cx);
+        cx.notify();
+    }
+
+    /// Generate code (a curl command) for the menu's request and copy it to the
+    /// clipboard. Opens the request first so its latest edits are reflected.
+    fn ctx_generate_code(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = self.ctx_menu.take() else {
+            return;
+        };
+        let target = menu.target.clone();
+        self.open_request(menu.target, cx);
+        // Only generate when the just-opened tab IS the requested one (open_request
+        // leaves the prior tab active if the file is unreadable/unparseable).
+        let curl = self
+            .active_tab()
+            .filter(|t| t.path == target)
+            .map(|tab| to_curl(tab, cx));
+        self.status = match curl {
+            Some(curl) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(curl));
+                "Copied curl to clipboard".into()
+            }
+            None => "Couldn't open request".into(),
+        };
         cx.notify();
     }
 
@@ -2476,7 +2636,41 @@ impl BruApp {
             .bg(theme::mantle())
             .border_1()
             .border_color(theme::border2());
-        if menu.is_dir {
+        if menu.root {
+            // Collection root: a reduced set (no rename/clone/delete).
+            card = card
+                .child(item("New Request").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                        if let Some(m) = this.ctx_menu.take() {
+                            this.new_request_in(&m.target, cx);
+                        }
+                    }),
+                ))
+                .child(item("New Folder").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                        if let Some(m) = this.ctx_menu.take() {
+                            this.new_folder_in(&m.target, cx);
+                        }
+                    }),
+                ))
+                .child(item("Run").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_run(cx)),
+                ))
+                .child(item("Settings").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                        this.ctx_menu = None;
+                        this.open_collection_settings(cx);
+                    }),
+                ))
+                .child(item("Reveal in Explorer").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_reveal(cx)),
+                ));
+        } else if menu.is_dir {
             card = card
                 .child(item("New Request").on_mouse_up(
                     MouseButton::Left,
@@ -2518,6 +2712,10 @@ impl BruApp {
                     MouseButton::Left,
                     cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_run_request(cx)),
                 ))
+                .child(item("Generate Code").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_generate_code(cx)),
+                ))
                 .child(item("Move Up").on_mouse_up(
                     MouseButton::Left,
                     cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_move(-1, cx)),
@@ -2527,27 +2725,29 @@ impl BruApp {
                     cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_move(1, cx)),
                 ));
         }
-        card = card
-            .child(item("Rename").on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.start_rename(cx)),
-            ))
-            .child(item("Clone").on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_duplicate(cx)),
-            ))
-            .child(item("Copy").on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_copy(cx)),
-            ))
-            .child(item("Reveal in Explorer").on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_reveal(cx)),
-            ))
-            .child(item("Delete").text_color(theme::red()).on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.start_delete(cx)),
-            ));
+        if !menu.root {
+            card = card
+                .child(item("Rename").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.start_rename(cx)),
+                ))
+                .child(item("Clone").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_duplicate(cx)),
+                ))
+                .child(item("Copy").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_copy(cx)),
+                ))
+                .child(item("Reveal in Explorer").on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.ctx_reveal(cx)),
+                ))
+                .child(item("Delete").text_color(theme::red()).on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.start_delete(cx)),
+                ));
+        }
         // Full-screen transparent catcher: any click outside closes the menu.
         div()
             .absolute()
@@ -2685,7 +2885,7 @@ impl BruApp {
             .child(card)
     }
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ secrets vault Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ secrets vault ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     /// Vault secrets as the lowest-precedence base vars for sends.
     fn vault_vars(&self) -> HashMap<String, String> {
         self.vault.clone().unwrap_or_default()
@@ -2704,6 +2904,198 @@ impl BruApp {
             }
         }
         vars
+    }
+
+    // ── template-variable hover popup ─────────────────────────────────────────
+    /// Rebuild the cached non-request variable scopes (vault < global <
+    /// collection < env, so a later scope overwrites an earlier one and its
+    /// scope label wins). Cheap file reads, so call only on collection/env/vault
+    /// changes — never per hover.
+    fn refresh_vars(&mut self) {
+        let mut m: HashMap<String, (VarScope, String, bool)> = HashMap::new();
+        for (k, v) in self.vault_vars() {
+            m.insert(k, (VarScope::Vault, v, true));
+        }
+        if let Some(name) = self.selected_global_env.clone() {
+            for r in envfs::load_env_rows(&globals_root(), &name) {
+                if r.enabled {
+                    m.insert(r.name, (VarScope::Global, r.value, r.secret));
+                }
+            }
+        }
+        for (k, v) in collection_vars(&self.dir) {
+            m.insert(k, (VarScope::Collection, v, false));
+        }
+        if let Some(name) = self.selected_env.clone() {
+            for r in envfs::load_env_rows(&self.dir, &name) {
+                // Match the send path (base_vars): secret collection-env vars are
+                // NOT applied, so they must not overwrite a lower scope here.
+                if r.enabled && !r.secret {
+                    m.insert(r.name, (VarScope::Env, r.value, false));
+                }
+            }
+        }
+        self.var_scopes = m;
+    }
+
+    /// Resolve a variable to `(scope, value, secret)`, matching send precedence.
+    /// Request-level vars (the active tab's `vars:pre-request`) win; on the Vars
+    /// tab they're read LIVE from the grid editors (else from the in-memory file).
+    fn resolve_var(&self, name: &str, cx: &Context<Self>) -> (Option<VarScope>, String, bool) {
+        if DYNAMIC_VARS.contains(&name) {
+            return (
+                Some(VarScope::Dynamic),
+                "(generated per request)".into(),
+                false,
+            );
+        }
+        if let Some(tab) = self.active_tab() {
+            if tab.var_pre_rows.is_empty() {
+                for (k, v, enabled, _local) in edit::var_block_rows(&tab.file, "vars:pre-request") {
+                    if enabled && k == name {
+                        return (Some(VarScope::Request), v, false);
+                    }
+                }
+            } else {
+                // The Vars tab is open: the grid cells are the source of truth.
+                for row in &tab.var_pre_rows {
+                    if row.enabled && row.name.read(cx).text().trim() == name {
+                        return (
+                            Some(VarScope::Request),
+                            row.value.read(cx).text().to_string(),
+                            false,
+                        );
+                    }
+                }
+            }
+        }
+        match self.var_scopes.get(name) {
+            Some((scope, val, secret)) => (Some(*scope), val.clone(), *secret),
+            None => (None, String::new(), false),
+        }
+    }
+
+    /// React to an editor's hovered-`{{var}}` change: open/switch the popup, or
+    /// (on a click → `None`) dismiss it.
+    fn on_hover_var(&mut self, ev: &editor::HoverVar, cx: &mut Context<Self>) {
+        match &ev.name {
+            Some(name) => {
+                let (scope, value, secret) = self.resolve_var(name, cx);
+                self.var_popup = Some(VarPopup {
+                    name: name.clone(),
+                    value,
+                    scope,
+                    secret,
+                    pos: ev.pos,
+                });
+            }
+            None => self.var_popup = None,
+        }
+        cx.notify();
+    }
+
+    /// The `{{var}}` hover popup: name + scope badge + resolved value + Copy.
+    fn var_popup_overlay(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let Some(p) = &self.var_popup else {
+            return div();
+        };
+        let resolved = p.scope.is_some();
+        let badge = match p.scope {
+            Some(s) => (s.label(), s.color()),
+            None => ("unset", theme::red()),
+        };
+        let display_value = if !resolved {
+            "(unset)".to_string()
+        } else if p.secret && !self.reveal_secrets {
+            "\u{2022}".repeat(8)
+        } else {
+            p.value.clone()
+        };
+        // Clamp to the window so a var near the right/bottom edge stays on-screen.
+        let (card_w, est_h) = (260.0_f32, 96.0_f32);
+        let vw = f32::from(window.viewport_size().width);
+        let vh = f32::from(window.viewport_size().height);
+        let left = f32::from(p.pos.x).min(vw - card_w - 8.0).max(8.0);
+        let raw_top = f32::from(p.pos.y);
+        let top = if raw_top + 18.0 + est_h > vh {
+            (raw_top - est_h).max(8.0)
+        } else {
+            raw_top + 18.0
+        };
+        let mut card = div()
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .w(px(260.))
+            .p_2()
+            .rounded_md()
+            .bg(theme::mantle())
+            .border_1()
+            .border_color(theme::border2())
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .font_family("monospace")
+                            .text_size(px(12.))
+                            .text_color(theme::text())
+                            .child(p.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .px_1()
+                            .rounded_sm()
+                            .bg(theme::surface0())
+                            .text_size(px(9.))
+                            .text_color(badge.1)
+                            .child(badge.0),
+                    ),
+            )
+            .child(
+                div()
+                    .font_family("monospace")
+                    .text_size(px(12.))
+                    .text_color(if resolved {
+                        theme::text()
+                    } else {
+                        theme::red()
+                    })
+                    .child(display_value),
+            );
+        if resolved && p.scope != Some(VarScope::Dynamic) && !p.value.is_empty() {
+            let val = p.value.clone();
+            card = card.child(
+                div().flex().flex_row().justify_end().child(
+                    div()
+                        .px_2()
+                        .rounded_md()
+                        .text_size(px(11.))
+                        .text_color(theme::accent())
+                        .hover(|s| s.bg(theme::surface0()))
+                        .child("Copy")
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(val.clone()));
+                                this.var_popup = None;
+                                this.status = "Copied value to clipboard".into();
+                                cx.notify();
+                            }),
+                        ),
+                ),
+            );
+        }
+        card
     }
 
     fn open_vault(&mut self, cx: &mut Context<Self>) {
@@ -2744,12 +3136,14 @@ impl BruApp {
             }
             Err(e) => self.vault_error = Some(e),
         }
+        self.refresh_vars();
         cx.notify();
     }
     fn vault_lock(&mut self, cx: &mut Context<Self>) {
         self.vault = None;
         self.vault_pw = None;
         self.vault_rows.clear();
+        self.refresh_vars();
         cx.notify();
     }
     fn vault_add_row(&mut self, cx: &mut Context<Self>) {
@@ -2810,6 +3204,7 @@ impl BruApp {
                 Err(e) => self.vault_error = Some(e),
             }
         }
+        self.refresh_vars();
         cx.notify();
     }
 
@@ -2877,6 +3272,7 @@ impl BruApp {
                 self.git_status = None;
                 self.status = "Loaded collection".into();
                 self.refresh_git_status(cx);
+                self.refresh_vars();
             }
             Err(e) => self.status = format!("Failed to load: {e}"),
         }
@@ -2961,7 +3357,7 @@ impl BruApp {
         cx.notify();
     }
 
-    // ── git ───────────────────────────────────────────────────────────────────
+    // â”€â”€ git â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     /// Recompute the collection's git status on a worker thread (it may touch the
     /// filesystem / index) and store the result. Tracks repo-ness separately from
     /// the parsed status so a transient status error keeps the chip reachable.
@@ -3048,7 +3444,7 @@ impl BruApp {
         self.git_run(git::Op::Commit(msg), cx);
     }
 
-    /// Discard tracked changes — armed by a first click, executed by the second.
+    /// Discard tracked changes â€” armed by a first click, executed by the second.
     fn git_discard(&mut self, cx: &mut Context<Self>) {
         if self.git_confirm_discard {
             self.git_run(git::Op::Discard, cx);
@@ -3058,7 +3454,7 @@ impl BruApp {
         }
     }
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ collection runner Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ collection runner ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     fn requests_under(&self, dir: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
         let Some(tree) = &self.collection else {
@@ -3111,7 +3507,7 @@ impl BruApp {
         .detach();
     }
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ environment manager Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ environment manager ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     /// The dir the env manager currently operates on (collection or globals).
     fn env_dir(&self) -> PathBuf {
         if self.env.as_ref().map(|e| e.global).unwrap_or(false) {
@@ -3264,6 +3660,7 @@ impl BruApp {
         if let Some(ed) = &mut self.env {
             ed.error = res.err();
         }
+        self.refresh_vars();
         cx.notify();
     }
 
@@ -3403,6 +3800,151 @@ impl BruApp {
         cx.notify();
     }
 
+    // ── open-tab context menu ──────────────────────────────────────────────────
+    fn open_tab_menu(&mut self, i: usize, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        self.tab_menu = Some((i, pos));
+        cx.notify();
+    }
+    fn close_tab_menu(&mut self, cx: &mut Context<Self>) {
+        if self.tab_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+    /// Close every tab whose index satisfies `target`, skipping ones with unsaved
+    /// edits (they're kept open so bulk-close never silently discards work).
+    fn close_tabs_matching(&mut self, target: impl Fn(usize) -> bool, cx: &mut Context<Self>) {
+        self.tab_menu = None;
+        let mut kept = 0;
+        let mut i = self.tabs.len();
+        while i > 0 {
+            i -= 1;
+            if target(i) {
+                if self.dirty.contains(&self.tabs[i].path) {
+                    kept += 1;
+                } else {
+                    self.close_tab(i);
+                }
+            }
+        }
+        self.status = if kept > 0 {
+            format!("Kept {kept} unsaved tab(s) open")
+        } else {
+            "Closed tabs".into()
+        };
+        cx.notify();
+    }
+    /// Copy the tab's file path to the clipboard.
+    fn copy_tab_path(&mut self, i: usize, cx: &mut Context<Self>) {
+        self.tab_menu = None;
+        if let Some(t) = self.tabs.get(i) {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                t.path.to_string_lossy().into_owned(),
+            ));
+            self.status = "Copied path to clipboard".into();
+        }
+        cx.notify();
+    }
+    /// "Close All": close everything. If any tab has unsaved edits, confirm once
+    /// before discarding them (unlike "Close Saved", which keeps them).
+    fn request_close_all(&mut self, cx: &mut Context<Self>) {
+        self.tab_menu = None;
+        let any_dirty = self.tabs.iter().any(|t| self.dirty.contains(&t.path));
+        if any_dirty {
+            self.confirm_close_all = true;
+        } else {
+            self.force_close_all(cx);
+        }
+        cx.notify();
+    }
+    /// Close every tab unconditionally (discarding unsaved edits).
+    fn force_close_all(&mut self, cx: &mut Context<Self>) {
+        for t in &self.tabs {
+            self.dirty.remove(&t.path);
+        }
+        self.tabs.clear();
+        self.active = None;
+        self.confirm_close_all = false;
+        self.status = "Closed all tabs".into();
+        cx.notify();
+    }
+
+    /// The open-tab right-click menu (Close / Close Others / … / Copy Path).
+    fn tab_menu_overlay(&self, cx: &mut Context<Self>) -> Div {
+        let Some((i, pos)) = self.tab_menu else {
+            return div();
+        };
+        let item = |label: &str| {
+            div()
+                .px_3()
+                .py_1()
+                .text_size(px(13.))
+                .text_color(theme::text())
+                .hover(|s| s.bg(theme::surface0()))
+                .child(label.to_string())
+        };
+        let card = div()
+            .id("tab-menu")
+            .absolute()
+            .left(pos.x)
+            .top(pos.y)
+            .occlude()
+            .flex()
+            .flex_col()
+            .py_1()
+            .w(px(180.))
+            .rounded_md()
+            .bg(theme::mantle())
+            .border_1()
+            .border_color(theme::border2())
+            .child(item("Close").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                    this.tab_menu = None;
+                    this.request_close_tab(i, cx);
+                }),
+            ))
+            .child(item("Close Others").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                    // Keep the right-clicked tab active across the closes.
+                    this.active = Some(i);
+                    this.close_tabs_matching(move |j| j != i, cx)
+                }),
+            ))
+            .child(item("Close to the Right").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                    this.close_tabs_matching(move |j| j > i, cx)
+                }),
+            ))
+            .child(item("Close Saved").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                    this.close_tabs_matching(|_| true, cx)
+                }),
+            ))
+            .child(item("Close All").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.request_close_all(cx)),
+            ))
+            .child(item("Copy Path").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| this.copy_tab_path(i, cx)),
+            ));
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseDownEvent, _w, cx| this.close_tab_menu(cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _e: &MouseDownEvent, _w, cx| this.close_tab_menu(cx)),
+            )
+            .child(card)
+    }
+
     /// The unsaved-changes confirmation modal for closing a dirty tab.
     fn close_confirm_overlay(&self, cx: &mut Context<Self>) -> Div {
         let Some(i) = self.confirm_close else {
@@ -3479,6 +4021,73 @@ impl BruApp {
             .child(card)
     }
 
+    /// The "Close All" confirmation modal (shown only when tabs are unsaved).
+    fn close_all_overlay(&self, cx: &mut Context<Self>) -> Div {
+        let n = self
+            .tabs
+            .iter()
+            .filter(|t| self.dirty.contains(&t.path))
+            .count();
+        let card = div()
+            .w(px(440.))
+            .p_4()
+            .rounded_md()
+            .bg(theme::mantle())
+            .border_1()
+            .border_color(theme::border2())
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .text_color(theme::text())
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child("Close All Tabs"),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(theme::subtext())
+                    .child(format!(
+                        "{n} tab(s) have unsaved edits. Close all and discard them?"
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap_2()
+                    .child(ghost_btn("Cancel").on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                            this.confirm_close_all = false;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(
+                        ghost_btn("Close All & Discard")
+                            .text_color(theme::red())
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                                    this.force_close_all(cx)
+                                }),
+                            ),
+                    ),
+            );
+        div()
+            .absolute()
+            .inset_0()
+            .bg(gpui::rgba(0x00000066))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(card)
+    }
+
     /// Send the selected request: run it on a worker thread (its own tokio
     /// runtime) and deliver the result back to the UI via a oneshot + cx.spawn.
     fn send(&mut self, cx: &mut Context<Self>) {
@@ -3500,7 +4109,7 @@ impl BruApp {
         cx.spawn(async move |this, cx| {
             let result = rx.await;
             let _ = this.update(cx, |this, cx| {
-                // Tab may have moved/closed while in flight Ã¢â‚¬â€ re-find by path.
+                // Tab may have moved/closed while in flight ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â re-find by path.
                 let status = match &result {
                     Ok(o) if o.error.is_none() => "Response received",
                     Ok(_) => "Request error",
@@ -3612,16 +4221,20 @@ impl BruApp {
         cx.notify();
     }
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ structured params/headers grid Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ structured params/headers grid ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     fn kv_add_row(&mut self, cx: &mut Context<Self>) {
         let Some(i) = self.active else { return };
-        let row = KvRow {
-            name: cx.new(|cx| CodeEditor::single_line(cx, "")),
-            value: cx.new(|cx| CodeEditor::single_line(cx, "")),
+        let path = self.tabs[i].path.clone();
+        let name = cx.new(|cx| CodeEditor::single_line(cx, ""));
+        let value = cx.new(|cx| CodeEditor::single_line(cx, ""));
+        subscribe_grid_editor(&name, path.clone(), cx);
+        subscribe_grid_editor(&value, path.clone(), cx);
+        self.tabs[i].kv_rows.push(KvRow {
+            name,
+            value,
             enabled: true,
-        };
-        self.tabs[i].kv_rows.push(row);
-        self.dirty.insert(self.tabs[i].path.clone());
+        });
+        self.dirty.insert(path);
         cx.notify();
     }
     fn kv_remove_row(&mut self, idx: usize, cx: &mut Context<Self>) {
@@ -3640,8 +4253,25 @@ impl BruApp {
             cx.notify();
         }
     }
+    /// Move a params/headers row up (`up == true`) or down by swapping neighbors.
+    fn kv_move_row(&mut self, idx: usize, up: bool, cx: &mut Context<Self>) {
+        let Some(i) = self.active else { return };
+        let rows = &mut self.tabs[i].kv_rows;
+        let j = match (up, idx) {
+            (true, 0) => return,
+            (true, _) => idx - 1,
+            (false, _) if idx + 1 >= rows.len() => return,
+            (false, _) => idx + 1,
+        };
+        if idx >= rows.len() {
+            return;
+        }
+        rows.swap(idx, j);
+        self.dirty.insert(self.tabs[i].path.clone());
+        cx.notify();
+    }
 
-    // ── Vars tables (pre-request + post-response) ──────────────────────────────
+    // â”€â”€ Vars tables (pre-request + post-response) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     /// Mutable handle to one of the active tab's vars-row vectors.
     fn var_rows_mut(&mut self, i: usize, post: bool) -> &mut Vec<VarRow> {
         if post {
@@ -3655,8 +4285,8 @@ impl BruApp {
         let path = self.tabs[i].path.clone();
         let name = cx.new(|cx| CodeEditor::single_line(cx, ""));
         let value = cx.new(|cx| CodeEditor::single_line(cx, ""));
-        subscribe_var_editor(&name, path.clone(), cx);
-        subscribe_var_editor(&value, path.clone(), cx);
+        subscribe_grid_editor(&name, path.clone(), cx);
+        subscribe_grid_editor(&value, path.clone(), cx);
         let row = VarRow {
             name,
             value,
@@ -3781,9 +4411,9 @@ impl BruApp {
             .child(div().flex_1())
             .child(
                 icon_chip(if theme::is_dark() {
-                    "\u{2600}" // Ã¢Ëœâ‚¬ Ã¢â‚¬â€ click for light
+                    "\u{2600}" // ÃƒÂ¢Ã‹Å“Ã¢â€šÂ¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â click for light
                 } else {
-                    "\u{263E}" // Ã¢ËœÂ¾ Ã¢â‚¬â€ click for dark
+                    "\u{263E}" // ÃƒÂ¢Ã‹Å“Ã‚Â¾ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â click for dark
                 })
                 .on_mouse_up(
                     MouseButton::Left,
@@ -3966,12 +4596,25 @@ impl BruApp {
                     .justify_between()
                     .px_1()
                     .child(
-                        div().text_color(theme::muted()).text_size(px(12.)).child(
-                            self.collection
-                                .as_ref()
-                                .map(|c| c.name.to_uppercase())
-                                .unwrap_or_default(),
-                        ),
+                        div()
+                            .flex_1()
+                            .text_color(theme::muted())
+                            .text_size(px(12.))
+                            .child(
+                                self.collection
+                                    .as_ref()
+                                    .map(|c| c.name.to_uppercase())
+                                    .unwrap_or_default(),
+                            )
+                            // Right-click the collection name for the root menu.
+                            .when(self.collection.is_some(), |d| {
+                                d.on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(|this, ev: &MouseDownEvent, _w, cx| {
+                                        this.open_root_menu(ev.position, cx)
+                                    }),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -4141,7 +4784,7 @@ impl BruApp {
             .border_b_1()
             .border_color(theme::border1())
             .child(
-                // Method + URL share one bordered, rounded input group — Bruno's URL bar.
+                // Method + URL share one bordered, rounded input group â€” Bruno's URL bar.
                 div()
                     .flex()
                     .flex_row()
@@ -4774,7 +5417,7 @@ impl BruApp {
             )
     }
 
-    /// The structured params/headers grid (enable toggle + name + value + Ã¢Å“â€¢).
+    /// The structured params/headers grid (enable toggle + name + value + ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¢).
     /// Structured Auth form: a labeled single-line input per field of the mode.
     fn auth_form(&self, tab: &OpenTab, _cx: &mut Context<Self>) -> Div {
         let mut col = div().flex().flex_col().gap_3().w_full();
@@ -4889,7 +5532,10 @@ impl BruApp {
                     )
                     .child(div().flex_1().px_2().py_1().child(col2)),
             );
+        let kv_len = tab.kv_rows.len();
         for (idx, row) in tab.kv_rows.iter().enumerate() {
+            let at_top = idx == 0;
+            let at_bottom = idx + 1 >= kv_len;
             grid = grid.child(
                 div()
                     .flex()
@@ -4908,6 +5554,49 @@ impl BruApp {
                     ))
                     .child(cell(row.name.clone(), Some(px(212.)), true))
                     .child(cell(row.value.clone(), None, false))
+                    // Reorder arrows: dimmed + inert at the list bounds.
+                    .child({
+                        let up = div()
+                            .px_1()
+                            .text_size(px(11.))
+                            .text_color(if at_top {
+                                theme::border2()
+                            } else {
+                                theme::muted()
+                            })
+                            .child("\u{2191}");
+                        if at_top {
+                            up
+                        } else {
+                            up.on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                    this.kv_move_row(idx, true, cx)
+                                }),
+                            )
+                        }
+                    })
+                    .child({
+                        let down = div()
+                            .px_1()
+                            .text_size(px(11.))
+                            .text_color(if at_bottom {
+                                theme::border2()
+                            } else {
+                                theme::muted()
+                            })
+                            .child("\u{2193}");
+                        if at_bottom {
+                            down
+                        } else {
+                            down.on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                                    this.kv_move_row(idx, false, cx)
+                                }),
+                            )
+                        }
+                    })
                     .child(
                         div()
                             .px_2()
@@ -4933,7 +5622,8 @@ impl BruApp {
                 ),
         );
         let mut inner = div().flex().flex_col().gap_3().child(table);
-        // URL-derived path params (Params tab only): read-only name + value.
+        // URL-derived path params (Params tab only): read-only name label +
+        // editable, dirty-tracked value.
         if !tab.path_rows.is_empty() {
             let mut pt = div().flex().flex_col().gap_1().child(
                 div()
@@ -5004,7 +5694,7 @@ impl BruApp {
             )
     }
 
-    /// One Vars table — pre-request (`post == false`) or post-response. The
+    /// One Vars table â€” pre-request (`post == false`) or post-response. The
     /// post-response value column reads "Expr" (values are JS expressions). The
     /// `@local` flag is preserved per row but not shown (matching Bruno).
     fn var_table(&self, tab: &OpenTab, post: bool, cx: &mut Context<Self>) -> Div {
@@ -5068,7 +5758,7 @@ impl BruApp {
         let mut any_invalid = false;
         for (idx, row) in rows.iter().enumerate() {
             // Live name validation (Bruno's variableNameRegex). Validate the
-            // TRIMMED name — that's what gets persisted — so a stray trailing
+            // TRIMMED name â€” that's what gets persisted â€” so a stray trailing
             // space isn't flagged as an error it would actually save fine.
             let name = row.name.read(cx).text();
             let trimmed = name.trim();
@@ -6325,7 +7015,7 @@ impl BruApp {
             .child(col)
     }
 
-    /// The strip of open request tabs (click to focus, Ãƒâ€” to close).
+    /// The strip of open request tabs (click to focus, ÃƒÆ’Ã¢â‚¬â€ to close).
     fn tab_strip(&self, cx: &mut Context<Self>) -> Div {
         let mut strip = div()
             .flex()
@@ -6347,7 +7037,20 @@ impl BruApp {
                 .py_1()
                 .when(active, |d| {
                     d.border_b_1().border_color(theme::tab_underline())
-                });
+                })
+                // Right-click opens the tab menu; middle-click closes the tab.
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, ev: &MouseDownEvent, _w, cx| {
+                        this.open_tab_menu(i, ev.position, cx)
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _ev: &MouseDownEvent, _w, cx| {
+                        this.request_close_tab(i, cx)
+                    }),
+                );
             // Unsaved tabs show Bruno's amber draft dot before the title.
             if dirty {
                 tab = tab.child(
@@ -6707,7 +7410,7 @@ impl Render for BruApp {
         } else if let Some(i) = self.active {
             let tab = &self.tabs[i];
             // The URL bar spans the full width; below it the request pane (left)
-            // and response pane (right) share a horizontal split — Bruno's layout.
+            // and response pane (right) share a horizontal split â€” Bruno's layout.
             // Request pane: fixed width once the split has been dragged, else
             // an even half. The divider between the panes is draggable.
             let req_pane = {
@@ -6812,6 +7515,12 @@ impl Render for BruApp {
                         this.sidebar_dragging = false;
                         cx.notify();
                     }
+                    // Any click anywhere dismisses the var popup. The popup's own
+                    // Copy button (bubbles here too) runs its handler first, so a
+                    // copy still completes before this clear.
+                    if this.var_popup.take().is_some() {
+                        cx.notify();
+                    }
                 }),
             )
             .relative()
@@ -6883,6 +7592,9 @@ impl Render for BruApp {
         if self.confirm_close.is_some() {
             root = root.child(self.close_confirm_overlay(cx));
         }
+        if self.confirm_close_all {
+            root = root.child(self.close_all_overlay(cx));
+        }
         if self.rename.is_some() {
             root = root.child(self.rename_overlay(cx));
         }
@@ -6898,9 +7610,15 @@ impl Render for BruApp {
         if self.palette_open {
             root = root.child(self.palette_overlay(cx));
         }
-        // The context menu sits on top so it overlays everything else.
+        // The context menus sit on top so they overlay everything else.
         if self.ctx_menu.is_some() {
             root = root.child(self.ctx_menu_overlay(cx));
+        }
+        if self.tab_menu.is_some() {
+            root = root.child(self.tab_menu_overlay(cx));
+        }
+        if self.var_popup.is_some() {
+            root = root.child(self.var_popup_overlay(window, cx));
         }
         root
     }
@@ -6946,7 +7664,7 @@ mod tests {
             assert!(valid_var_name(ok), "should be valid: {ok:?}");
         }
         // Rejected: spaces and other punctuation.
-        for bad in ["my var", "a b", "tok!", "a/b", "a:b", "a$b", "café"] {
+        for bad in ["my var", "a b", "tok!", "a/b", "a:b", "a$b", "cafÃ©"] {
             assert!(!valid_var_name(bad), "should be invalid: {bad:?}");
         }
     }

@@ -30,6 +30,15 @@ pub enum Lang {
 pub struct Changed;
 impl gpui::EventEmitter<Changed> for CodeEditor {}
 
+/// Emitted when the `{{var}}` under the cursor changes: `Some(name)` on entering
+/// a template var, `None` on a click (so the parent can dismiss its var popup).
+/// The parent resolves the value/scope (the editor has no variable context).
+pub struct HoverVar {
+    pub name: Option<String>,
+    pub pos: Point<Pixels>,
+}
+impl gpui::EventEmitter<HoverVar> for CodeEditor {}
+
 actions!(
     code_editor,
     [
@@ -102,6 +111,8 @@ pub struct CodeEditor {
     line_height: Pixels,
     /// Horizontal scroll offset applied during paint (single-line inputs).
     scroll_x: Pixels,
+    /// The `{{var}}` name currently under the cursor (for hover-popup emission).
+    hovered_var: Option<String>,
 }
 
 impl CodeEditor {
@@ -121,9 +132,16 @@ impl CodeEditor {
             bounds: None,
             line_height: px(19.),
             scroll_x: px(0.),
+            hovered_var: None,
         };
         ed.recompute_highlight();
         ed
+    }
+
+    /// The `{{name}}` template variable spanning byte `offset`, if any (trimmed,
+    /// non-empty). Used to drive the hover popup.
+    fn var_at(&self, offset: usize) -> Option<String> {
+        var_at_offset(&self.content, offset)
     }
 
     /// A single-line variant (for the URL field): one line tall, no newlines.
@@ -429,14 +447,33 @@ impl CodeEditor {
         } else {
             self.move_to(idx, cx);
         }
+        // A click dismisses any open var popup.
+        self.hovered_var = None;
+        cx.emit(HoverVar {
+            name: None,
+            pos: e.position,
+        });
     }
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.is_selecting = false;
     }
     fn on_mouse_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let idx = self.index_for_position(e.position);
         if self.is_selecting {
-            let idx = self.index_for_position(e.position);
             self.select_to(idx, cx);
+            return; // no var-hover work mid drag-select
+        }
+        // Emit when the hovered `{{var}}` changes; only when entering one (the
+        // parent keeps the popup up over empty text so a Copy click is reachable).
+        let cur = self.var_at(idx);
+        if cur != self.hovered_var {
+            self.hovered_var = cur.clone();
+            if cur.is_some() {
+                cx.emit(HoverVar {
+                    name: cur,
+                    pos: e.position,
+                });
+            }
         }
     }
 }
@@ -835,5 +872,55 @@ impl Element for EditorElement {
             ed.line_height = lh;
             ed.scroll_x = scroll_x;
         });
+    }
+}
+
+/// The `{{name}}` template variable spanning byte `offset` in `content` (trimmed,
+/// non-empty), or `None`. The match includes the surrounding `{{`/`}}`.
+fn var_at_offset(content: &str, offset: usize) -> Option<String> {
+    let mut i = 0;
+    while let Some(open) = content[i..].find("{{") {
+        let start = i + open;
+        let Some(close_rel) = content[start + 2..].find("}}") else {
+            break;
+        };
+        let close = start + 2 + close_rel;
+        if offset >= start && offset < close + 2 {
+            let inner = content[start + 2..close].trim();
+            return (!inner.is_empty()).then(|| inner.to_string());
+        }
+        i = close + 2;
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::var_at_offset;
+
+    #[test]
+    fn detects_var_under_offset() {
+        let s = "GET {{baseUrl}}/users/{{id}}";
+        // Inside {{baseUrl}} (covers the braces too).
+        assert_eq!(var_at_offset(s, 4).as_deref(), Some("baseUrl")); // first '{'
+        assert_eq!(var_at_offset(s, 9).as_deref(), Some("baseUrl")); // mid-name
+        assert!(var_at_offset(s, 15).is_none()); // the '/' after }}
+                                                 // Second var.
+        assert_eq!(var_at_offset(s, 24).as_deref(), Some("id"));
+    }
+
+    #[test]
+    fn trims_inner_and_ignores_empty() {
+        assert_eq!(
+            var_at_offset("a {{ spaced }} b", 5).as_deref(),
+            Some("spaced")
+        );
+        assert_eq!(var_at_offset("x {{}} y", 3), None); // empty braces
+        assert_eq!(var_at_offset("plain text", 3), None); // no braces
+    }
+
+    #[test]
+    fn unclosed_braces_are_safe() {
+        assert_eq!(var_at_offset("{{oops", 2), None);
     }
 }
