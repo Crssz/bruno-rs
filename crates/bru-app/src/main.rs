@@ -4815,6 +4815,7 @@ impl BruApp {
                     .flex_col()
                     .gap_2()
                     .flex_1()
+                    .min_h_0()
                     .child(
                         div()
                             .text_size(px(11.))
@@ -4847,6 +4848,7 @@ impl BruApp {
             .bg(theme::mantle())
             .border_1()
             .border_color(theme::border2())
+            .overflow_hidden()
             .occlude()
             .child(header)
             .child(body)
@@ -5603,6 +5605,7 @@ impl BruApp {
                     .flex()
                     .flex_col()
                     .flex_1()
+                    .min_h_0()
                     .gap_2()
                     .child(rename_row)
                     .child(
@@ -5637,6 +5640,7 @@ impl BruApp {
             .bg(theme::mantle())
             .border_1()
             .border_color(theme::border2())
+            .overflow_hidden()
             .flex()
             .flex_col()
             .gap_3()
@@ -5705,6 +5709,7 @@ impl BruApp {
                     .flex_row()
                     .gap_3()
                     .flex_1()
+                    .min_h_0()
                     .child(left)
                     .child(right),
             );
