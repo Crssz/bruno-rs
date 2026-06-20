@@ -1926,6 +1926,7 @@ impl BruApp {
                 .child(label)
         };
         let mut card = div()
+            .id("env-menu")
             .absolute()
             .left(pos.x)
             .top(pos.y)
@@ -1934,6 +1935,8 @@ impl BruApp {
             .flex_col()
             .py_1()
             .w(px(200.))
+            .max_h(px(360.))
+            .overflow_y_scroll()
             .rounded_md()
             .bg(theme::mantle())
             .border_1()
@@ -2344,6 +2347,7 @@ impl BruApp {
                 .child(label.to_string())
         };
         let mut card = div()
+            .id("ctx-menu")
             .absolute()
             .left(menu.pos.x)
             .top(menu.pos.y)
@@ -2352,6 +2356,8 @@ impl BruApp {
             .flex_col()
             .py_1()
             .w(px(180.))
+            .max_h(px(420.))
+            .overflow_y_scroll()
             .rounded_md()
             .bg(theme::mantle())
             .border_1()
@@ -3432,18 +3438,20 @@ impl BruApp {
         }
     }
 
-    fn top_bar(&self, cx: &mut Context<Self>) -> Div {
+    fn top_bar(&self, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
         let name = self
             .collection
             .as_ref()
             .map(|c| c.name.clone())
             .unwrap_or_else(|| "No collection".into());
         div()
+            .id("top-bar")
             .flex()
             .flex_row()
             .items_center()
             .gap_3()
             .w_full()
+            .overflow_x_scroll()
             .px_3()
             .py_2()
             .bg(theme::bg())
@@ -3947,12 +3955,15 @@ impl BruApp {
     }
 
     fn response_pane(&self, tab: &OpenTab, _window: &mut Window, cx: &mut Context<Self>) -> Div {
-        // Sub-tab strip + status/time/size summary.
+        // Sub-tab strip + status/time/size summary. Scrolls horizontally so the
+        // right-side actions never clip in the narrow split response pane.
         let mut strip = div()
+            .id("resp-strip")
             .flex()
             .flex_row()
             .items_center()
             .w_full()
+            .overflow_x_scroll()
             .px_2()
             .bg(theme::bg())
             .border_b_1()
