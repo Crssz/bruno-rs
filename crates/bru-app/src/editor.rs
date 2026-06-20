@@ -98,6 +98,8 @@ pub struct CodeEditor {
     line_layouts: Vec<ShapedLine>,
     bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
+    /// Horizontal scroll offset applied during paint (single-line inputs).
+    scroll_x: Pixels,
 }
 
 impl CodeEditor {
@@ -116,6 +118,7 @@ impl CodeEditor {
             line_layouts: Vec::new(),
             bounds: None,
             line_height: px(19.),
+            scroll_x: px(0.),
         };
         ed.recompute_highlight();
         ed
@@ -408,7 +411,8 @@ impl CodeEditor {
         let rel = f32::from(position.y - bounds.top());
         let lh = f32::from(self.line_height).max(1.0);
         let line = ((rel / lh).max(0.0) as usize).min(self.line_layouts.len() - 1);
-        let col = self.line_layouts[line].closest_index_for_x(position.x - bounds.left());
+        let col =
+            self.line_layouts[line].closest_index_for_x(position.x - bounds.left() + self.scroll_x);
         let lstart = starts[line];
         (lstart + col).min(self.line_end(lstart))
     }
@@ -636,6 +640,8 @@ struct EditorPrepaint {
     lines: Vec<ShapedLine>,
     cursor: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
+    /// Horizontal scroll offset (single-line inputs) so the cursor stays in view.
+    scroll_x: Pixels,
 }
 
 impl IntoElement for EditorElement {
@@ -717,9 +723,20 @@ impl Element for EditorElement {
         let cline = editor.line_of(cur);
         let (cshaped, cstart) = &lines[cline];
         let cx_px = cshaped.x_for_index(cur - cstart);
+        // Single-line inputs scroll horizontally so the cursor stays inside the
+        // box (and long values are clipped at the box edge, not painted over it).
+        let scroll_x = if editor.single_line {
+            let margin = px(6.);
+            (cx_px - (bounds.size.width - margin)).max(px(0.))
+        } else {
+            px(0.)
+        };
         let cursor = Some(fill(
             Bounds::new(
-                point(bounds.left() + cx_px, bounds.top() + lh * cline as f32),
+                point(
+                    bounds.left() + cx_px - scroll_x,
+                    bounds.top() + lh * cline as f32,
+                ),
                 size(px(1.5), lh),
             ),
             theme::accent(),
@@ -742,8 +759,11 @@ impl Element for EditorElement {
                     }
                     selections.push(fill(
                         Bounds::from_corners(
-                            point(bounds.left() + x1, bounds.top() + lh * i as f32),
-                            point(bounds.left() + x2, bounds.top() + lh * (i as f32 + 1.)),
+                            point(bounds.left() + x1 - scroll_x, bounds.top() + lh * i as f32),
+                            point(
+                                bounds.left() + x2 - scroll_x,
+                                bounds.top() + lh * (i as f32 + 1.),
+                            ),
                         ),
                         gpui::rgba(0xd9a34230),
                     ));
@@ -755,6 +775,7 @@ impl Element for EditorElement {
             lines: lines.into_iter().map(|(s, _)| s).collect(),
             cursor,
             selections,
+            scroll_x,
         }
     }
 
@@ -775,30 +796,39 @@ impl Element for EditorElement {
             cx,
         );
         let lh = window.line_height();
-        for q in prepaint.selections.drain(..) {
-            window.paint_quad(q);
-        }
-        for (i, line) in prepaint.lines.iter().enumerate() {
-            let _ = line.paint(
-                point(bounds.left(), bounds.top() + lh * i as f32),
-                lh,
-                gpui::TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
-        }
-        if focus.is_focused(window) {
-            if let Some(cursor) = prepaint.cursor.take() {
-                window.paint_quad(cursor);
+        // Clip all painting to the editor's own bounds so long text (e.g. a long
+        // env value or URL) and its selection never spill outside the input box.
+        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            for q in prepaint.selections.drain(..) {
+                window.paint_quad(q);
             }
-        }
+            for (i, line) in prepaint.lines.iter().enumerate() {
+                let _ = line.paint(
+                    point(
+                        bounds.left() - prepaint.scroll_x,
+                        bounds.top() + lh * i as f32,
+                    ),
+                    lh,
+                    gpui::TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+            if focus.is_focused(window) {
+                if let Some(cursor) = prepaint.cursor.take() {
+                    window.paint_quad(cursor);
+                }
+            }
+        });
         // Cache layouts for mouse mapping.
         let lines = std::mem::take(&mut prepaint.lines);
+        let scroll_x = prepaint.scroll_x;
         self.editor.update(cx, |ed, _| {
             ed.line_layouts = lines;
             ed.bounds = Some(bounds);
             ed.line_height = lh;
+            ed.scroll_x = scroll_x;
         });
     }
 }
