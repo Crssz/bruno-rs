@@ -5,6 +5,7 @@ mod edit;
 mod editor;
 mod envfs;
 mod highlight;
+mod icons;
 mod import;
 mod theme;
 mod vault;
@@ -187,20 +188,29 @@ fn folder_row(name: &str, depth: usize, collapsed: bool) -> Div {
         .flex()
         .flex_row()
         .items_center()
-        .gap_2()
+        .gap_1()
         .pr_2()
         .py_1()
         .pl(px(8. + depth as f32 * 14.))
         .rounded_md()
         .hover(|s| s.bg(theme::mantle()))
         .child(
-            div()
-                .text_size(px(11.))
-                .text_color(theme::muted())
-                .child(if collapsed { "\u{25B8}" } else { "\u{25BE}" }),
+            icons::icon(if collapsed {
+                "chevron-right"
+            } else {
+                "chevron-down"
+            })
+            .size(px(14.))
+            .text_color(theme::muted()),
+        )
+        .child(
+            icons::icon("folder")
+                .size(px(14.))
+                .text_color(theme::muted()),
         )
         .child(
             div()
+                .ml_1()
                 .text_size(px(13.))
                 .text_color(theme::text())
                 .child(name.to_string()),
@@ -3657,10 +3667,9 @@ impl BruApp {
                     .border_color(theme::border1())
                     .text_size(px(12.))
                     .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(theme::muted())
-                            .child("\u{2315}"),
+                        icons::icon("search")
+                            .size(px(14.))
+                            .text_color(theme::muted()),
                     )
                     .child(div().flex_1().min_w_0().child(self.search.clone())),
             )
@@ -6044,22 +6053,24 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("sample"));
 
-    application().run(move |cx: &mut App| {
-        editor::bind_keys(cx);
-        bind_app_keys(cx);
-        let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(gpui::TitlebarOptions {
-                    title: Some("bruno-rs".into()),
+    application()
+        .with_assets(icons::Assets)
+        .run(move |cx: &mut App| {
+            editor::bind_keys(cx);
+            bind_app_keys(cx);
+            let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(gpui::TitlebarOptions {
+                        title: Some("bruno-rs".into()),
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            },
-            |_, cx| cx.new(|cx| BruApp::new(cx, dir.clone())),
-        )
-        .unwrap();
-        cx.activate(true);
-    });
+                },
+                |_, cx| cx.new(|cx| BruApp::new(cx, dir.clone())),
+            )
+            .unwrap();
+            cx.activate(true);
+        });
 }
