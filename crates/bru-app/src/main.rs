@@ -5809,9 +5809,9 @@ impl BruApp {
                 .child(
                     div()
                         .px_1()
-                        .text_size(px(12.))
-                        .text_color(theme::muted())
-                        .child("\u{00D7}")
+                        .rounded_md()
+                        .hover(|s| s.bg(theme::surface0()))
+                        .child(icons::icon("x").size(px(12.)).text_color(theme::muted()))
                         .on_mouse_up(
                             MouseButton::Left,
                             cx.listener(move |this, _ev: &MouseUpEvent, _w, cx| {
