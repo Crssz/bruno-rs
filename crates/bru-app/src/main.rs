@@ -152,6 +152,16 @@ fn icon_chip(label: &str) -> Div {
         .child(label.to_string())
 }
 
+/// An icon-only chrome button (ghost until hovered), tinted `subtext`.
+fn svg_chip(name: &str) -> Div {
+    div()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .hover(|s| s.bg(theme::surface0()))
+        .child(icons::icon(name).size(px(15.)).text_color(theme::subtext()))
+}
+
 /// A sidebar request row: colored method badge + name, indented by depth.
 fn req_row(method: &str, name: &str, active: bool, depth: usize) -> Div {
     div()
@@ -3439,7 +3449,7 @@ impl BruApp {
             .bg(theme::bg())
             .border_b_1()
             .border_color(theme::border1())
-            .child(icon_chip("\u{2302}").on_mouse_up(
+            .child(svg_chip("home").on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.go_home(cx)),
             ))
@@ -3627,9 +3637,13 @@ impl BruApp {
                             .child(
                                 div()
                                     .px_1()
-                                    .text_size(px(13.))
-                                    .text_color(theme::accent())
-                                    .child("\u{1F4C1}+")
+                                    .rounded_md()
+                                    .hover(|s| s.bg(theme::surface0()))
+                                    .child(
+                                        icons::icon("folder")
+                                            .size(px(15.))
+                                            .text_color(theme::accent()),
+                                    )
                                     .on_mouse_up(
                                         MouseButton::Left,
                                         cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
@@ -3641,8 +3655,13 @@ impl BruApp {
                             .child(
                                 div()
                                     .px_1()
-                                    .text_color(theme::accent())
-                                    .child("+")
+                                    .rounded_md()
+                                    .hover(|s| s.bg(theme::surface0()))
+                                    .child(
+                                        icons::icon("plus")
+                                            .size(px(15.))
+                                            .text_color(theme::accent()),
+                                    )
                                     .on_mouse_up(
                                         MouseButton::Left,
                                         cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
@@ -3861,6 +3880,10 @@ impl BruApp {
             )
             .child(
                 div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
                     .px_3()
                     .py_1()
                     .rounded_md()
@@ -3868,10 +3891,12 @@ impl BruApp {
                     .text_color(theme::bg())
                     .text_size(px(13.))
                     .font_weight(gpui::FontWeight::MEDIUM)
+                    .hover(|s| s.opacity(0.92))
+                    .child(icons::icon("send").size(px(13.)).text_color(theme::bg()))
                     .child(if tab.sending {
                         "Sending\u{2026}".to_string()
                     } else {
-                        "Send \u{2192}".to_string()
+                        "Send".to_string()
                     })
                     .on_mouse_up(
                         MouseButton::Left,
