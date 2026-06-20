@@ -26,6 +26,8 @@ enum EditKind {
     Dict(String),
     /// A dictionary block (params/headers) edited as a structured row grid.
     Kv(String),
+    /// An `auth:<mode>` block edited as a labeled per-field form.
+    AuthForm(String),
     /// GraphQL: body:graphql (query) in the main editor, body:graphql:vars in
     /// the secondary editor.
     GraphQl,
@@ -38,6 +40,13 @@ struct KvRow {
     name: Entity<CodeEditor>,
     value: Entity<CodeEditor>,
     enabled: bool,
+}
+
+/// One labeled field of the structured Auth form (e.g. "Username" → `username`).
+struct AuthFieldRow {
+    label: String,
+    key: String,
+    editor: Entity<CodeEditor>,
 }
 
 /// Request sub-tabs (Body is the editable editor; the rest show parsed data).
@@ -498,6 +507,8 @@ struct OpenTab {
     edit_kind: EditKind,
     /// Row editors for the structured params/headers grid (when on those tabs).
     kv_rows: Vec<KvRow>,
+    /// Field editors for the structured Auth form (when on the Auth tab).
+    auth_rows: Vec<AuthFieldRow>,
     /// URL-derived path params (name, value editor) shown on the Params tab.
     path_rows: Vec<(String, Entity<CodeEditor>)>,
     sending: bool,
@@ -539,6 +550,7 @@ impl OpenTab {
             url_input,
             edit_kind: EditKind::None,
             kv_rows: Vec::new(),
+            auth_rows: Vec::new(),
             path_rows: Vec::new(),
             sending: false,
             response: None,
@@ -616,12 +628,22 @@ impl OpenTab {
                 set_text_block(&mut self.file, "body:graphql", text);
                 set_text_block(&mut self.file, "body:graphql:vars", vars);
             }
+            EditKind::AuthForm(block) => {
+                let mut lines = String::new();
+                for r in &self.auth_rows {
+                    let val = r.editor.read(cx).text();
+                    lines.push_str(&format!("{}: {}\n", r.key, val.trim()));
+                }
+                edit::lines_to_dict(&mut self.file, block, &lines);
+            }
             EditKind::None | EditKind::Source => {}
         }
     }
 
     /// Load the active sub-tab's block into the shared editor.
     fn load_active_tab(&mut self, cx: &mut Context<BruApp>) {
+        // Cleared here; the structured-auth branch below repopulates it.
+        self.auth_rows = Vec::new();
         // Params/Headers/Assert + form/multipart bodies use the structured grid.
         let kv_block: Option<&str> = match self.req_tab {
             ReqTab::Params => Some("params:query"),
@@ -664,6 +686,40 @@ impl OpenTab {
             self.body_vars_editor
                 .update(cx, |ed, cx| ed.set_text(&vars, Lang::Json, cx));
             return;
+        }
+        // Structured Auth form: one labeled field editor per key of the mode.
+        if self.req_tab == ReqTab::Auth {
+            let mode = edit::method_field(&self.file, "auth").unwrap_or_default();
+            if let Some(block) = auth_block_name(&mode) {
+                let fields = auth_fields(&mode);
+                if !fields.is_empty() {
+                    let existing: HashMap<String, String> = edit::kv_block_rows(&self.file, block)
+                        .into_iter()
+                        .map(|(k, v, _)| (k, v))
+                        .collect();
+                    self.auth_rows = fields
+                        .iter()
+                        .map(|(label, key, secret)| {
+                            let val = existing.get(*key).cloned().unwrap_or_default();
+                            // Secret fields (passwords, tokens) render masked.
+                            let editor = if *secret {
+                                cx.new(|cx| CodeEditor::masked_line(cx, &val))
+                            } else {
+                                cx.new(|cx| CodeEditor::single_line(cx, &val))
+                            };
+                            AuthFieldRow {
+                                label: (*label).to_string(),
+                                key: (*key).to_string(),
+                                editor,
+                            }
+                        })
+                        .collect();
+                    self.kv_rows = Vec::new();
+                    self.path_rows = Vec::new();
+                    self.edit_kind = EditKind::AuthForm(block.to_string());
+                    return;
+                }
+            }
         }
         self.kv_rows = Vec::new();
         self.path_rows = Vec::new();
@@ -958,6 +1014,45 @@ fn auth_block_name(mode: &str) -> Option<&'static str> {
         "awsv4" => "auth:awsv4",
         _ => return None,
     })
+}
+
+/// The labeled fields of an auth mode's form: `(label, dict key, is secret)`.
+/// Keys mirror bru-core's `project_auth` projection. Empty = no structured form.
+fn auth_fields(mode: &str) -> &'static [(&'static str, &'static str, bool)] {
+    match mode {
+        "basic" | "digest" => &[
+            ("Username", "username", false),
+            ("Password", "password", true),
+        ],
+        "bearer" => &[("Token", "token", true)],
+        "apikey" => &[
+            ("Key", "key", false),
+            ("Value", "value", true),
+            ("Placement (header | queryparams)", "placement", false),
+        ],
+        "oauth2" => &[
+            (
+                "Grant Type (client_credentials | password)",
+                "grant_type",
+                false,
+            ),
+            ("Access Token URL", "access_token_url", false),
+            ("Client Id", "client_id", false),
+            ("Client Secret", "client_secret", true),
+            ("Scope", "scope", false),
+            ("Username", "username", false),
+            ("Password", "password", true),
+        ],
+        "awsv4" => &[
+            ("Access Key Id", "accessKeyId", true),
+            ("Secret Access Key", "secretAccessKey", true),
+            ("Session Token", "sessionToken", true),
+            ("Service", "service", false),
+            ("Region", "region", false),
+            ("Profile Name", "profileName", false),
+        ],
+        _ => &[],
+    }
 }
 
 /// Build structured grid rows (name/value single-line editors + enabled) from a
@@ -4223,6 +4318,9 @@ impl BruApp {
         if matches!(tab.edit_kind, EditKind::Kv(_)) {
             return self.kv_grid(tab, cx);
         }
+        if matches!(tab.edit_kind, EditKind::AuthForm(_)) {
+            return self.auth_form(tab, cx);
+        }
         if matches!(tab.edit_kind, EditKind::GraphQl) {
             let pane = |label: &str, id: &'static str, ed: Entity<CodeEditor>| {
                 div()
@@ -4282,6 +4380,63 @@ impl BruApp {
     }
 
     /// The structured params/headers grid (enable toggle + name + value + Ã¢Å“â€¢).
+    /// Structured Auth form: a labeled single-line input per field of the mode.
+    fn auth_form(&self, tab: &OpenTab, _cx: &mut Context<Self>) -> Div {
+        let mut col = div().flex().flex_col().gap_3().w_full();
+        for r in &tab.auth_rows {
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .w(px(420.))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(theme::muted())
+                            .child(r.label.clone()),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(theme::input_bg())
+                            .border_1()
+                            .border_color(theme::border1())
+                            .font_family("monospace")
+                            .text_size(px(12.))
+                            .child(r.editor.clone()),
+                    ),
+            );
+        }
+        if tab.auth_rows.is_empty() {
+            col = col.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme::muted())
+                    .child("No fields for this auth mode."),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .w_full()
+            .bg(theme::bg())
+            .child(
+                div()
+                    .id("auth-form")
+                    .overflow_y_scroll()
+                    .min_h_0()
+                    .flex_1()
+                    .w_full()
+                    .p_3()
+                    .child(col),
+            )
+    }
+
     fn kv_grid(&self, tab: &OpenTab, cx: &mut Context<Self>) -> Div {
         // Cells are borderless and sit inside one bordered table (Bruno's grid);
         // `divider` draws the vertical gridline on the right of the name column.
