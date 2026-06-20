@@ -3438,20 +3438,21 @@ impl BruApp {
         }
     }
 
-    fn top_bar(&self, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
+    /// The slim app title bar (Bruno's AppTitleBar): Home + collection switcher
+    /// on the left, theme toggle on the right. Collection actions live in the
+    /// collection header below, not here.
+    fn top_bar(&self, cx: &mut Context<Self>) -> Div {
         let name = self
             .collection
             .as_ref()
             .map(|c| c.name.clone())
             .unwrap_or_else(|| "No collection".into());
         div()
-            .id("top-bar")
             .flex()
             .flex_row()
             .items_center()
-            .gap_3()
+            .gap_2()
             .w_full()
-            .overflow_x_scroll()
             .px_3()
             .py_2()
             .bg(theme::bg())
@@ -3461,43 +3462,33 @@ impl BruApp {
                 MouseButton::Left,
                 cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.go_home(cx)),
             ))
-            .child(chip("Open Collection").on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
-                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                        this.load_collection(dir, cx);
-                    }
-                }),
-            ))
-            .child(chip("New Collection").on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
-                    if let Some(parent) = rfd::FileDialog::new().pick_folder() {
-                        this.create_collection(&parent, cx);
-                    }
-                }),
-            ))
-            .child(chip("Import").on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.import_postman(cx)),
-            ))
-            .child(chip("curl").on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_curl(cx)),
-            ))
-            .child(chip("Run").on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
-                    let dir = this.dir.clone();
-                    this.run_folder(dir, cx);
-                    cx.notify();
-                }),
-            ))
             .child(
+                // Collection/workspace switcher: name + chevron (opens Home).
                 div()
-                    .text_color(theme::accent())
-                    .text_size(px(13.))
-                    .child(name),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .hover(|s| s.bg(theme::surface0()))
+                    .child(
+                        div()
+                            .text_color(theme::text())
+                            .text_size(px(13.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(name),
+                    )
+                    .child(
+                        icons::icon("chevron-down")
+                            .size(px(12.))
+                            .text_color(theme::muted()),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.go_home(cx)),
+                    ),
             )
             .child(
                 div()
@@ -3506,80 +3497,6 @@ impl BruApp {
                     .child("\u{2022} main"),
             )
             .child(div().flex_1())
-            .child({
-                // Bruno's environment selector: a bordered pill with a status dot
-                // (green when an env is active) + caret.
-                let (label, has) = match &self.selected_env {
-                    Some(e) => (e.clone(), true),
-                    None => ("No Environment".to_string(), false),
-                };
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .bg(theme::surface0())
-                    .border_1()
-                    .border_color(theme::border1())
-                    .text_size(px(12.))
-                    .child(div().w(px(7.)).h(px(7.)).rounded_full().bg(if has {
-                        theme::green()
-                    } else {
-                        theme::muted()
-                    }))
-                    .child(
-                        div()
-                            .text_color(if has { theme::text() } else { theme::muted() })
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .text_color(theme::muted())
-                            .text_size(px(10.))
-                            .child("\u{25BE}"),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, ev: &MouseDownEvent, _w, cx| {
-                            this.open_env_menu(ev.position, cx);
-                        }),
-                    )
-            })
-            .child(chip("Environments").on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.env_open(cx)),
-            ))
-            .child(chip("Cookies").on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_cookies(cx)),
-            ))
-            .child(
-                chip("Vault")
-                    .text_color(if self.vault.is_some() {
-                        theme::green()
-                    } else {
-                        theme::text()
-                    })
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_vault(cx)),
-                    ),
-            )
-            .child(chip("Dev Tools").on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.toggle_devtools(cx)),
-            ))
-            .child(chip("Settings").on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_collection_settings(cx)),
-            ))
-            .child(chip("Prefs").on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_prefs(cx)),
-            ))
             .child(
                 icon_chip(if theme::is_dark() {
                     "\u{2600}" // Ã¢Ëœâ‚¬ Ã¢â‚¬â€ click for light
@@ -3595,6 +3512,144 @@ impl BruApp {
                     }),
                 ),
             )
+    }
+
+    /// The per-collection toolbar (Bruno's CollectionHeader), shown atop the main
+    /// pane when a collection is open: management on the left; Run / Settings /
+    /// Vault / Prefs / Environments + the environment selector on the right.
+    /// (Cookies + DevTools live in the status bar, as in Bruno.)
+    fn collection_header(&self, cx: &mut Context<Self>) -> Div {
+        if self.collection.is_none() || self.home {
+            return div();
+        }
+        let (env_label, env_has) = match &self.selected_env {
+            Some(e) => (e.clone(), true),
+            None => ("No Environment".to_string(), false),
+        };
+        let env_pill = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .bg(theme::surface0())
+            .border_1()
+            .border_color(theme::border1())
+            .text_size(px(12.))
+            .child(div().w(px(7.)).h(px(7.)).rounded_full().bg(if env_has {
+                theme::green()
+            } else {
+                theme::muted()
+            }))
+            .child(
+                div()
+                    .text_color(if env_has {
+                        theme::text()
+                    } else {
+                        theme::muted()
+                    })
+                    .child(env_label),
+            )
+            .child(
+                div()
+                    .text_color(theme::muted())
+                    .text_size(px(10.))
+                    .child("\u{25BE}"),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseDownEvent, _w, cx| {
+                    this.open_env_menu(ev.position, cx);
+                }),
+            );
+        let run = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .text_color(theme::text())
+            .text_size(px(13.))
+            .hover(|s| s.bg(theme::surface0()))
+            .child(icons::icon("play").size(px(12.)).text_color(theme::green()))
+            .child("Run")
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                    let dir = this.dir.clone();
+                    this.run_folder(dir, cx);
+                    cx.notify();
+                }),
+            );
+        let row = div()
+            .id("collection-header")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .overflow_x_scroll()
+            .px_3()
+            .py_1()
+            .bg(theme::bg())
+            .border_b_1()
+            .border_color(theme::border1())
+            .child(chip("Open").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        this.load_collection(dir, cx);
+                    }
+                }),
+            ))
+            .child(chip("New").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                    if let Some(parent) = rfd::FileDialog::new().pick_folder() {
+                        this.create_collection(&parent, cx);
+                    }
+                }),
+            ))
+            .child(chip("Import").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.import_postman(cx)),
+            ))
+            .child(chip("curl").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_curl(cx)),
+            ))
+            .child(div().flex_1())
+            .child(run)
+            .child(svg_chip("settings").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_collection_settings(cx)),
+            ))
+            .child(
+                chip("Vault")
+                    .text_color(if self.vault.is_some() {
+                        theme::green()
+                    } else {
+                        theme::text()
+                    })
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_vault(cx)),
+                    ),
+            )
+            .child(chip("Prefs").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.open_prefs(cx)),
+            ))
+            .child(chip("Environments").on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.env_open(cx)),
+            ))
+            .child(env_pill);
+        div().w_full().child(row)
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> Div {
@@ -5959,6 +6014,7 @@ impl Render for BruApp {
             .flex_col()
             .flex_1()
             .h_full()
+            .child(self.collection_header(cx))
             .child(strip)
             .child(content);
 
