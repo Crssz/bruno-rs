@@ -2091,6 +2091,15 @@ mod tests {
         require_spec_at_offset, var_at_offset, word_range_at_offset, Lang,
     };
 
+    #[gpui::test]
+    fn spike_editor_set_text_round_trips(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        let ed = cx.new(|cx| super::CodeEditor::new(cx, "hello"));
+        assert_eq!(ed.update(cx, |ed, _| ed.text().to_string()), "hello");
+        ed.update(cx, |ed, cx| ed.set_text("world\nsecond", Lang::Plain, cx));
+        assert_eq!(ed.update(cx, |ed, _| ed.text().to_string()), "world\nsecond");
+    }
+
     #[test]
     fn detects_var_under_offset() {
         let s = "GET {{baseUrl}}/users/{{id}}";

@@ -9,6 +9,14 @@ impl BruApp {
     /// filesystem / index) and store the result. Tracks repo-ness separately from
     /// the parsed status so a transient status error keeps the chip reachable.
     pub(crate) fn refresh_git_status(&mut self, cx: &mut Context<Self>) {
+        // Unit tests construct BruApp under gpui's deterministic test scheduler,
+        // which panics on activity from a thread it didn't spawn. Skip the raw
+        // git worker thread there — `cfg!(test)` is false in the shipped binary,
+        // so this is a no-op in production. Git status is unit-tested via the
+        // pure `git::` parsers instead.
+        if cfg!(test) {
+            return;
+        }
         let dir = self.dir.clone();
         let queried = dir.clone();
         let (tx, rx) = futures::channel::oneshot::channel();

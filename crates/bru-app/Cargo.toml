@@ -40,3 +40,9 @@ aes-gcm = "0.10"
 sha2 = "0.10"
 getrandom = "0.2"
 dprint-plugin-typescript = "0.96.1"
+
+[dev-dependencies]
+# Headless UI testing: gpui's test-support feature provides `TestAppContext` +
+# the `#[gpui::test]` macro, letting us construct entities (CodeEditor, BruApp)
+# and drive their `&mut Context` methods without opening a real window.
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", rev = "69b602c7", features = ["test-support"] }

@@ -99,7 +99,7 @@ struct VarRow {
 
 /// Which scope provides a template variable's effective value (precedence high→
 /// low: Request > Env > Collection > Global > Vault).
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum VarScope {
     Request,
     Env,
@@ -174,7 +174,7 @@ struct AuthFieldRow {
 }
 
 /// Request sub-tabs (Body is the editable editor; the rest show parsed data).
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum ReqTab {
     Params,
     Body,
@@ -412,7 +412,7 @@ struct EnvEditor {
 }
 
 /// Response sub-tabs.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum RespTab {
     Response,
     Headers,
@@ -1043,4 +1043,96 @@ fn main() {
             .unwrap();
             cx.activate(true);
         });
+}
+
+/// Shared headless-test harness: construct a real `BruApp` on a throwaway copy
+/// of the bundled sample collection via `gpui::TestAppContext`, so every module's
+/// tests build the app identically. `BruApp::new` is private to this module, so
+/// the constructor lives here and is exposed `pub(crate)` for sibling tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use gpui::{AppContext, Entity, TestAppContext};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// The bundled sample collection (read-only — never mutate/save against it;
+    /// use [`temp_collection`] when a test writes to disk).
+    pub(crate) fn sample_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("sample")
+    }
+
+    /// A temp directory removed on drop.
+    pub(crate) struct TempCollection {
+        pub(crate) dir: PathBuf,
+    }
+    impl Drop for TempCollection {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A fresh temp copy of the sample collection, for tests that mutate or save.
+    pub(crate) fn temp_collection() -> TempCollection {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("bru-app-test-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::fsutil::copy_dir_recursive(&sample_dir(), &dir).unwrap();
+        TempCollection { dir }
+    }
+
+    /// Construct a BruApp on `dir`, draining the startup git-status spawn so the
+    /// app is in a settled state.
+    pub(crate) fn build_app(cx: &mut TestAppContext, dir: PathBuf) -> Entity<BruApp> {
+        let app = cx.new(|cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        app
+    }
+
+    /// Construct a BruApp on a throwaway copy of the sample collection. The
+    /// returned `TempCollection` must be kept alive for the test's duration.
+    pub(crate) fn app_on_temp(cx: &mut TestAppContext) -> (Entity<BruApp>, TempCollection) {
+        let tc = temp_collection();
+        let app = build_app(cx, tc.dir.clone());
+        (app, tc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::app_on_temp;
+
+    #[gpui::test]
+    fn bruapp_constructs_opens_request_and_switches_tabs(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        app.update(cx, |app, _| assert!(app.collection.is_some()));
+        let req = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| app.open_request(req.clone(), cx));
+        app.update(cx, |app, cx| {
+            assert_eq!(app.tabs.len(), 1);
+            assert_eq!(app.active, Some(0));
+            app.tabs[0].switch_tab(ReqTab::Headers, cx);
+            assert_eq!(app.tabs[0].req_tab, ReqTab::Headers);
+        });
+    }
+
+    /// Drawing the app in a test window exercises the whole `render` view tree
+    /// (top bar, sidebar, status bar, request/response panes) headlessly.
+    #[gpui::test]
+    fn renders_full_app_in_window(cx: &mut gpui::TestAppContext) {
+        let tc = crate::test_support::temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_window, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _window, cx| {
+                app.open_request(tc.dir.join("Repository Info.bru"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _window, _cx| assert_eq!(app.tabs.len(), 1))
+            .unwrap();
+    }
 }
