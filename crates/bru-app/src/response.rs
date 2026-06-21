@@ -254,11 +254,22 @@ impl BruApp {
                     self.resp_editor
                         .update(cx, |ed, cx| ed.set_text(&displayed, lang, cx));
                 }
-                scroll("resp-body")
+                let body = scroll("resp-body")
+                    .track_scroll(&self.resp_scroll)
                     .font_family("monospace")
                     .text_size(px(13.))
                     .line_height(px(19.))
-                    .child(self.resp_editor.clone())
+                    .child(self.resp_editor.clone());
+                // A Ctrl+F find bar (find-only; the viewer is read-only) sits above
+                // the scrolling body as a non-scrolling row.
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .children(CodeEditor::find_bar(&self.resp_editor, cx))
+                    .child(body)
                     .into_any_element()
             }
             (Some(o), RespTab::Headers) => {

@@ -54,7 +54,7 @@ impl BruApp {
     /// The content for the active request sub-tab (the shared editor).
     /// Full-pane editor for a plain-text file tab (a `require`d module opened via
     /// Ctrl+click). A path header sits above the editable, scrollable editor.
-    pub(crate) fn text_pane(&self, tab: &OpenTab, _cx: &mut Context<Self>) -> Div {
+    pub(crate) fn text_pane(&self, tab: &OpenTab, cx: &mut Context<Self>) -> Div {
         let Some(editor) = tab.text.clone() else {
             return div();
         };
@@ -83,6 +83,7 @@ impl BruApp {
                     .text_color(theme::muted())
                     .child(rel),
             )
+            .children(CodeEditor::find_bar(&editor, cx))
             .child(
                 div()
                     .id("text-file")
@@ -110,7 +111,14 @@ impl BruApp {
             return self.auth_form(tab, cx);
         }
         if matches!(tab.edit_kind, EditKind::GraphQl) {
-            let pane = |label: &str, id: &'static str, ed: Entity<CodeEditor>| {
+            // Find bars are computed up front (each borrows `cx`), then handed to
+            // the panes so the closure needn't capture `cx`.
+            let q_bar = CodeEditor::find_bar(&tab.body_editor, cx);
+            let v_bar = CodeEditor::find_bar(&tab.body_vars_editor, cx);
+            let pane = |label: &str,
+                        id: &'static str,
+                        ed: Entity<CodeEditor>,
+                        bar: Option<gpui::AnyElement>| {
                 div()
                     .flex()
                     .flex_col()
@@ -123,6 +131,7 @@ impl BruApp {
                             .text_color(theme::muted())
                             .child(label.to_string()),
                     )
+                    .children(bar)
                     .child(
                         div()
                             .id(id)
@@ -143,8 +152,13 @@ impl BruApp {
                 .flex_1()
                 .w_full()
                 .bg(theme::bg())
-                .child(pane("QUERY", "gql-query", tab.body_editor.clone()))
-                .child(pane("VARIABLES", "gql-vars", tab.body_vars_editor.clone()));
+                .child(pane("QUERY", "gql-query", tab.body_editor.clone(), q_bar))
+                .child(pane(
+                    "VARIABLES",
+                    "gql-vars",
+                    tab.body_vars_editor.clone(),
+                    v_bar,
+                ));
         }
         let body_box = div()
             .id("body")
@@ -169,6 +183,8 @@ impl BruApp {
             .when(tab.req_tab == ReqTab::Script, |d| {
                 d.child(self.script_subtabs(tab, cx))
             })
+            // Ctrl+F / Ctrl+H find/replace bar, above the scrolling editor.
+            .children(CodeEditor::find_bar(&tab.body_editor, cx))
             .child(body_box)
     }
 

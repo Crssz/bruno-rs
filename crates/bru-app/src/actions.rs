@@ -15,9 +15,18 @@ impl BruApp {
     pub(crate) fn on_escape_action(
         &mut self,
         _: &CloseOverlay,
-        _w: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // An open in-editor find bar closes first, refocusing its editor so typing
+        // resumes in the buffer (the query box had focus while the bar was open).
+        if let Some(ed) = self.find_editor.take() {
+            ed.update(cx, |e, cx| e.close_find(cx));
+            let h = ed.read(cx).focus_handle(cx);
+            window.focus(&h, cx);
+            cx.notify();
+            return;
+        }
         self.close_topmost_overlay(cx);
     }
     pub(crate) fn on_palette_action(

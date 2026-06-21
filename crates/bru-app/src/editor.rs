@@ -9,13 +9,15 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
-    CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    Focusable, Font, GlobalElementId, Hsla, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, Style, TextRun, UTF16Selection, Window,
+    actions, div, fill, point, prelude::*, px, relative, size, AnyElement, App, Bounds,
+    ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, FocusHandle, Focusable, Font, GlobalElementId, Hsla, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollHandle,
+    ShapedLine, Style, TextRun, UTF16Selection, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::widgets::ghost_btn;
 use crate::{highlight, theme};
 
 /// What grammar (if any) to highlight the buffer with.
@@ -80,6 +82,37 @@ pub struct GotoDefinition {
 }
 impl gpui::EventEmitter<GotoDefinition> for CodeEditor {}
 
+/// Emitted whenever the find bar opens, closes, or its match set changes. The
+/// parent re-renders (the find bar is parent-placed) and tracks which editor
+/// owns the open bar, so Escape can route to it.
+pub struct FindChanged {
+    pub open: bool,
+}
+impl gpui::EventEmitter<FindChanged> for CodeEditor {}
+
+/// Emitted by a find-bar *input* box (the query/replace fields) to relay an
+/// Enter/Shift-Enter submit up to the editor that owns the bar — the input box
+/// is a separate entity and can't reach the owner's find state directly.
+pub struct FindRelay {
+    /// True for a backward (Shift-Enter / Find-Previous) submit.
+    pub prev: bool,
+}
+impl gpui::EventEmitter<FindRelay> for CodeEditor {}
+
+/// Find/replace state for one editor. The query/replace boxes are nested
+/// single-line `CodeEditor`s (created once, reused across open/close). `matches`
+/// are byte ranges in document order; `active` indexes the focused one.
+struct FindState {
+    query: Entity<CodeEditor>,
+    replace: Entity<CodeEditor>,
+    open: bool,
+    /// Show the replace row (Ctrl+H) vs. find-only (Ctrl+F).
+    replace_mode: bool,
+    case_sensitive: bool,
+    matches: Vec<Range<usize>>,
+    active: usize,
+}
+
 actions!(
     code_editor,
     [
@@ -115,6 +148,10 @@ actions!(
         DocEnd,
         SelectDocStart,
         SelectDocEnd,
+        Find,
+        Replace,
+        FindNext,
+        FindPrev,
     ]
 );
 
@@ -162,6 +199,13 @@ pub fn bind_keys(cx: &mut App) {
         gpui::KeyBinding::new("ctrl-end", DocEnd, Some("CodeEditor")),
         gpui::KeyBinding::new("ctrl-shift-home", SelectDocStart, Some("CodeEditor")),
         gpui::KeyBinding::new("ctrl-shift-end", SelectDocEnd, Some("CodeEditor")),
+        // Find / replace within the editor.
+        gpui::KeyBinding::new("ctrl-f", Find, Some("CodeEditor")),
+        gpui::KeyBinding::new("ctrl-h", Replace, Some("CodeEditor")),
+        gpui::KeyBinding::new("f3", FindNext, Some("CodeEditor")),
+        gpui::KeyBinding::new("shift-f3", FindPrev, Some("CodeEditor")),
+        // Shift-Enter steps to the previous match (and relays from the query box).
+        gpui::KeyBinding::new("shift-enter", FindPrev, Some("CodeEditor")),
     ]);
 }
 
@@ -201,6 +245,14 @@ pub struct CodeEditor {
     /// Latest pointer position during an active drag-select (window coords). Lets
     /// the auto-scroll tick keep extending the selection while held past an edge.
     drag_pos: Option<Point<Pixels>>,
+    /// True for the find bar's own query/replace inputs, so Enter relays a submit
+    /// (instead of inserting a newline) and Ctrl+F is suppressed.
+    is_find_input: bool,
+    /// Find/replace bar state (lazily created on first Ctrl+F, then reused).
+    find: Option<FindState>,
+    /// The parent's scroll handle for this editor's viewport, so navigating to a
+    /// match can bring it into view (mirrors `reveal_symbol`). `None` = no scroll.
+    find_scroll: Option<ScrollHandle>,
 }
 
 impl CodeEditor {
@@ -225,6 +277,9 @@ impl CodeEditor {
             redo_stack: Vec::new(),
             coalesce_pos: None,
             drag_pos: None,
+            is_find_input: false,
+            find: None,
+            find_scroll: None,
         };
         ed.recompute_highlight();
         ed
@@ -281,6 +336,7 @@ impl CodeEditor {
         self.redo_stack.clear();
         self.coalesce_pos = None;
         self.recompute_highlight();
+        self.refresh_find(cx);
         cx.notify();
     }
 
@@ -582,6 +638,7 @@ impl CodeEditor {
         self.selection_reversed = false;
         self.coalesce_pos = single_insert.then_some(at);
         self.recompute_highlight();
+        self.refresh_find(cx);
         cx.emit(Changed);
         cx.notify();
     }
@@ -608,6 +665,7 @@ impl CodeEditor {
         self.selection_reversed = false;
         self.coalesce_pos = None;
         self.recompute_highlight();
+        self.refresh_find(cx);
         cx.emit(Changed);
         cx.notify();
     }
@@ -653,6 +711,11 @@ impl CodeEditor {
         self.replace("", cx);
     }
     fn enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
+        // A find-bar input relays Enter as a "find next" submit to its owner.
+        if self.is_find_input {
+            cx.emit(FindRelay { prev: false });
+            return;
+        }
         if self.single_line {
             return;
         }
@@ -711,10 +774,286 @@ impl CodeEditor {
             self.selected_range = at..at;
             self.selection_reversed = false;
             self.recompute_highlight();
+            self.refresh_find(cx);
             cx.emit(Changed);
             cx.notify();
         }
         Ok(())
+    }
+
+    // ── find / replace ────────────────────────────────────────────────────────
+    /// Wire this editor's viewport scroll handle (the one the parent passes to
+    /// `track_scroll`) so navigating to a match can scroll it into view.
+    pub fn set_find_scroll(&mut self, scroll: ScrollHandle) {
+        self.find_scroll = Some(scroll);
+    }
+
+    /// True while the find bar is open (so the parent renders it).
+    pub fn find_open(&self) -> bool {
+        self.find.as_ref().is_some_and(|f| f.open)
+    }
+
+    /// Open (or re-focus) the find bar. `replace_mode` also shows the replace row.
+    /// No-op on single-line inputs; replace is suppressed on read-only editors.
+    fn open_find(&mut self, replace_mode: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.single_line {
+            return;
+        }
+        let want_replace = replace_mode && !self.read_only;
+        if self.find.is_none() {
+            // Create the two input boxes once and reuse them; subscribe to their
+            // edits (live recompute) and their Enter / Shift-Enter submit relays.
+            let mk = |cx: &mut Context<Self>| {
+                cx.new(|cx| {
+                    let mut e = CodeEditor::single_line(cx, "");
+                    e.is_find_input = true;
+                    e
+                })
+            };
+            let query = mk(cx);
+            let replace = mk(cx);
+            cx.subscribe(&query, |this, _q, _ev: &Changed, cx| {
+                this.on_find_query_changed(cx)
+            })
+            .detach();
+            cx.subscribe(&query, |this, _q, ev: &FindRelay, cx| {
+                if ev.prev {
+                    this.find_prev(cx);
+                } else {
+                    this.find_next(cx);
+                }
+            })
+            .detach();
+            // Enter in the replace box replaces the active match (then advances);
+            // Shift-Enter steps back without replacing.
+            cx.subscribe(&replace, |this, _r, ev: &FindRelay, cx| {
+                if ev.prev {
+                    this.find_prev(cx);
+                } else {
+                    this.replace_current(cx);
+                }
+            })
+            .detach();
+            self.find = Some(FindState {
+                query,
+                replace,
+                open: false,
+                replace_mode: false,
+                case_sensitive: false,
+                matches: Vec::new(),
+                active: 0,
+            });
+        }
+        let query = {
+            let f = self.find.as_mut().unwrap();
+            f.open = true;
+            f.replace_mode = f.replace_mode || want_replace;
+            f.query.clone()
+        };
+        // Prefill the query from a single-line selection (select a word, Ctrl+F).
+        if !self.selected_range.is_empty() {
+            let sel = self.content[self.selected_range.clone()].to_string();
+            if !sel.contains('\n') {
+                query.update(cx, |q, cx| q.set_line(&sel, cx));
+            }
+        }
+        self.recompute_matches(cx);
+        // Focus the query box and select its contents for quick retyping.
+        let qh = query.read(cx).focus_handle(cx);
+        window.focus(&qh, cx);
+        query.update(cx, |q, cx| q.do_select_all(cx));
+        cx.emit(FindChanged { open: true });
+        cx.notify();
+    }
+
+    /// Close the find bar (keeps the input boxes for reuse). The parent refocuses
+    /// the editor on the Escape path, where a `Window` is available.
+    pub fn close_find(&mut self, cx: &mut Context<Self>) {
+        match self.find.as_mut() {
+            Some(f) if f.open => {
+                f.open = false;
+                f.matches.clear();
+            }
+            _ => return,
+        }
+        cx.emit(FindChanged { open: false });
+        cx.notify();
+    }
+
+    /// Recompute match ranges from the current query against the buffer, clamping
+    /// the active index. Does not move the cursor or scroll.
+    fn recompute_matches(&mut self, cx: &mut Context<Self>) {
+        let Some(f) = self.find.as_ref() else { return };
+        let query = f.query.read(cx).text().to_string();
+        let case = f.case_sensitive;
+        let matches = find_all(&self.content, &query, case);
+        let f = self.find.as_mut().unwrap();
+        f.matches = matches;
+        if f.active >= f.matches.len() {
+            f.active = 0;
+        }
+    }
+
+    /// On a query edit: recompute, point the active match at/after the cursor, and
+    /// reveal it.
+    fn on_find_query_changed(&mut self, cx: &mut Context<Self>) {
+        self.recompute_matches(cx);
+        let cur = self.cursor();
+        if let Some(f) = self.find.as_mut() {
+            if !f.matches.is_empty() {
+                f.active = f.matches.iter().position(|m| m.start >= cur).unwrap_or(0);
+            }
+        }
+        self.reveal_active(cx);
+        cx.emit(FindChanged { open: true });
+        cx.notify();
+    }
+
+    /// Recompute matches after a buffer edit while the bar is open (keeps the
+    /// count + highlights current). Passive: no scroll/selection change.
+    fn refresh_find(&mut self, cx: &mut Context<Self>) {
+        if self.find_open() {
+            self.recompute_matches(cx);
+            cx.emit(FindChanged { open: true });
+        }
+    }
+
+    fn find_next(&mut self, cx: &mut Context<Self>) {
+        if let Some(f) = self.find.as_mut() {
+            if f.matches.is_empty() {
+                return;
+            }
+            f.active = (f.active + 1) % f.matches.len();
+        } else {
+            return;
+        }
+        self.reveal_active(cx);
+        cx.emit(FindChanged { open: true });
+        cx.notify();
+    }
+
+    fn find_prev(&mut self, cx: &mut Context<Self>) {
+        if let Some(f) = self.find.as_mut() {
+            if f.matches.is_empty() {
+                return;
+            }
+            f.active = (f.active + f.matches.len() - 1) % f.matches.len();
+        } else {
+            return;
+        }
+        self.reveal_active(cx);
+        cx.emit(FindChanged { open: true });
+        cx.notify();
+    }
+
+    /// Select the active match and scroll it into view (mirrors `reveal_symbol`).
+    fn reveal_active(&mut self, cx: &mut Context<Self>) {
+        let Some(range) = self
+            .find
+            .as_ref()
+            .and_then(|f| f.matches.get(f.active).cloned())
+        else {
+            return;
+        };
+        let end = self.content.len();
+        self.selected_range = range.start.min(end)..range.end.min(end);
+        self.selection_reversed = false;
+        if let Some(scroll) = &self.find_scroll {
+            let line = self.content[..range.start.min(end)].matches('\n').count();
+            let y = line.saturating_sub(2) as f32 * f32::from(self.line_height);
+            scroll.set_offset(point(px(0.), px(-y)));
+        }
+        cx.notify();
+    }
+
+    fn toggle_find_case(&mut self, cx: &mut Context<Self>) {
+        if let Some(f) = self.find.as_mut() {
+            f.case_sensitive = !f.case_sensitive;
+        } else {
+            return;
+        }
+        self.recompute_matches(cx);
+        self.reveal_active(cx);
+        cx.emit(FindChanged { open: true });
+        cx.notify();
+    }
+
+    /// Replace the active match with the replace text, then advance to the next
+    /// match at/after the edit. No-op on read-only editors.
+    fn replace_current(&mut self, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let (range, text) = {
+            let Some(f) = self.find.as_ref() else { return };
+            let Some(range) = f.matches.get(f.active).cloned() else {
+                return;
+            };
+            (range, f.replace.read(cx).text().to_string())
+        };
+        self.selected_range = range.clone();
+        self.selection_reversed = false;
+        self.replace(&text, cx); // emits Changed; `refresh_find` recomputes matches
+        let at = range.start + text.len();
+        if let Some(f) = self.find.as_mut() {
+            f.active = f.matches.iter().position(|m| m.start >= at).unwrap_or(0);
+        }
+        self.reveal_active(cx);
+        cx.emit(FindChanged { open: true });
+        cx.notify();
+    }
+
+    /// Replace every match with the replace text in a single undoable step.
+    fn replace_all(&mut self, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let (matches, text) = {
+            let Some(f) = self.find.as_ref() else { return };
+            if f.matches.is_empty() {
+                return;
+            }
+            (f.matches.clone(), f.replace.read(cx).text().to_string())
+        };
+        self.push_undo();
+        let mut new = String::with_capacity(self.content.len());
+        let mut last = 0;
+        for m in &matches {
+            new.push_str(&self.content[last..m.start]);
+            new.push_str(&text);
+            last = m.end;
+        }
+        new.push_str(&self.content[last..]);
+        self.content = new;
+        self.selected_range = 0..0;
+        self.selection_reversed = false;
+        self.coalesce_pos = None;
+        self.recompute_highlight();
+        cx.emit(Changed);
+        self.refresh_find(cx);
+        cx.notify();
+    }
+
+    // ── action handlers (find) ────────────────────────────────────────────────
+    fn find_action(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_find(false, window, cx);
+    }
+    fn replace_action(&mut self, _: &Replace, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_find(true, window, cx);
+    }
+    fn find_next_action(&mut self, _: &FindNext, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_find_input {
+            cx.emit(FindRelay { prev: false });
+        } else if self.find_open() {
+            self.find_next(cx);
+        }
+    }
+    fn find_prev_action(&mut self, _: &FindPrev, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_find_input {
+            cx.emit(FindRelay { prev: true });
+        } else if self.find_open() {
+            self.find_prev(cx);
+        }
     }
 
     // ── mouse ───────────────────────────────────────────────────────────────
@@ -929,6 +1268,10 @@ impl Render for CodeEditor {
             .on_action(cx.listener(Self::doc_end))
             .on_action(cx.listener(Self::select_doc_start))
             .on_action(cx.listener(Self::select_doc_end))
+            .on_action(cx.listener(Self::find_action))
+            .on_action(cx.listener(Self::replace_action))
+            .on_action(cx.listener(Self::find_next_action))
+            .on_action(cx.listener(Self::find_prev_action))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -1024,6 +1367,120 @@ impl CodeEditor {
         }
         s..e.max(s)
     }
+
+    /// The find/replace bar for `editor`, or `None` when it's closed. The parent
+    /// places this as a non-scrolling row directly above the editor's scroll
+    /// viewport. All controls act back on `editor` via captured-handle closures.
+    pub fn find_bar(editor: &Entity<CodeEditor>, cx: &mut App) -> Option<AnyElement> {
+        let (total, active, replace_mode, read_only, case_sensitive, query, replace) = {
+            let ed = editor.read(cx);
+            let f = ed.find.as_ref().filter(|f| f.open)?;
+            (
+                f.matches.len(),
+                f.active,
+                f.replace_mode,
+                ed.read_only,
+                f.case_sensitive,
+                f.query.clone(),
+                f.replace.clone(),
+            )
+        };
+        let has_query = !query.read(cx).text().is_empty();
+
+        // A small input field wrapper matching the response-filter box.
+        let input_box = |inner: Entity<CodeEditor>| {
+            div()
+                .w(px(220.))
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(theme::input_bg())
+                .border_1()
+                .border_color(theme::border1())
+                .font_family("monospace")
+                .text_size(px(12.))
+                .child(inner)
+        };
+        // A find-bar action button bound to a method on `editor`.
+        let action_btn = |label: &str, f: fn(&mut CodeEditor, &mut Context<CodeEditor>)| {
+            let editor = editor.clone();
+            ghost_btn(label).on_mouse_up(MouseButton::Left, move |_e, _w, cx: &mut App| {
+                editor.update(cx, f);
+            })
+        };
+
+        let count = if !has_query {
+            String::new()
+        } else if total == 0 {
+            "No results".to_string()
+        } else {
+            format!("{}/{}", active + 1, total)
+        };
+        let count_color = if has_query && total == 0 {
+            theme::red()
+        } else {
+            theme::muted()
+        };
+
+        let find_row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .child(input_box(query))
+            .child(
+                div()
+                    .min_w(px(56.))
+                    .text_size(px(11.))
+                    .text_color(count_color)
+                    .child(count),
+            )
+            .child(action_btn("\u{2191}", CodeEditor::find_prev))
+            .child(action_btn("\u{2193}", CodeEditor::find_next))
+            .child(
+                ghost_btn("Aa")
+                    .when(case_sensitive, |d| {
+                        d.text_color(theme::accent()).border_color(theme::accent())
+                    })
+                    .on_mouse_up(MouseButton::Left, {
+                        let editor = editor.clone();
+                        move |_e, _w, cx: &mut App| {
+                            editor.update(cx, |ed, cx| ed.toggle_find_case(cx));
+                        }
+                    }),
+            )
+            .child(div().flex_1())
+            .child(action_btn("\u{2715}", CodeEditor::close_find));
+
+        let bar = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .bg(theme::surface0())
+            .border_b_1()
+            .border_color(theme::border1())
+            .child(find_row);
+
+        let bar = if replace_mode && !read_only {
+            bar.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .pb_1()
+                    .child(input_box(replace))
+                    .child(action_btn("Replace", CodeEditor::replace_current))
+                    .child(action_btn("All", CodeEditor::replace_all)),
+            )
+        } else {
+            bar
+        };
+        Some(bar.into_any_element())
+    }
 }
 
 /// Build per-line `TextRun`s from the cached highlight spans, filling gaps with
@@ -1103,6 +1560,8 @@ struct EditorPrepaint {
     lines: Vec<ShapedLine>,
     cursor: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
+    /// Find-match highlight quads (the active match is tinted more strongly).
+    find_quads: Vec<PaintQuad>,
     /// Horizontal scroll offset (single-line inputs) so the cursor stays in view.
     scroll_x: Pixels,
 }
@@ -1246,10 +1705,61 @@ impl Element for EditorElement {
             }
         }
 
+        // Find-match highlights (drawn under the text). The line of each match is
+        // located by binary search on `starts`, so cost is ~O(matches) even for a
+        // long buffer; multi-line matches (a query with newlines) extend downward.
+        let mut find_quads = Vec::new();
+        if let Some(f) = editor.find.as_ref().filter(|f| f.open) {
+            for (mi, m) in f.matches.iter().enumerate() {
+                let active = mi == f.active;
+                let mut line = match starts.binary_search(&m.start) {
+                    Ok(l) => l,
+                    Err(l) => l.saturating_sub(1),
+                };
+                while line < lines.len() {
+                    let (shaped, lstart) = &lines[line];
+                    let lstart = *lstart;
+                    let lend = lstart + shaped.text.len();
+                    if lstart >= m.end {
+                        break;
+                    }
+                    let a = m.start.max(lstart);
+                    let b = m.end.min(lend);
+                    if b >= a {
+                        let x1 = shaped.x_for_index(a - lstart);
+                        let x2 = shaped.x_for_index(b - lstart);
+                        let color = if active {
+                            gpui::rgba(0xf0883ecc) // active match: stronger orange
+                        } else {
+                            gpui::rgba(0xe5c07b66) // other matches: dim amber
+                        };
+                        find_quads.push(fill(
+                            Bounds::from_corners(
+                                point(
+                                    bounds.left() + x1 - scroll_x,
+                                    bounds.top() + lh * line as f32,
+                                ),
+                                point(
+                                    bounds.left() + x2 - scroll_x,
+                                    bounds.top() + lh * (line as f32 + 1.),
+                                ),
+                            ),
+                            color,
+                        ));
+                    }
+                    if m.end <= lend {
+                        break;
+                    }
+                    line += 1;
+                }
+            }
+        }
+
         EditorPrepaint {
             lines: lines.into_iter().map(|(s, _)| s).collect(),
             cursor,
             selections,
+            find_quads,
             scroll_x,
         }
     }
@@ -1275,6 +1785,9 @@ impl Element for EditorElement {
         // env value or URL) and its selection never spill outside the input box.
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
             for q in prepaint.selections.drain(..) {
+                window.paint_quad(q);
+            }
+            for q in prepaint.find_quads.drain(..) {
                 window.paint_quad(q);
             }
             for (i, line) in prepaint.lines.iter().enumerate() {
@@ -1539,10 +2052,42 @@ fn require_spec_at_offset(content: &str, offset: usize) -> Option<String> {
     None
 }
 
+/// All non-overlapping occurrences of `needle` in `haystack`, as byte ranges into
+/// `haystack`. Case-insensitive folding is ASCII-only (full Unicode case folding
+/// is out of scope); returned offsets always index the original text. Drives the
+/// editor's find bar.
+fn find_all(haystack: &str, needle: &str, case_sensitive: bool) -> Vec<Range<usize>> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let nlen = needle.len();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + nlen <= haystack.len() {
+        // Only test windows that start and end on char boundaries (so the slice
+        // can't panic and a match can't straddle a multi-byte char).
+        if haystack.is_char_boundary(i) && haystack.is_char_boundary(i + nlen) {
+            let win = &haystack[i..i + nlen];
+            let hit = if case_sensitive {
+                win == needle
+            } else {
+                win.eq_ignore_ascii_case(needle)
+            };
+            if hit {
+                out.push(i..i + nlen);
+                i += nlen; // non-overlapping
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        format_source, import_spec_for_symbol, next_word_boundary, prev_word_boundary,
+        find_all, format_source, import_spec_for_symbol, next_word_boundary, prev_word_boundary,
         require_spec_at_offset, var_at_offset, word_range_at_offset, Lang,
     };
 
@@ -1671,5 +2216,38 @@ mod tests {
         let s = "line1\nrequire('./x')\nline3";
         let on_x = s.find("./x").unwrap() + 1;
         assert_eq!(require_spec_at_offset(s, on_x).as_deref(), Some("./x"));
+    }
+
+    #[test]
+    fn find_all_basic_and_non_overlapping() {
+        let s = "the cat sat on the mat";
+        assert_eq!(find_all(s, "the", true), vec![0..3, 15..18]);
+        // Overlapping needle: matches don't overlap (aa in aaaa → 0..2, 2..4).
+        assert_eq!(find_all("aaaa", "aa", true), vec![0..2, 2..4]);
+        // Empty needle never matches.
+        assert!(find_all(s, "", true).is_empty());
+        // No match.
+        assert!(find_all(s, "dog", true).is_empty());
+    }
+
+    #[test]
+    fn find_all_case_insensitive_keeps_original_offsets() {
+        let s = "Foo foo FOO";
+        assert_eq!(find_all(s, "foo", false), vec![0..3, 4..7, 8..11]);
+        // Case-sensitive only hits the exact casing.
+        assert_eq!(find_all(s, "foo", true), vec![4..7]);
+    }
+
+    #[test]
+    fn find_all_handles_multibyte_without_panicking() {
+        // A multi-byte char ('é' = 2 bytes) means some byte windows aren't char
+        // boundaries; matching must skip them and still find the ASCII run, with
+        // offsets indexing the original (byte-counted) string.
+        let s = "café au lait, au revoir";
+        let hits = find_all(s, "au", false);
+        assert!(hits.iter().all(|r| &s[r.clone()] == "au"));
+        assert_eq!(hits.len(), 2);
+        // 'é' is 2 bytes, so "au" after it starts at byte 6, not 5.
+        assert_eq!(hits[0], 6..8);
     }
 }

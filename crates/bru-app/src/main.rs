@@ -300,6 +300,9 @@ struct BruApp {
     var_popup_gen: u64,
     /// Right-click edit menu over a code editor (None = closed).
     editor_menu: Option<EditorMenuState>,
+    /// The editor whose in-editor find bar is currently open (None = none), so
+    /// Escape can route to it and `close_topmost_overlay` knows to close it first.
+    find_editor: Option<Entity<CodeEditor>>,
     /// Cached non-request variable scopes (vault/global/collection/env), keyed by
     /// name. Rebuilt by `refresh_vars` on collection/env/vault changes; request
     /// vars are resolved live from the active tab.
@@ -333,6 +336,9 @@ struct BruApp {
     resp_hex: bool,
     /// Read-only editor for the response body (selectable + copyable).
     resp_editor: Entity<CodeEditor>,
+    /// Scroll handle for the response-body viewport, so the find bar can scroll a
+    /// match into view.
+    resp_scroll: ScrollHandle,
     /// Root focus handle, so app-level key actions dispatch.
     focus_handle: FocusHandle,
     /// Command palette (Ctrl+K jump-to-request): open flag + input + query.
@@ -500,6 +506,25 @@ fn subscribe_grid_editor(ed: &Entity<CodeEditor>, path: PathBuf, cx: &mut Contex
     subscribe_hover(ed, cx);
     cx.subscribe(ed, move |this, _ed, _ev: &editor::Changed, cx| {
         this.dirty.insert(path.clone());
+        cx.notify();
+    })
+    .detach();
+}
+
+/// Track which editor's find bar is open (so Escape routes to it and the parent
+/// re-renders when the bar opens/closes or its match set changes — the find bar
+/// is a parent-placed, non-scrolling row above the editor's viewport).
+fn subscribe_find(ed: &Entity<CodeEditor>, cx: &mut Context<BruApp>) {
+    cx.subscribe(ed, |this, ed, ev: &editor::FindChanged, cx| {
+        if ev.open {
+            this.find_editor = Some(ed.clone());
+        } else if this
+            .find_editor
+            .as_ref()
+            .is_some_and(|e| e.entity_id() == ed.entity_id())
+        {
+            this.find_editor = None;
+        }
         cx.notify();
     })
     .detach();
@@ -673,6 +698,12 @@ impl BruApp {
         })
         .detach();
         let git_msg = cx.new(|cx| CodeEditor::single_line(cx, ""));
+        // Response-body viewer: read-only, with a find bar (Ctrl+F) that scrolls
+        // matches into view via `resp_scroll`.
+        let resp_scroll = ScrollHandle::new();
+        let resp_editor = cx.new(|cx| CodeEditor::read_only(cx, ""));
+        resp_editor.update(cx, |ed, _| ed.set_find_scroll(resp_scroll.clone()));
+        subscribe_find(&resp_editor, cx);
         let mut app = Self {
             dir,
             collection,
@@ -714,6 +745,7 @@ impl BruApp {
             var_popup_hovered: false,
             var_popup_gen: 0,
             editor_menu: None,
+            find_editor: None,
             var_scopes: HashMap::new(),
             rename: None,
             confirm_delete: None,
@@ -729,7 +761,8 @@ impl BruApp {
             resp_filter_query: String::new(),
             resp_raw: false,
             resp_hex: false,
-            resp_editor: cx.new(|cx| CodeEditor::read_only(cx, "")),
+            resp_editor,
+            resp_scroll,
             focus_handle: cx.focus_handle(),
             palette_open: false,
             palette_input,

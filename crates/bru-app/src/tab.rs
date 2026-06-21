@@ -28,6 +28,13 @@ impl OpenTab {
             // Hover a `{{var}}` in the URL / body to see its resolved value.
             subscribe_hover(ed, cx);
         }
+        // Find bar (Ctrl+F) on the multi-line editors; the body editor scrolls
+        // matches into view via the same handle the body viewport tracks.
+        let body_scroll = gpui::ScrollHandle::new();
+        let text_scroll = gpui::ScrollHandle::new();
+        body_editor.update(cx, |ed, _| ed.set_find_scroll(body_scroll.clone()));
+        subscribe_find(&body_editor, cx);
+        subscribe_find(&body_vars_editor, cx);
         let mut tab = Self {
             path,
             method,
@@ -47,8 +54,8 @@ impl OpenTab {
             script_post: false,
             response: None,
             text: None,
-            text_scroll: gpui::ScrollHandle::new(),
-            body_scroll: gpui::ScrollHandle::new(),
+            text_scroll,
+            body_scroll,
         };
         tab.load_active_tab(cx);
         Some(tab)
@@ -74,6 +81,10 @@ impl OpenTab {
         .detach();
         // Gives the text editor the right-click menu + Ctrl+click navigation too.
         subscribe_hover(&editor, cx);
+        // Find bar (Ctrl+F), scrolling matches into view via the file viewport.
+        let text_scroll = gpui::ScrollHandle::new();
+        editor.update(cx, |ed, _| ed.set_find_scroll(text_scroll.clone()));
+        subscribe_find(&editor, cx);
         Some(Self {
             path,
             method: String::new(),
@@ -93,7 +104,7 @@ impl OpenTab {
             script_post: false,
             response: None,
             text: Some(editor),
-            text_scroll: gpui::ScrollHandle::new(),
+            text_scroll,
             body_scroll: gpui::ScrollHandle::new(),
         })
     }
