@@ -259,3 +259,359 @@ impl BruApp {
         cx.notify();
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use super::*;
+    use crate::test_support::{app_on_temp, temp_collection};
+
+    // ---- env_open / env_dir -------------------------------------------------
+
+    #[gpui::test]
+    fn env_open_seeds_state_from_disk(cx: &mut gpui::TestAppContext) {
+        // The sample collection ships one env: "New Environment".
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.env_open(cx));
+        app.update(cx, |app, _cx| {
+            let ed = app.env.as_ref().expect("env opened");
+            assert!(ed.names.iter().any(|n| n == "New Environment"));
+            // First (sorted) env becomes the selection.
+            assert_eq!(ed.selected, ed.names.first().cloned().unwrap_or_default());
+            assert!(ed.error.is_none());
+            assert!(!ed.global);
+        });
+    }
+
+    #[gpui::test]
+    fn env_dir_is_collection_dir_in_collection_scope(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.env_open(cx));
+        let dir = app.update(cx, |app, _cx| app.env_dir());
+        assert!(dir == tc.dir);
+    }
+
+    #[gpui::test]
+    fn env_close_clears_state(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.env_open(cx));
+        app.update(cx, |app, _cx| assert!(app.env.is_some()));
+        app.update(cx, |app, cx| app.env_close(cx));
+        app.update(cx, |app, _cx| assert!(app.env.is_none()));
+    }
+
+    // ---- env_set_scope ------------------------------------------------------
+
+    #[gpui::test]
+    fn env_set_scope_global_then_back(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.env_open(cx));
+        // Global scope only READS globals_root (scan/load); never writes there.
+        app.update(cx, |app, cx| app.env_set_scope(true, cx));
+        app.update(cx, |app, _cx| {
+            assert!(app.env.as_ref().unwrap().global);
+            assert!(app.env.as_ref().unwrap().error.is_none());
+        });
+        // Back to collection scope re-reads the temp collection.
+        app.update(cx, |app, cx| app.env_set_scope(false, cx));
+        app.update(cx, |app, _cx| {
+            let ed = app.env.as_ref().unwrap();
+            assert!(!ed.global);
+            assert!(ed.names.iter().any(|n| n == "New Environment"));
+        });
+    }
+
+    // ---- env_new ------------------------------------------------------------
+
+    #[gpui::test]
+    fn env_new_creates_unique_name_and_file(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.env_open(cx));
+        app.update(cx, |app, cx| app.env_new(cx));
+        app.update(cx, |app, _cx| {
+            let ed = app.env.as_ref().unwrap();
+            // "New Environment" already exists in the sample, so the new one is
+            // disambiguated to "New Environment 2".
+            assert_eq!(ed.selected, "New Environment 2");
+            assert!(ed.names.iter().any(|n| n == "New Environment 2"));
+            assert!(ed.error.is_none());
+        });
+        assert!(tc
+            .dir
+            .join("environments")
+            .join("New Environment 2.bru")
+            .exists());
+    }
+
+    // ---- env_select ---------------------------------------------------------
+
+    #[gpui::test]
+    fn env_select_switches_selection(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.env_open(cx));
+        app.update(cx, |app, cx| app.env_new(cx)); // adds "New Environment 2"
+        app.update(cx, |app, cx| app.env_select("New Environment".into(), cx));
+        app.update(cx, |app, cx| {
+            assert_eq!(app.env.as_ref().unwrap().selected, "New Environment");
+            // The rename field follows the new selection.
+            let rename_txt = app.env.as_ref().unwrap().rename.read(cx).text().to_string();
+            assert_eq!(rename_txt, "New Environment");
+            assert!(app.env.as_ref().unwrap().error.is_none());
+        });
+    }
+
+    // ---- env_add_row / env_remove_row / toggles -----------------------------
+
+    #[gpui::test]
+    fn env_add_and_remove_row(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.env_open(cx));
+        let before = app.update(cx, |app, _cx| app.env.as_ref().unwrap().rows.len());
+        app.update(cx, |app, cx| app.env_add_row(cx));
+        app.update(cx, |app, _cx| {
+            assert_eq!(app.env.as_ref().unwrap().rows.len(), before + 1);
+            let r = app.env.as_ref().unwrap().rows.last().unwrap();
+            assert!(r.enabled);
+            assert!(!r.secret);
+        });
+        // Remove the row we just added.
+        app.update(cx, |app, cx| app.env_remove_row(before, cx));
+        app.update(cx, |app, _cx| {
+            assert_eq!(app.env.as_ref().unwrap().rows.len(), before);
+        });
+        // Out-of-range remove is a no-op.
+        app.update(cx, |app, cx| app.env_remove_row(9999, cx));
+        app.update(cx, |app, _cx| {
+            assert_eq!(app.env.as_ref().unwrap().rows.len(), before);
+        });
+    }
+
+    #[gpui::test]
+    fn env_toggle_enabled_and_secret(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.env_open(cx));
+        app.update(cx, |app, cx| app.env_add_row(cx));
+        let i = app.update(cx, |app, _cx| app.env.as_ref().unwrap().rows.len() - 1);
+        app.update(cx, |app, cx| app.env_toggle_enabled(i, cx));
+        app.update(cx, |app, _cx| {
+            assert!(!app.env.as_ref().unwrap().rows[i].enabled);
+        });
+        app.update(cx, |app, cx| app.env_toggle_secret(i, cx));
+        app.update(cx, |app, _cx| {
+            assert!(app.env.as_ref().unwrap().rows[i].secret);
+        });
+        // Toggle secret back off.
+        app.update(cx, |app, cx| app.env_toggle_secret(i, cx));
+        app.update(cx, |app, _cx| {
+            assert!(!app.env.as_ref().unwrap().rows[i].secret);
+        });
+        // Out-of-range toggles are no-ops (just must not panic).
+        app.update(cx, |app, cx| app.env_toggle_enabled(9999, cx));
+        app.update(cx, |app, cx| app.env_toggle_secret(9999, cx));
+    }
+
+    // ---- env_save / env_collect_rows ----------------------------------------
+
+    #[gpui::test]
+    fn env_save_writes_rows_to_disk(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.env_open(cx));
+        // Make sure a concrete env is selected (sample ships "New Environment").
+        app.update(cx, |app, cx| app.env_select("New Environment".into(), cx));
+        // Add a row and fill its name/value editors.
+        app.update(cx, |app, cx| app.env_add_row(cx));
+        app.update(cx, |app, cx| {
+            let row = app.env.as_ref().unwrap().rows.last().unwrap();
+            row.name.update(cx, |e, cx| e.set_line("baseUrl", cx));
+            row.value
+                .update(cx, |e, cx| e.set_line("https://example.test", cx));
+        });
+        app.update(cx, |app, cx| app.env_save(cx));
+        app.update(cx, |app, _cx| {
+            assert!(app.env.as_ref().unwrap().error.is_none())
+        });
+        let written =
+            std::fs::read_to_string(tc.dir.join("environments").join("New Environment.bru"))
+                .expect("env file written");
+        assert!(written.contains("baseUrl: https://example.test"));
+    }
+
+    #[gpui::test]
+    fn env_save_with_empty_selection_sets_error(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.env_open(cx));
+        // Force an empty selection to drive the "select first" error branch.
+        app.update(cx, |app, _cx| {
+            if let Some(ed) = app.env.as_mut() {
+                ed.selected = String::new();
+            }
+        });
+        app.update(cx, |app, cx| app.env_save(cx));
+        app.update(cx, |app, _cx| {
+            assert_eq!(
+                app.env.as_ref().unwrap().error.as_deref(),
+                Some("Select or create an environment first")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn env_collect_rows_trims_names_and_drops_empties(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.env_open(cx));
+        // One named row, one empty-named row (should be filtered out).
+        app.update(cx, |app, cx| {
+            app.env_add_row(cx);
+            app.env_add_row(cx);
+        });
+        app.update(cx, |app, cx| {
+            let ed = app.env.as_ref().unwrap();
+            let n = ed.rows.len();
+            ed.rows[n - 2]
+                .name
+                .update(cx, |e, cx| e.set_line("  spaced  ", cx));
+            ed.rows[n - 2]
+                .value
+                .update(cx, |e, cx| e.set_line("v1", cx));
+            // last row left with an empty name -> filtered
+        });
+        let collected = app.update(cx, |app, cx| {
+            let ed = app.env.as_ref().unwrap();
+            app.env_collect_rows(ed, cx)
+        });
+        assert!(collected
+            .iter()
+            .any(|r| r.name == "spaced" && r.value == "v1"));
+        assert!(collected.iter().all(|r| !r.name.is_empty()));
+    }
+
+    // ---- env_duplicate / env_delete -----------------------------------------
+
+    #[gpui::test]
+    fn env_duplicate_then_delete(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.env_open(cx));
+        app.update(cx, |app, cx| {
+            app.env_duplicate("New Environment".into(), cx)
+        });
+        app.update(cx, |app, _cx| {
+            assert!(app
+                .env
+                .as_ref()
+                .unwrap()
+                .names
+                .iter()
+                .any(|n| n == "New Environment copy"));
+        });
+        assert!(tc
+            .dir
+            .join("environments")
+            .join("New Environment copy.bru")
+            .exists());
+        // Delete the copy (not the selected one) -> selection is preserved.
+        app.update(cx, |app, cx| {
+            app.env_delete("New Environment copy".into(), cx)
+        });
+        app.update(cx, |app, _cx| {
+            assert!(!app
+                .env
+                .as_ref()
+                .unwrap()
+                .names
+                .iter()
+                .any(|n| n == "New Environment copy"));
+        });
+        assert!(!tc
+            .dir
+            .join("environments")
+            .join("New Environment copy.bru")
+            .exists());
+    }
+
+    #[gpui::test]
+    fn env_delete_selected_reselects_first(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.env_open(cx));
+        app.update(cx, |app, cx| app.env_new(cx)); // "New Environment 2", now selected
+        app.update(cx, |app, _cx| {
+            assert_eq!(app.env.as_ref().unwrap().selected, "New Environment 2");
+        });
+        // Deleting the currently-selected env reselects the first remaining one.
+        app.update(cx, |app, cx| app.env_delete("New Environment 2".into(), cx));
+        app.update(cx, |app, _cx| {
+            let ed = app.env.as_ref().unwrap();
+            assert_ne!(ed.selected, "New Environment 2");
+            assert_eq!(ed.selected, ed.names.first().cloned().unwrap_or_default());
+        });
+    }
+
+    // ---- env_rename_apply ---------------------------------------------------
+
+    #[gpui::test]
+    fn env_rename_apply_renames_file(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.env_open(cx));
+        app.update(cx, |app, cx| app.env_select("New Environment".into(), cx));
+        app.update(cx, |app, cx| {
+            let ed = app.env.as_ref().unwrap();
+            ed.rename.update(cx, |e, cx| e.set_line("Production", cx));
+        });
+        app.update(cx, |app, cx| app.env_rename_apply(cx));
+        app.update(cx, |app, _cx| {
+            let ed = app.env.as_ref().unwrap();
+            assert_eq!(ed.selected, "Production");
+            assert!(ed.error.is_none());
+            assert!(ed.names.iter().any(|n| n == "Production"));
+        });
+        assert!(tc.dir.join("environments").join("Production.bru").exists());
+        assert!(!tc
+            .dir
+            .join("environments")
+            .join("New Environment.bru")
+            .exists());
+    }
+
+    #[gpui::test]
+    fn env_rename_apply_noop_when_unchanged(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.env_open(cx));
+        app.update(cx, |app, cx| app.env_select("New Environment".into(), cx));
+        // rename field equals current selection -> early-return branch, no error.
+        app.update(cx, |app, cx| app.env_rename_apply(cx));
+        app.update(cx, |app, _cx| {
+            assert_eq!(app.env.as_ref().unwrap().selected, "New Environment");
+            assert!(app.env.as_ref().unwrap().error.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn env_rename_apply_returns_early_without_editor(cx: &mut gpui::TestAppContext) {
+        // With env=None, env_rename_apply hits its `None => return` arm.
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, _cx| assert!(app.env.is_none()));
+        app.update(cx, |app, cx| app.env_rename_apply(cx));
+        app.update(cx, |app, _cx| assert!(app.env.is_none()));
+    }
+
+    // ---- env_overlay render (template 3) ------------------------------------
+
+    #[gpui::test]
+    fn env_overlay_renders_in_window(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        // Open the env manager, then re-park so render runs the now-visible
+        // env_overlay builder (gated on self.env.is_some()).
+        window
+            .update(cx, |app, _w, cx| {
+                app.env_open(cx);
+                // Add a row so the overlay's row-builder path is exercised too.
+                app.env_add_row(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, _cx| assert!(app.env.is_some()))
+            .unwrap();
+    }
+}

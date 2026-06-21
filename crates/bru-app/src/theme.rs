@@ -97,3 +97,226 @@ pub fn method_color(m: &str) -> Hsla {
         _ => subtext(),
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use super::*;
+
+    // Snapshot/restore the global flag around each test so ordering can't leak.
+    struct DarkGuard(bool);
+    impl DarkGuard {
+        fn capture() -> Self {
+            DarkGuard(is_dark())
+        }
+    }
+    impl Drop for DarkGuard {
+        fn drop(&mut self) {
+            set_dark(self.0);
+        }
+    }
+
+    #[test]
+    fn set_dark_and_is_dark_round_trip() {
+        let _g = DarkGuard::capture();
+        set_dark(true);
+        assert!(is_dark());
+        set_dark(false);
+        assert!(!is_dark());
+        set_dark(true);
+        assert!(is_dark());
+    }
+
+    #[test]
+    fn toggle_flips_the_flag() {
+        let _g = DarkGuard::capture();
+        set_dark(true);
+        toggle();
+        assert!(!is_dark());
+        toggle();
+        assert!(is_dark());
+    }
+
+    // Every color! accessor must resolve in dark mode without panicking and yield
+    // a fully-opaque color (rgb() -> alpha 1.0).
+    #[test]
+    fn all_colors_resolve_in_dark_mode() {
+        let _g = DarkGuard::capture();
+        set_dark(true);
+        let all = [
+            bg(),
+            mantle(),
+            surface0(),
+            input_bg(),
+            border1(),
+            border2(),
+            text(),
+            subtext(),
+            muted(),
+            accent(),
+            green(),
+            blue(),
+            orange(),
+            red(),
+            indigo(),
+            teal(),
+            cyan(),
+            purple(),
+            tab_underline(),
+            border0(),
+            statusbar_bg(),
+            statusbar_border(),
+            statusbar_text(),
+            draft_dot(),
+        ];
+        for c in all {
+            assert!((c.a - 1.0).abs() < f32::EPSILON);
+        }
+    }
+
+    // Same accessors must resolve in light mode too.
+    #[test]
+    fn all_colors_resolve_in_light_mode() {
+        let _g = DarkGuard::capture();
+        set_dark(false);
+        let all = [
+            bg(),
+            mantle(),
+            surface0(),
+            input_bg(),
+            border1(),
+            border2(),
+            text(),
+            subtext(),
+            muted(),
+            accent(),
+            green(),
+            blue(),
+            orange(),
+            red(),
+            indigo(),
+            teal(),
+            cyan(),
+            purple(),
+            tab_underline(),
+            border0(),
+            statusbar_bg(),
+            statusbar_border(),
+            statusbar_text(),
+        ];
+        for c in all {
+            assert!((c.a - 1.0).abs() < f32::EPSILON);
+        }
+    }
+
+    // Dark and light variants differ for the representative tokens that have
+    // distinct dark/light literals.
+    #[test]
+    fn dark_and_light_differ() {
+        let _g = DarkGuard::capture();
+
+        set_dark(true);
+        let bg_dark = bg();
+        let text_dark = text();
+        let accent_dark = accent();
+        let mantle_dark = mantle();
+        let border1_dark = border1();
+        let green_dark = green();
+        let blue_dark = blue();
+
+        set_dark(false);
+        let bg_light = bg();
+        let text_light = text();
+        let accent_light = accent();
+        let mantle_light = mantle();
+        let border1_light = border1();
+        let green_light = green();
+        let blue_light = blue();
+
+        assert!(bg_dark != bg_light);
+        assert!(text_dark != text_light);
+        assert!(accent_dark != accent_light);
+        assert!(mantle_dark != mantle_light);
+        assert!(border1_dark != border1_light);
+        assert!(green_dark != green_light);
+        assert!(blue_dark != blue_light);
+    }
+
+    // draft_dot is mode-independent (same literal in both modes).
+    #[test]
+    fn draft_dot_is_mode_independent() {
+        let _g = DarkGuard::capture();
+        set_dark(true);
+        let d = draft_dot();
+        set_dark(false);
+        let l = draft_dot();
+        assert!(d == l);
+    }
+
+    // method_color: every recognized verb maps to its expected accessor in dark
+    // mode, and the case-insensitive + fallback paths are exercised.
+    #[test]
+    fn method_color_dark_mode_branches() {
+        let _g = DarkGuard::capture();
+        set_dark(true);
+        assert!(method_color("GET") == green());
+        assert!(method_color("POST") == indigo());
+        assert!(method_color("PUT") == orange());
+        assert!(method_color("PATCH") == orange());
+        assert!(method_color("DELETE") == red());
+        assert!(method_color("OPTIONS") == teal());
+        assert!(method_color("HEAD") == cyan());
+        // Unknown verb -> subtext fallback.
+        assert!(method_color("TRACE") == subtext());
+        assert!(method_color("") == subtext());
+    }
+
+    // method_color: the POST/PATCH branches diverge in light mode (purple).
+    #[test]
+    fn method_color_light_mode_branches() {
+        let _g = DarkGuard::capture();
+        set_dark(false);
+        assert!(method_color("GET") == green());
+        assert!(method_color("POST") == purple());
+        assert!(method_color("PUT") == orange());
+        assert!(method_color("PATCH") == purple());
+        assert!(method_color("DELETE") == red());
+        assert!(method_color("OPTIONS") == teal());
+        assert!(method_color("HEAD") == cyan());
+        assert!(method_color("WHATEVER") == subtext());
+    }
+
+    // The .to_ascii_uppercase() normalization path: lowercase / mixed-case verbs
+    // resolve identically to their uppercase form.
+    #[test]
+    fn method_color_is_case_insensitive() {
+        let _g = DarkGuard::capture();
+        set_dark(true);
+        assert!(method_color("get") == method_color("GET"));
+        assert!(method_color("Post") == method_color("POST"));
+        assert!(method_color("deLeTe") == method_color("DELETE"));
+        assert!(method_color("options") == method_color("OPTIONS"));
+    }
+
+    // POST diverges between modes (indigo dark vs purple light); confirm the
+    // mode actually drives the inner branch.
+    #[test]
+    fn method_color_post_differs_by_mode() {
+        let _g = DarkGuard::capture();
+        set_dark(true);
+        let post_dark = method_color("POST");
+        set_dark(false);
+        let post_light = method_color("POST");
+        assert!(post_dark != post_light);
+    }
+
+    // PATCH likewise diverges (orange dark vs purple light).
+    #[test]
+    fn method_color_patch_differs_by_mode() {
+        let _g = DarkGuard::capture();
+        set_dark(true);
+        let patch_dark = method_color("PATCH");
+        set_dark(false);
+        let patch_light = method_color("PATCH");
+        assert!(patch_dark != patch_light);
+    }
+}

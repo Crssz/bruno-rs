@@ -312,3 +312,235 @@ impl BruApp {
             .child(card)
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use super::*;
+    use crate::test_support::app_on_temp;
+
+    fn pt() -> gpui::Point<gpui::Pixels> {
+        gpui::point(gpui::px(10.), gpui::px(20.))
+    }
+
+    // ── folder / collection scaffolding ──────────────────────────────────────
+
+    #[gpui::test]
+    fn toggle_folder_inserts_then_removes(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        let p = PathBuf::from("/some/folder");
+        app.update(cx, |app, cx| {
+            assert!(!app.collapsed.contains(&p));
+            // First toggle inserts (collapses).
+            app.toggle_folder(p.clone(), cx);
+            assert!(app.collapsed.contains(&p));
+            // Second toggle removes (expands).
+            app.toggle_folder(p.clone(), cx);
+            assert!(!app.collapsed.contains(&p));
+        });
+    }
+
+    #[gpui::test]
+    fn new_folder_in_creates_and_increments(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let dir = tc.dir.clone();
+        // First call: "New Folder".
+        app.update(cx, |app, cx| app.new_folder_in(&dir, cx));
+        let first = dir.join("New Folder");
+        assert!(first.is_dir());
+        assert!(first.join("folder.bru").is_file());
+        // Second call must skip to "New Folder 2" since the first now exists.
+        app.update(cx, |app, cx| app.new_folder_in(&dir, cx));
+        assert!(dir.join("New Folder 2").is_dir());
+    }
+
+    // ── environment selector menu ────────────────────────────────────────────
+
+    #[gpui::test]
+    fn open_close_env_menu_toggles_state(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            assert!(app.env_menu.is_none());
+            app.open_env_menu(pt(), cx);
+            assert!(app.env_menu.is_some());
+            app.close_env_menu(cx);
+            assert!(app.env_menu.is_none());
+            // Closing again with nothing open hits the no-notify branch.
+            app.close_env_menu(cx);
+            assert!(app.env_menu.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn select_env_sets_name_and_clears_menu(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.open_env_menu(pt(), cx);
+            app.select_env(Some("New Environment".to_string()), cx);
+            assert_eq!(app.selected_env.as_deref(), Some("New Environment"));
+            assert!(app.env_menu.is_none());
+            // And clearing back to None.
+            app.select_env(None, cx);
+            assert!(app.selected_env.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn select_global_env_sets_name_and_clears_menu(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.open_env_menu(pt(), cx);
+            app.select_global_env(Some("Prod".to_string()), cx);
+            assert_eq!(app.selected_global_env.as_deref(), Some("Prod"));
+            assert!(app.env_menu.is_none());
+            app.select_global_env(None, cx);
+            assert!(app.selected_global_env.is_none());
+        });
+    }
+
+    // ── method-picker menu ───────────────────────────────────────────────────
+
+    #[gpui::test]
+    fn open_close_method_menu_toggles_state(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.open_method_menu(pt(), cx);
+            assert!(app.method_menu.is_some());
+            app.close_method_menu(cx);
+            assert!(app.method_menu.is_none());
+            // No-op close branch.
+            app.close_method_menu(cx);
+            assert!(app.method_menu.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn pick_method_updates_active_tab_and_closes_menu(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.open_request(tc.dir.join("Repository Info.bru"), cx)
+        });
+        app.update(cx, |app, cx| {
+            app.open_method_menu(pt(), cx);
+            app.pick_method("POST", cx);
+            assert_eq!(app.tabs[0].method, "POST");
+            assert!(app.method_menu.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn pick_method_with_no_active_tab_just_closes_menu(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            // No request open: `active` is None, so the if-let body is skipped.
+            assert!(app.active.is_none());
+            app.open_method_menu(pt(), cx);
+            app.pick_method("PUT", cx);
+            assert!(app.method_menu.is_none());
+        });
+    }
+
+    // ── body/auth mode menu ──────────────────────────────────────────────────
+
+    #[gpui::test]
+    fn open_close_mode_menu_toggles_state(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.open_mode_menu(pt(), true, cx);
+            assert!(app.mode_menu.is_some());
+            app.close_mode_menu(cx);
+            assert!(app.mode_menu.is_none());
+            // No-op close branch.
+            app.close_mode_menu(cx);
+            assert!(app.mode_menu.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn pick_mode_body_sets_body_mode_and_closes(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.open_request(tc.dir.join("Repository Info.bru"), cx)
+        });
+        app.update(cx, |app, cx| {
+            app.open_mode_menu(pt(), true, cx);
+            app.pick_mode("json", true, cx);
+            assert!(app.mode_menu.is_none());
+            // The body field on the method block should now read "json".
+            let field = app
+                .active_tab()
+                .and_then(|t| edit::method_field(&t.file, "body"));
+            assert_eq!(field.as_deref(), Some("json"));
+        });
+    }
+
+    #[gpui::test]
+    fn pick_mode_auth_sets_auth_mode_and_closes(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.open_request(tc.dir.join("Repository Info.bru"), cx)
+        });
+        app.update(cx, |app, cx| {
+            app.open_mode_menu(pt(), false, cx);
+            app.pick_mode("bearer", false, cx);
+            assert!(app.mode_menu.is_none());
+            let field = app
+                .active_tab()
+                .and_then(|t| edit::method_field(&t.file, "auth"));
+            assert_eq!(field.as_deref(), Some("bearer"));
+        });
+    }
+
+    // ── overlay builders (build the Div directly via an entity update) ───────
+    // These take only `&self, cx: &mut Context<Self>` and return a `Div`, so they
+    // run without a Window. Driving them open then building the overlay exercises
+    // the item/listener-construction loops inside each builder.
+
+    #[gpui::test]
+    fn builds_env_menu_overlay_with_collection_envs(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            // Closed: builder returns an empty placeholder div (early-return branch).
+            let _empty = app.env_menu_overlay(cx);
+            // Open: builder loops over scanned collection envs (sample has one) and
+            // adds the No-Environment row + per-env rows.
+            app.open_env_menu(pt(), cx);
+            app.select_env(Some("New Environment".to_string()), cx);
+            app.open_env_menu(pt(), cx);
+            let _card = app.env_menu_overlay(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn builds_method_menu_overlay(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.open_request(tc.dir.join("Repository Info.bru"), cx)
+        });
+        app.update(cx, |app, cx| {
+            // Early-return branch.
+            let _empty = app.method_menu_overlay(cx);
+            // Open: loops over the seven HTTP verbs building rows.
+            app.open_method_menu(pt(), cx);
+            let _card = app.method_menu_overlay(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn builds_mode_menu_overlay_body_and_auth(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.open_request(tc.dir.join("Repository Info.bru"), cx)
+        });
+        app.update(cx, |app, cx| {
+            // Early-return branch.
+            let _empty = app.mode_menu_overlay(cx);
+            // Body variant: loops over BODY_MODES, marking the active one.
+            app.open_mode_menu(pt(), true, cx);
+            let _body = app.mode_menu_overlay(cx);
+            // Auth variant: loops over AUTH_MODES.
+            app.close_mode_menu(cx);
+            app.open_mode_menu(pt(), false, cx);
+            let _auth = app.mode_menu_overlay(cx);
+        });
+    }
+}

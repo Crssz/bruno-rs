@@ -663,3 +663,498 @@ impl BruApp {
             .child(card)
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use super::*;
+    use crate::test_support::{app_on_temp, temp_collection};
+
+    /// A throwaway anchor point for menus/overlays.
+    fn pos() -> Point<Pixels> {
+        gpui::point(px(10.), px(20.))
+    }
+
+    #[gpui::test]
+    fn go_home_toggles(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            assert!(!app.home);
+            app.go_home(cx);
+            assert!(app.home);
+            app.go_home(cx);
+            assert!(!app.home);
+        });
+    }
+
+    #[gpui::test]
+    fn new_request_creates_and_opens_file(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let dir = tc.dir.clone();
+        app.update(cx, |app, cx| app.new_request(cx));
+        // The first free name is "New Request 3.bru" (the sample already ships
+        // New Request.bru + New Request 2.bru), so a fresh file must appear and
+        // a tab must be open for it.
+        app.update(cx, |app, _| {
+            assert!(!app.tabs.is_empty());
+            let opened = app.active_tab().map(|t| t.path.clone()).unwrap();
+            assert!(opened.starts_with(&dir));
+            assert!(opened.exists());
+            assert!(opened.extension().and_then(|e| e.to_str()) == Some("bru"));
+        });
+    }
+
+    #[gpui::test]
+    fn new_request_in_subfolder(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let folder = tc.dir.join("Repository");
+        app.update(cx, |app, cx| app.new_request_in(&folder, cx));
+        let made = folder.join("New Request.bru");
+        assert!(made.exists());
+        // A second call in the same folder must dedup the name.
+        app.update(cx, |app, cx| app.new_request_in(&folder, cx));
+        assert!(folder.join("New Request 2.bru").exists());
+    }
+
+    #[gpui::test]
+    fn reload_collection_repopulates(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.collection = None;
+            app.reload_collection(cx);
+            assert!(app.collection.is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn open_and_close_ctx_menu(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let target = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(target.clone(), false, "Repository Info".into(), pos(), cx);
+        });
+        app.update(cx, |app, _| {
+            let m = app.ctx_menu.as_ref().unwrap();
+            assert!(!m.is_dir);
+            assert!(!m.root);
+            assert!(m.target == target);
+        });
+        app.update(cx, |app, cx| app.close_ctx_menu(cx));
+        app.update(cx, |app, _| assert!(app.ctx_menu.is_none()));
+        // Closing again is a no-op (the take() guard).
+        app.update(cx, |app, cx| app.close_ctx_menu(cx));
+    }
+
+    #[gpui::test]
+    fn open_root_menu_marks_root(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let dir = tc.dir.clone();
+        app.update(cx, |app, cx| app.open_root_menu(pos(), cx));
+        app.update(cx, |app, _| {
+            let m = app.ctx_menu.as_ref().unwrap();
+            assert!(m.root);
+            assert!(m.is_dir);
+            assert!(m.target == dir);
+        });
+    }
+
+    #[gpui::test]
+    fn close_tabs_under_folder_and_file(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let root_req = tc.dir.join("Repository Info.bru");
+        let sub_req = tc.dir.join("Repository").join("Create Issue.bru");
+        app.update(cx, |app, cx| {
+            app.open_request(root_req.clone(), cx);
+            app.open_request(sub_req.clone(), cx);
+        });
+        app.update(cx, |app, _| assert_eq!(app.tabs.len(), 2));
+        // Closing the folder drops the sub tab but keeps the root one.
+        app.update(cx, |app, _| {
+            app.close_tabs_under(&tc.dir.join("Repository"))
+        });
+        app.update(cx, |app, _| {
+            assert_eq!(app.tabs.len(), 1);
+            assert!(app.tabs[0].path == root_req);
+            assert!(app.active.is_some());
+        });
+        // Closing under the remaining tab empties the set and clears active.
+        app.update(cx, |app, _| app.close_tabs_under(&root_req));
+        app.update(cx, |app, _| {
+            assert!(app.tabs.is_empty());
+            assert!(app.active.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn ctx_duplicate_file(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let target = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(target, false, "Repository Info".into(), pos(), cx);
+            app.ctx_duplicate(cx);
+        });
+        assert!(tc.dir.join("Repository Info copy.bru").exists());
+    }
+
+    #[gpui::test]
+    fn ctx_duplicate_dir(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let target = tc.dir.join("Repository");
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(target, true, "Repository".into(), pos(), cx);
+            app.ctx_duplicate(cx);
+        });
+        let copy = tc.dir.join("Repository copy");
+        assert!(copy.is_dir());
+        assert!(copy.join("folder.bru").exists());
+    }
+
+    #[gpui::test]
+    fn ctx_duplicate_without_menu_is_noop(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.ctx_duplicate(cx));
+        app.update(cx, |app, _| assert!(app.ctx_menu.is_none()));
+    }
+
+    #[gpui::test]
+    fn ctx_run_file_opens_request(cx: &mut gpui::TestAppContext) {
+        // ctx_run on a non-dir target just opens the request (no worker thread).
+        let (app, tc) = app_on_temp(cx);
+        let target = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(target.clone(), false, "Repository Info".into(), pos(), cx);
+            app.ctx_run(cx);
+        });
+        app.update(cx, |app, _| {
+            assert!(app.ctx_menu.is_none());
+            assert!(app.active_tab().map(|t| t.path.clone()) == Some(target));
+        });
+    }
+
+    #[gpui::test]
+    fn ctx_generate_code_copies_curl(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let target = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(target, false, "Repository Info".into(), pos(), cx);
+            app.ctx_generate_code(cx);
+        });
+        app.update(cx, |app, _| {
+            assert!(app.ctx_menu.is_none());
+            assert!(app.status == "Copied curl to clipboard");
+        });
+    }
+
+    #[gpui::test]
+    fn ctx_copy_then_paste_file(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let src = tc.dir.join("Repository Info.bru");
+        // Copy a file onto the sidebar clipboard.
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(src.clone(), false, "Repository Info".into(), pos(), cx);
+            app.ctx_copy(cx);
+        });
+        app.update(cx, |app, _| {
+            assert!(app.clipboard_item.is_some());
+            assert!(app.status == "Copied to sidebar clipboard");
+        });
+        // Paste into the Repository folder (a dir target -> paste into it).
+        let folder = tc.dir.join("Repository");
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(folder.clone(), true, "Repository".into(), pos(), cx);
+            app.ctx_paste(cx);
+        });
+        assert!(folder.join("Repository Info.bru").exists());
+    }
+
+    #[gpui::test]
+    fn ctx_paste_dir_into_file_target(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        // Copy the Repository folder, then paste with a FILE target so the dest
+        // resolves to the file's parent dir.
+        let folder = tc.dir.join("Repository");
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(folder, true, "Repository".into(), pos(), cx);
+            app.ctx_copy(cx);
+        });
+        let file_target = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(file_target, false, "Repository Info".into(), pos(), cx);
+            app.ctx_paste(cx);
+        });
+        // Pasting the folder back into root dedups to "Repository 2".
+        assert!(tc.dir.join("Repository 2").is_dir());
+    }
+
+    #[gpui::test]
+    fn ctx_folder_settings_creates_and_opens(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        // Make a folder with no folder.bru so ctx_folder_settings must scaffold one.
+        let folder = tc.dir.join("FreshFolder");
+        std::fs::create_dir_all(&folder).unwrap();
+        app.update(cx, |app, cx| app.reload_collection(cx));
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(folder.clone(), true, "FreshFolder".into(), pos(), cx);
+            app.ctx_folder_settings(cx);
+        });
+        let bru = folder.join("folder.bru");
+        assert!(bru.exists());
+        app.update(cx, |app, _| {
+            assert!(app.active_tab().map(|t| t.path.clone()) == Some(bru.clone()));
+        });
+        // A second call (folder.bru now present) just re-opens the existing tab.
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(folder.clone(), true, "FreshFolder".into(), pos(), cx);
+            app.ctx_folder_settings(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn open_collection_settings_scaffolds_when_missing(cx: &mut gpui::TestAppContext) {
+        // The sample ships a collection.bru, so remove it to hit the create path.
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let _ = std::fs::remove_file(dir.join("collection.bru"));
+        let app = crate::test_support::build_app(cx, dir.clone());
+        app.update(cx, |app, cx| app.open_collection_settings(cx));
+        let bru = dir.join("collection.bru");
+        assert!(bru.exists());
+        app.update(cx, |app, _| {
+            assert!(app.active_tab().map(|t| t.path.clone()) == Some(bru));
+        });
+    }
+
+    #[gpui::test]
+    fn ctx_move_reorders_siblings(cx: &mut gpui::TestAppContext) {
+        // Build a clean folder with three seq'd requests so move is deterministic.
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let folder = dir.join("Ordered");
+        std::fs::create_dir_all(&folder).unwrap();
+        for (i, n) in [(1, "A"), (2, "B"), (3, "C")] {
+            let body = format!(
+                "meta {{\n  name: {n}\n  type: http\n  seq: {i}\n}}\n\nget {{\n  url: \n}}\n"
+            );
+            std::fs::write(folder.join(format!("{n}.bru")), body).unwrap();
+        }
+        let app = crate::test_support::build_app(cx, dir.clone());
+        // Move "A" down: it should swap with "B" (seq rewritten on disk).
+        let a = folder.join("A.bru");
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(a.clone(), false, "A".into(), pos(), cx);
+            app.ctx_move(1, cx);
+        });
+        let a_text = std::fs::read_to_string(&a).unwrap();
+        // A now has seq 2 (was 1) after moving down one slot.
+        assert!(a_text.contains("seq: 2"));
+        // Moving the top item up is clamped (no panic, target == idx early return).
+        app.update(cx, |app, cx| {
+            let b = folder.join("B.bru");
+            app.open_ctx_menu(b, false, "B".into(), pos(), cx);
+            app.ctx_move(-5, cx);
+        });
+    }
+
+    #[gpui::test]
+    fn rename_file_round_trip(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let target = tc.dir.join("Repository Info.bru");
+        // Open the request first so commit_rename re-points the open tab.
+        app.update(cx, |app, cx| app.open_request(target.clone(), cx));
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(target.clone(), false, "Repository Info".into(), pos(), cx);
+            app.start_rename(cx);
+        });
+        app.update(cx, |app, _| assert!(app.rename.is_some()));
+        // Set the rename input's text, then commit.
+        app.update(cx, |app, cx| {
+            let input = app.rename.as_ref().unwrap().input.clone();
+            input.update(cx, |ed, cx| {
+                ed.set_text("Renamed Info", crate::editor::Lang::Plain, cx)
+            });
+            app.commit_rename(cx);
+        });
+        let dest = tc.dir.join("Renamed Info.bru");
+        assert!(dest.exists());
+        assert!(!target.exists());
+        app.update(cx, |app, _| {
+            // The open tab now points at the new path.
+            assert!(app.tabs.iter().any(|t| t.path == dest));
+            assert!(app.rename.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn rename_dir_round_trip(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let target = tc.dir.join("Repository");
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(target.clone(), true, "Repository".into(), pos(), cx);
+            app.start_rename(cx);
+            let input = app.rename.as_ref().unwrap().input.clone();
+            input.update(cx, |ed, cx| {
+                ed.set_text("Repo2", crate::editor::Lang::Plain, cx)
+            });
+            app.commit_rename(cx);
+        });
+        assert!(tc.dir.join("Repo2").is_dir());
+        assert!(!target.exists());
+    }
+
+    #[gpui::test]
+    fn rename_empty_name_is_noop(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let target = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(target.clone(), false, "Repository Info".into(), pos(), cx);
+            app.start_rename(cx);
+            let input = app.rename.as_ref().unwrap().input.clone();
+            input.update(cx, |ed, cx| {
+                ed.set_text("   ", crate::editor::Lang::Plain, cx)
+            });
+            app.commit_rename(cx);
+        });
+        // Empty (trimmed) name: the original file is untouched.
+        assert!(target.exists());
+    }
+
+    #[gpui::test]
+    fn cancel_rename_clears_state(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let target = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(target, false, "Repository Info".into(), pos(), cx);
+            app.start_rename(cx);
+            app.cancel_rename(cx);
+        });
+        app.update(cx, |app, _| assert!(app.rename.is_none()));
+    }
+
+    #[gpui::test]
+    fn delete_file_confirm_flow(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let target = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| app.open_request(target.clone(), cx));
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(target.clone(), false, "Repository Info".into(), pos(), cx);
+            app.start_delete(cx);
+        });
+        app.update(cx, |app, _| assert!(app.confirm_delete.is_some()));
+        app.update(cx, |app, cx| app.commit_delete(cx));
+        assert!(!target.exists());
+        app.update(cx, |app, _| {
+            assert!(app.confirm_delete.is_none());
+            // The open tab for the deleted file was closed.
+            assert!(!app.tabs.iter().any(|t| t.path == target));
+        });
+    }
+
+    #[gpui::test]
+    fn delete_dir_and_cancel(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let target = tc.dir.join("Repository");
+        // Cancel path first: arms then clears, folder untouched.
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(target.clone(), true, "Repository".into(), pos(), cx);
+            app.start_delete(cx);
+            app.cancel_delete(cx);
+        });
+        app.update(cx, |app, _| assert!(app.confirm_delete.is_none()));
+        assert!(target.is_dir());
+        // Now actually delete the folder.
+        app.update(cx, |app, cx| {
+            app.open_ctx_menu(target.clone(), true, "Repository".into(), pos(), cx);
+            app.start_delete(cx);
+            app.commit_delete(cx);
+        });
+        assert!(!target.exists());
+    }
+
+    // —— windowed render: exercise the overlay view-builders ——
+
+    #[gpui::test]
+    fn renders_root_ctx_menu_overlay(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| app.open_root_menu(pos(), cx))
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, _cx| assert!(app.ctx_menu.is_some()))
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn renders_dir_ctx_menu_with_paste(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let folder = dir.join("Repository");
+        let src = dir.join("Repository Info.bru");
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir.clone()));
+        cx.run_until_parked();
+        // Put something on the clipboard so the dir menu shows the Paste item.
+        window
+            .update(cx, |app, _w, cx| {
+                app.open_ctx_menu(src, false, "Repository Info".into(), pos(), cx);
+                app.ctx_copy(cx);
+                app.open_ctx_menu(folder, true, "Repository".into(), pos(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn renders_file_ctx_menu_overlay(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let target = dir.join("Repository Info.bru");
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir.clone()));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.open_ctx_menu(target, false, "Repository Info".into(), pos(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn renders_rename_overlay(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let target = dir.join("Repository Info.bru");
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir.clone()));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.open_ctx_menu(target, false, "Repository Info".into(), pos(), cx);
+                app.start_rename(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, _cx| assert!(app.rename.is_some()))
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn renders_delete_overlay(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let target = dir.join("Repository");
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir.clone()));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.open_ctx_menu(target, true, "Repository".into(), pos(), cx);
+                app.start_delete(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, _cx| assert!(app.confirm_delete.is_some()))
+            .unwrap();
+    }
+}

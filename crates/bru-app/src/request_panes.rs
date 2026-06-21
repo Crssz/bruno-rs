@@ -680,3 +680,370 @@ impl BruApp {
         col
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use super::*;
+    use crate::test_support::temp_collection;
+    use gpui::TestAppContext;
+
+    /// Open a windowed app on a throwaway sample collection, with one request
+    /// already opened and rendered. Returns the window + the live TempCollection
+    /// (which must be kept alive until the test ends).
+    fn windowed_with_request(
+        cx: &mut TestAppContext,
+        file: &str,
+    ) -> (
+        gpui::WindowHandle<BruApp>,
+        crate::test_support::TempCollection,
+    ) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        let req = tc.dir.join(file);
+        window
+            .update(cx, |app, _w, cx| app.open_request(req, cx))
+            .unwrap();
+        cx.run_until_parked();
+        (window, tc)
+    }
+
+    /// Switching through every ReqTab (re-parking each) renders `req_subtabs` +
+    /// `req_content` for all of Params/Body/Headers/Auth/Assert/Vars/Script/
+    /// Tests/Docs/Source on a request that carries a JSON body and bearer auth.
+    #[gpui::test]
+    fn renders_every_req_tab(cx: &mut TestAppContext) {
+        let (window, _tc) = windowed_with_request(cx, "Repository/Create Issue.bru");
+        for t in ReqTab::ALL {
+            window
+                .update(cx, |app, _w, cx| {
+                    if let Some(i) = app.active {
+                        app.tabs[i].switch_tab(t, cx);
+                    }
+                })
+                .unwrap();
+            cx.run_until_parked();
+            window
+                .update(cx, |app, _w, _cx| {
+                    assert_eq!(app.tabs[app.active.unwrap()].req_tab, t);
+                })
+                .unwrap();
+        }
+    }
+
+    /// Cycling the body mode through every entry of BODY_MODES re-loads the active
+    /// tab and re-renders: this hits the kv-grid body branch (form/multipart), the
+    /// GraphQL two-editor branch, the plain Body-editor branch, and the `none`
+    /// fall-through in `req_content`.
+    #[gpui::test]
+    fn body_mode_cycle_renders_all_content_shapes(cx: &mut TestAppContext) {
+        let (window, _tc) = windowed_with_request(cx, "Repository/Create Issue.bru");
+        // Ensure we're on the Body tab so req_content builds the body shape.
+        window
+            .update(cx, |app, _w, cx| {
+                if let Some(i) = app.active {
+                    app.tabs[i].switch_tab(ReqTab::Body, cx);
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+        for mode in BODY_MODES {
+            window
+                .update(cx, |app, _w, cx| app.set_body_mode(mode, cx))
+                .unwrap();
+            cx.run_until_parked();
+            window
+                .update(cx, |app, _w, _cx| {
+                    let i = app.active.unwrap();
+                    assert_eq!(
+                        edit::method_field(&app.tabs[i].file, "body").as_deref(),
+                        Some(*mode)
+                    );
+                })
+                .unwrap();
+        }
+    }
+
+    /// Cycling the auth mode renders the structured `auth_form` for each mode that
+    /// has fields (basic/bearer/apikey/oauth2/digest/awsv4) and the "No fields"
+    /// empty form for none/inherit.
+    #[gpui::test]
+    fn auth_mode_cycle_renders_auth_form(cx: &mut TestAppContext) {
+        let (window, _tc) = windowed_with_request(cx, "Repository/Create Issue.bru");
+        window
+            .update(cx, |app, _w, cx| {
+                if let Some(i) = app.active {
+                    app.tabs[i].switch_tab(ReqTab::Auth, cx);
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+        for mode in AUTH_MODES {
+            window
+                .update(cx, |app, _w, cx| app.set_auth_mode(mode, cx))
+                .unwrap();
+            cx.run_until_parked();
+            window
+                .update(cx, |app, _w, _cx| {
+                    let i = app.active.unwrap();
+                    assert_eq!(
+                        edit::method_field(&app.tabs[i].file, "auth").as_deref(),
+                        Some(*mode)
+                    );
+                })
+                .unwrap();
+        }
+    }
+
+    /// Opening the body and auth mode menus toggles the `mode_menu` state and
+    /// re-renders the sub-tab strip's pinned mode chip.
+    #[gpui::test]
+    fn open_body_and_auth_mode_menus(cx: &mut TestAppContext) {
+        let (window, _tc) = windowed_with_request(cx, "Repository/Create Issue.bru");
+        // Body mode menu.
+        window
+            .update(cx, |app, _w, cx| {
+                if let Some(i) = app.active {
+                    app.tabs[i].switch_tab(ReqTab::Body, cx);
+                }
+                app.open_mode_menu(gpui::point(px(10.), px(10.)), true, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, _cx| assert!(app.mode_menu.is_some()))
+            .unwrap();
+        // Auth mode menu.
+        window
+            .update(cx, |app, _w, cx| {
+                if let Some(i) = app.active {
+                    app.tabs[i].switch_tab(ReqTab::Auth, cx);
+                }
+                app.open_mode_menu(gpui::point(px(20.), px(20.)), false, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, _cx| {
+                assert!(matches!(app.mode_menu, Some((_, false))));
+            })
+            .unwrap();
+    }
+
+    /// A request with `params:query` rows renders the kv grid on the Params tab.
+    /// Adding/toggling/moving/removing rows exercises the grid's row-bounds
+    /// branches (top arrow inert on row 0, bottom arrow inert on last row).
+    #[gpui::test]
+    fn params_kv_grid_row_ops(cx: &mut TestAppContext) {
+        let (window, _tc) = windowed_with_request(cx, "Search Repos copy.bru");
+        window
+            .update(cx, |app, _w, cx| {
+                if let Some(i) = app.active {
+                    app.tabs[i].switch_tab(ReqTab::Params, cx);
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // Start with the two sample params; add a third, then exercise moves.
+        window
+            .update(cx, |app, _w, cx| {
+                let i = app.active.unwrap();
+                let start = app.tabs[i].kv_rows.len();
+                app.kv_add_row(cx);
+                assert_eq!(app.tabs[i].kv_rows.len(), start + 1);
+                app.kv_toggle_row(0, cx);
+                app.kv_move_row(1, true, cx); // move row 1 up
+                app.kv_move_row(0, true, cx); // inert (already at top)
+                let last = app.tabs[i].kv_rows.len() - 1;
+                app.kv_move_row(last, false, cx); // inert (already at bottom)
+                app.kv_move_row(0, false, cx); // move row 0 down
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                let i = app.active.unwrap();
+                let len = app.tabs[i].kv_rows.len();
+                app.kv_remove_row(len - 1, cx);
+                assert_eq!(app.tabs[i].kv_rows.len(), len - 1);
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// The Assert tab uses the kv grid with the "Expression"/"Operator + Value"
+    /// header labels (the `block == "assert"` branch of `kv_grid`).
+    #[gpui::test]
+    fn assert_tab_renders_kv_grid(cx: &mut TestAppContext) {
+        let (window, _tc) = windowed_with_request(cx, "Repository/Create Issue.bru");
+        window
+            .update(cx, |app, _w, cx| {
+                let i = app.active.unwrap();
+                app.tabs[i].switch_tab(ReqTab::Assert, cx);
+                assert!(matches!(app.tabs[i].edit_kind, EditKind::Kv(_)));
+                // Add a row so the grid has at least one entry to render.
+                app.kv_add_row(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// The Vars tab renders the two stacked var tables. Adding rows with a valid
+    /// and an invalid name exercises the live name-validation branch (the red tint
+    /// + the trailing error line in `var_table`).
+    #[gpui::test]
+    fn vars_tables_validate_names(cx: &mut TestAppContext) {
+        let (window, _tc) = windowed_with_request(cx, "Repository/Create Issue.bru");
+        window
+            .update(cx, |app, _w, cx| {
+                let i = app.active.unwrap();
+                app.tabs[i].switch_tab(ReqTab::Vars, cx);
+                assert!(matches!(app.tabs[i].edit_kind, EditKind::Vars));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // Pre-request: one valid, one invalid name.
+        window
+            .update(cx, |app, _w, cx| {
+                app.var_add_row(false, cx);
+                app.var_add_row(false, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                let i = app.active.unwrap();
+                app.tabs[i].var_pre_rows[0]
+                    .name
+                    .update(cx, |ed, cx| ed.set_line("valid_name", cx));
+                app.tabs[i].var_pre_rows[1]
+                    .name
+                    .update(cx, |ed, cx| ed.set_line("bad name!", cx));
+            })
+            .unwrap();
+        // Re-park so var_table re-renders with the now-invalid name (red tint).
+        cx.run_until_parked();
+        // Post-response table row ops + toggle/move/remove.
+        window
+            .update(cx, |app, _w, cx| {
+                app.var_add_row(true, cx);
+                app.var_add_row(true, cx);
+                app.var_toggle_row(true, 0, cx);
+                app.var_move_row(true, 1, true, cx);
+                app.var_move_row(true, 0, true, cx); // inert at top
+                app.var_move_row(true, 1, false, cx); // inert at bottom
+                app.var_remove_row(true, 0, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// Editing the URL to carry `:tokens` and re-loading the Params tab populates
+    /// `path_rows`, so `kv_grid` renders the PATH PARAMS section.
+    #[gpui::test]
+    fn params_tab_renders_path_params(cx: &mut TestAppContext) {
+        let (window, _tc) = windowed_with_request(cx, "Repository Info.bru");
+        window
+            .update(cx, |app, _w, cx| {
+                let i = app.active.unwrap();
+                // Put a path token into the URL editor.
+                app.tabs[i].url_input.update(cx, |ed, cx| {
+                    ed.set_line("https://api.example.com/users/:id", cx)
+                });
+                // switch_tab applies edits (syncing path params) then reloads.
+                app.tabs[i].switch_tab(ReqTab::Params, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, _cx| {
+                let i = app.active.unwrap();
+                assert!(app.tabs[i].path_rows.iter().any(|(n, _)| n == "id"));
+            })
+            .unwrap();
+    }
+
+    /// The Script tab carries an inner Pre Request / Post Response strip
+    /// (`script_subtabs`). Switching the inner sub-tab re-renders it.
+    #[gpui::test]
+    fn script_tab_inner_subtabs(cx: &mut TestAppContext) {
+        let (window, _tc) = windowed_with_request(cx, "Repository/Create Issue.bru");
+        window
+            .update(cx, |app, _w, cx| {
+                let i = app.active.unwrap();
+                app.tabs[i].switch_tab(ReqTab::Script, cx);
+                assert!(!app.tabs[i].script_post);
+                app.tabs[i].switch_script_tab(true, cx);
+                assert!(app.tabs[i].script_post);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                let i = app.active.unwrap();
+                app.tabs[i].switch_script_tab(false, cx);
+                assert!(!app.tabs[i].script_post);
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// Opening a plain-text file routes the render to `text_pane` (path header +
+    /// find bar + scrolling editor) instead of the request panes.
+    #[gpui::test]
+    fn text_pane_renders_for_plain_file(cx: &mut TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let js = tc.dir.join("helper.js");
+        std::fs::write(&js, "function add(a, b) { return a + b; }\n").unwrap();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| app.open_text_file(js, cx))
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, _cx| {
+                let i = app.active.unwrap();
+                assert!(app.tabs[i].text.is_some());
+            })
+            .unwrap();
+    }
+
+    /// The GraphQL body mode renders the two-editor (QUERY + VARIABLES) pane in
+    /// `req_content`. Drive it directly via `set_body_mode("graphql")`.
+    #[gpui::test]
+    fn graphql_body_renders_two_editors(cx: &mut TestAppContext) {
+        let (window, _tc) = windowed_with_request(cx, "Repository/Create Issue.bru");
+        window
+            .update(cx, |app, _w, cx| {
+                let i = app.active.unwrap();
+                app.tabs[i].switch_tab(ReqTab::Body, cx);
+                app.set_body_mode("graphql", cx);
+                assert!(matches!(app.tabs[i].edit_kind, EditKind::GraphQl));
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// `formUrlEncoded` and `multipartForm` body modes render the kv grid inside
+    /// `req_content` (the `EditKind::Kv` early return for a body block).
+    #[gpui::test]
+    fn form_body_renders_kv_grid(cx: &mut TestAppContext) {
+        let (window, _tc) = windowed_with_request(cx, "Repository/Create Issue.bru");
+        for mode in ["formUrlEncoded", "multipartForm"] {
+            window
+                .update(cx, |app, _w, cx| {
+                    let i = app.active.unwrap();
+                    app.tabs[i].switch_tab(ReqTab::Body, cx);
+                    app.set_body_mode(mode, cx);
+                    assert!(matches!(app.tabs[i].edit_kind, EditKind::Kv(_)));
+                    // Add a row so the body grid has an entry to render.
+                    app.kv_add_row(cx);
+                })
+                .unwrap();
+            cx.run_until_parked();
+        }
+    }
+}

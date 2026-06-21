@@ -305,3 +305,331 @@ impl BruApp {
         cx.notify();
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use super::*;
+    use crate::test_support::app_on_temp;
+
+    // ── open_request ────────────────────────────────────────────────────
+
+    #[gpui::test]
+    fn open_request_opens_new_tab_and_leaves_home(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let req = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| app.open_request(req.clone(), cx));
+        app.update(cx, |app, _| {
+            assert_eq!(app.tabs.len(), 1);
+            assert_eq!(app.active, Some(0));
+            assert!(!app.home);
+            assert!(app.status.is_empty());
+            assert_eq!(app.tabs[0].path, req);
+        });
+    }
+
+    #[gpui::test]
+    fn open_request_focuses_existing_tab(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let a = tc.dir.join("Repository Info.bru");
+        let b = tc.dir.join("New Request.bru");
+        app.update(cx, |app, cx| {
+            app.open_request(a.clone(), cx);
+            app.open_request(b.clone(), cx);
+        });
+        // Re-opening the first should focus it, not push a duplicate.
+        app.update(cx, |app, cx| app.open_request(a.clone(), cx));
+        app.update(cx, |app, _| {
+            assert_eq!(app.tabs.len(), 2);
+            assert_eq!(app.active, Some(0));
+        });
+    }
+
+    // ── open_text_file ──────────────────────────────────────────────────
+
+    #[gpui::test]
+    fn open_text_file_opens_json_tab(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let json = tc.dir.join("bruno.json");
+        app.update(cx, |app, cx| app.open_text_file(json.clone(), cx));
+        app.update(cx, |app, _| {
+            assert_eq!(app.tabs.len(), 1);
+            assert_eq!(app.active, Some(0));
+            assert!(!app.home);
+            assert!(app.status.is_empty());
+            // A text tab carries an editor in `text`.
+            assert!(app.tabs[0].text.is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn open_text_file_focuses_existing(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let json = tc.dir.join("bruno.json");
+        app.update(cx, |app, cx| {
+            app.open_text_file(json.clone(), cx);
+            // Switch focus away so we can prove re-opening re-focuses it.
+            app.open_request(tc.dir.join("Repository Info.bru"), cx);
+        });
+        app.update(cx, |app, _| assert_eq!(app.active, Some(1)));
+        app.update(cx, |app, cx| app.open_text_file(json.clone(), cx));
+        app.update(cx, |app, _| {
+            assert_eq!(app.tabs.len(), 2);
+            assert_eq!(app.active, Some(0));
+        });
+    }
+
+    #[gpui::test]
+    fn open_text_file_missing_sets_status(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let missing = tc.dir.join("does-not-exist.js");
+        app.update(cx, |app, cx| app.open_text_file(missing, cx));
+        app.update(cx, |app, _| {
+            assert_eq!(app.tabs.len(), 0);
+            assert_eq!(app.status, "Could not open file");
+        });
+    }
+
+    // ── set_body_mode / set_auth_mode ───────────────────────────────────
+
+    #[gpui::test]
+    fn set_body_mode_json_creates_text_block(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let req = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| app.open_request(req.clone(), cx));
+        app.update(cx, |app, cx| app.set_body_mode("json", cx));
+        app.update(cx, |app, _| {
+            let f = &app.tabs[0].file;
+            assert_eq!(edit::method_field(f, "body").as_deref(), Some("json"));
+            let block = f.blocks.iter().find(|b| b.name == "body:json");
+            assert!(block.is_some());
+            assert!(matches!(block.unwrap().content, BlockContent::Text(_)));
+            assert!(app.dirty.contains(&req));
+        });
+    }
+
+    #[gpui::test]
+    fn set_body_mode_form_creates_dict_block(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let req = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| app.open_request(req.clone(), cx));
+        app.update(cx, |app, cx| app.set_body_mode("formUrlEncoded", cx));
+        app.update(cx, |app, _| {
+            let f = &app.tabs[0].file;
+            assert_eq!(
+                edit::method_field(f, "body").as_deref(),
+                Some("formUrlEncoded")
+            );
+            let block = f
+                .blocks
+                .iter()
+                .find(|b| b.name == "body:form-urlencoded")
+                .expect("form block created");
+            assert!(matches!(block.content, BlockContent::Dict(_)));
+        });
+    }
+
+    #[gpui::test]
+    fn set_auth_mode_bearer_creates_block(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let req = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| app.open_request(req.clone(), cx));
+        app.update(cx, |app, cx| app.set_auth_mode("bearer", cx));
+        app.update(cx, |app, _| {
+            let f = &app.tabs[0].file;
+            assert_eq!(edit::method_field(f, "auth").as_deref(), Some("bearer"));
+            assert!(f.blocks.iter().any(|b| b.name == "auth:bearer"));
+            assert!(app.dirty.contains(&req));
+        });
+    }
+
+    #[gpui::test]
+    fn set_auth_mode_none_sets_field_without_block(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let req = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| app.open_request(req.clone(), cx));
+        app.update(cx, |app, cx| app.set_auth_mode("none", cx));
+        app.update(cx, |app, _| {
+            let f = &app.tabs[0].file;
+            assert_eq!(edit::method_field(f, "auth").as_deref(), Some("none"));
+            // `none` has no auth: block.
+            assert!(!f.blocks.iter().any(|b| b.name.starts_with("auth:")));
+        });
+    }
+
+    // ── kv grid rows (Headers tab) ──────────────────────────────────────
+
+    fn open_on_headers(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<BruApp>, crate::test_support::TempCollection) {
+        let (app, tc) = app_on_temp(cx);
+        let req = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| {
+            app.open_request(req, cx);
+            app.tabs[0].switch_tab(ReqTab::Headers, cx);
+        });
+        (app, tc)
+    }
+
+    #[gpui::test]
+    fn kv_add_row_pushes_editor_row(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = open_on_headers(cx);
+        let _ = &tc;
+        app.update(cx, |app, cx| {
+            app.kv_add_row(cx);
+            app.kv_add_row(cx);
+        });
+        app.update(cx, |app, _| {
+            assert_eq!(app.tabs[0].kv_rows.len(), 2);
+            assert!(app.tabs[0].kv_rows[0].enabled);
+            assert!(app.dirty.contains(&app.tabs[0].path));
+        });
+    }
+
+    #[gpui::test]
+    fn kv_toggle_and_remove_row(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = open_on_headers(cx);
+        let _ = &tc;
+        app.update(cx, |app, cx| {
+            app.kv_add_row(cx);
+            app.kv_add_row(cx);
+            app.kv_toggle_row(0, cx);
+        });
+        app.update(cx, |app, _| assert!(!app.tabs[0].kv_rows[0].enabled));
+        app.update(cx, |app, cx| {
+            // Out-of-range toggle/remove are silent no-ops.
+            app.kv_toggle_row(99, cx);
+            app.kv_remove_row(99, cx);
+            app.kv_remove_row(0, cx);
+        });
+        app.update(cx, |app, _| assert_eq!(app.tabs[0].kv_rows.len(), 1));
+    }
+
+    #[gpui::test]
+    fn kv_move_row_swaps_and_respects_bounds(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = open_on_headers(cx);
+        let _ = &tc;
+        app.update(cx, |app, cx| {
+            app.kv_add_row(cx);
+            app.kv_add_row(cx);
+            app.kv_add_row(cx);
+        });
+        // Tag row 0 so we can follow it across swaps.
+        app.update(cx, |app, cx| {
+            app.tabs[0].kv_rows[0]
+                .name
+                .update(cx, |ed, cx| ed.set_line("first", cx));
+        });
+        app.update(cx, |app, cx| {
+            // Moving up at idx 0 is a no-op.
+            app.kv_move_row(0, true, cx);
+            // Moving down past the end is a no-op.
+            app.kv_move_row(2, false, cx);
+            // Move row 0 down -> it lands at index 1.
+            app.kv_move_row(0, false, cx);
+        });
+        app.update(cx, |app, cx| {
+            let moved = app.tabs[0].kv_rows[1].name.read(cx).text().to_string();
+            assert_eq!(moved, "first");
+        });
+    }
+
+    // ── vars rows (Vars tab) ────────────────────────────────────────────
+
+    fn open_on_vars(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<BruApp>, crate::test_support::TempCollection) {
+        let (app, tc) = app_on_temp(cx);
+        let req = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| {
+            app.open_request(req, cx);
+            app.tabs[0].switch_tab(ReqTab::Vars, cx);
+        });
+        (app, tc)
+    }
+
+    #[gpui::test]
+    fn var_add_row_targets_correct_table(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = open_on_vars(cx);
+        let _ = &tc;
+        app.update(cx, |app, cx| {
+            app.var_add_row(false, cx); // pre-request
+            app.var_add_row(true, cx); // post-response
+            app.var_add_row(true, cx);
+        });
+        app.update(cx, |app, _| {
+            assert_eq!(app.var_rows_mut(0, false).len(), 1);
+            assert_eq!(app.var_rows_mut(0, true).len(), 2);
+            assert!(app.dirty.contains(&app.tabs[0].path));
+        });
+    }
+
+    #[gpui::test]
+    fn var_toggle_and_remove_row(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = open_on_vars(cx);
+        let _ = &tc;
+        app.update(cx, |app, cx| {
+            app.var_add_row(false, cx);
+            app.var_add_row(false, cx);
+            app.var_toggle_row(false, 0, cx);
+        });
+        app.update(cx, |app, _| assert!(!app.var_rows_mut(0, false)[0].enabled));
+        app.update(cx, |app, cx| {
+            // Out-of-range are no-ops.
+            app.var_toggle_row(false, 50, cx);
+            app.var_remove_row(false, 50, cx);
+            app.var_remove_row(false, 0, cx);
+        });
+        app.update(cx, |app, _| assert_eq!(app.var_rows_mut(0, false).len(), 1));
+    }
+
+    #[gpui::test]
+    fn var_move_row_swaps_and_respects_bounds(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = open_on_vars(cx);
+        let _ = &tc;
+        app.update(cx, |app, cx| {
+            app.var_add_row(false, cx);
+            app.var_add_row(false, cx);
+        });
+        app.update(cx, |app, cx| {
+            app.var_rows_mut(0, false)[0]
+                .name
+                .update(cx, |ed, cx| ed.set_line("v0", cx));
+        });
+        app.update(cx, |app, cx| {
+            app.var_move_row(false, 0, true, cx); // up at 0 -> no-op
+            app.var_move_row(false, 1, false, cx); // down past end -> no-op
+            app.var_move_row(false, 0, false, cx); // 0 -> 1
+        });
+        app.update(cx, |app, cx| {
+            let moved = app.var_rows_mut(0, false)[1]
+                .name
+                .read(cx)
+                .text()
+                .to_string();
+            assert_eq!(moved, "v0");
+        });
+    }
+
+    // ── save (text tab) ─────────────────────────────────────────────────
+
+    #[gpui::test]
+    fn save_text_tab_writes_to_disk(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let json = tc.dir.join("bruno.json");
+        app.update(cx, |app, cx| app.open_text_file(json.clone(), cx));
+        // Edit the text editor, mark dirty, then save verbatim to disk.
+        app.update(cx, |app, cx| {
+            if let Some(ed) = app.tabs[0].text.clone() {
+                ed.update(cx, |ed, cx| ed.set_text("{\"x\":1}", Lang::Json, cx));
+            }
+            app.dirty.insert(json.clone());
+            app.save(cx);
+        });
+        app.update(cx, |app, _| {
+            assert_eq!(app.status, "Saved");
+            assert!(!app.dirty.contains(&json));
+        });
+        let on_disk = std::fs::read_to_string(&json).unwrap();
+        assert_eq!(on_disk, "{\"x\":1}");
+    }
+}

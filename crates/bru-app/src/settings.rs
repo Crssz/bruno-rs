@@ -164,3 +164,180 @@ impl BruApp {
         cx.notify();
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use super::*;
+    use crate::test_support::app_on_temp;
+
+    // ---- DevTools ----------------------------------------------------------
+
+    #[gpui::test]
+    fn toggle_devtools_flips_flag(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            assert!(!app.devtools_open);
+            app.toggle_devtools(cx);
+            assert!(app.devtools_open);
+            app.toggle_devtools(cx);
+            assert!(!app.devtools_open);
+        });
+    }
+
+    #[gpui::test]
+    fn clear_devtools_empties_console_and_network(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.console.push("a line".to_string());
+            app.console.push("another".to_string());
+            assert!(!app.console.is_empty());
+            app.clear_devtools(cx);
+            assert!(app.console.is_empty());
+            assert!(app.network.is_empty());
+        });
+    }
+
+    // ---- send_options ------------------------------------------------------
+
+    #[gpui::test]
+    fn send_options_reflects_prefs_and_clamps_timeout(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, _cx| {
+            // Mutate prefs directly (without persisting to disk).
+            app.pref_insecure = true;
+            app.pref_timeout = 42;
+            let o = app.send_options();
+            assert!(o.insecure);
+            assert!(o.timeout == std::time::Duration::from_secs(42));
+        });
+    }
+
+    #[gpui::test]
+    fn send_options_zero_timeout_clamps_to_one_second(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, _cx| {
+            app.pref_insecure = false;
+            app.pref_timeout = 0;
+            let o = app.send_options();
+            assert!(!o.insecure);
+            // `.max(1)` floors the duration at one second.
+            assert!(o.timeout == std::time::Duration::from_secs(1));
+        });
+    }
+
+    // ---- prefs overlay open/close (no persistence) -------------------------
+
+    #[gpui::test]
+    fn open_and_close_prefs(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            assert!(!app.prefs_open);
+            app.open_prefs(cx);
+            assert!(app.prefs_open);
+            app.close_prefs(cx);
+            assert!(!app.prefs_open);
+        });
+    }
+
+    // ---- curl overlay + import --------------------------------------------
+
+    #[gpui::test]
+    fn open_and_close_curl(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            assert!(!app.curl_open);
+            app.open_curl(cx);
+            assert!(app.curl_open);
+            app.close_curl(cx);
+            assert!(!app.curl_open);
+        });
+    }
+
+    #[gpui::test]
+    fn import_curl_with_no_url_sets_status(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.open_curl(cx);
+            app.curl_input
+                .update(cx, |e, cx| e.set_text("curl -X GET", Lang::Plain, cx));
+            app.import_curl(cx);
+            // No URL token -> curl_to_bru returns None -> overlay stays open.
+            assert!(app.curl_open);
+            assert_eq!(app.status, "No URL in curl command");
+        });
+    }
+
+    #[gpui::test]
+    fn import_curl_with_url_writes_and_opens_request(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            let before = app.tabs.len();
+            app.open_curl(cx);
+            app.curl_input.update(cx, |e, cx| {
+                e.set_text("curl https://example.com/widgets", Lang::Plain, cx)
+            });
+            app.import_curl(cx);
+            // A valid URL closes the overlay, writes a .bru, and opens it as a tab.
+            assert!(!app.curl_open);
+            assert_eq!(app.tabs.len(), before + 1);
+        });
+        // The request file landed in the temp collection dir.
+        let written = tc.dir.join("widgets.bru");
+        assert!(written.exists());
+    }
+
+    // ---- cookies overlay + jar ops ----------------------------------------
+
+    #[gpui::test]
+    fn open_and_close_cookies(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            assert!(!app.cookies_open);
+            app.open_cookies(cx);
+            assert!(app.cookies_open);
+            app.close_cookies(cx);
+            assert!(!app.cookies_open);
+        });
+    }
+
+    #[gpui::test]
+    fn delete_cookie_removes_in_range_and_ignores_out_of_range(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.cookies.push(CookieEntry {
+                domain: "a.com".to_string(),
+                path: "/".to_string(),
+                name: "x".to_string(),
+                value: "1".to_string(),
+            });
+            app.cookies.push(CookieEntry {
+                domain: "b.com".to_string(),
+                path: "/".to_string(),
+                name: "y".to_string(),
+                value: "2".to_string(),
+            });
+            // Out-of-range index is a no-op.
+            app.delete_cookie(5, cx);
+            assert_eq!(app.cookies.len(), 2);
+            // In-range removes that entry.
+            app.delete_cookie(0, cx);
+            assert_eq!(app.cookies.len(), 1);
+            assert_eq!(app.cookies[0].name, "y");
+        });
+    }
+
+    #[gpui::test]
+    fn clear_cookies_empties_jar(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.cookies.push(CookieEntry {
+                domain: "a.com".to_string(),
+                path: "/".to_string(),
+                name: "x".to_string(),
+                value: "1".to_string(),
+            });
+            app.clear_cookies(cx);
+            assert!(app.cookies.is_empty());
+        });
+    }
+}

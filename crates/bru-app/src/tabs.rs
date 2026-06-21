@@ -334,3 +334,278 @@ impl BruApp {
             .child(card)
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use super::*;
+    use crate::test_support::app_on_temp;
+
+    /// Open three top-level sample requests into tabs; returns their paths in the
+    /// order they were opened (which is also their tab index order).
+    fn open_three(
+        app: &Entity<BruApp>,
+        dir: &std::path::Path,
+        cx: &mut gpui::TestAppContext,
+    ) -> Vec<PathBuf> {
+        let paths = vec![
+            dir.join("Repository Info.bru"),
+            dir.join("New Request.bru"),
+            dir.join("New Request 2.bru"),
+        ];
+        for p in &paths {
+            let p = p.clone();
+            app.update(cx, |app, cx| app.open_request(p, cx));
+        }
+        paths
+    }
+
+    #[gpui::test]
+    fn active_tab_tracks_open_request(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let paths = open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, _| {
+            assert_eq!(app.tabs.len(), 3);
+            // Last-opened tab is active and is what `active_tab` returns.
+            assert_eq!(app.active, Some(2));
+            let got = app.active_tab().map(|t| t.path.clone());
+            assert_eq!(got, Some(paths[2].clone()));
+        });
+    }
+
+    #[gpui::test]
+    fn active_tab_none_when_empty(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, _| {
+            assert!(app.active_tab().is_none());
+            assert!(app.tabs.is_empty());
+            assert!(app.active.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn close_tab_out_of_bounds_is_noop(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, _| {
+            app.close_tab(99);
+            assert_eq!(app.tabs.len(), 3);
+            assert_eq!(app.active, Some(2));
+        });
+    }
+
+    #[gpui::test]
+    fn close_tab_after_active_keeps_active(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, _| {
+            // Active is index 2; close index 0 (before active) -> active shifts down.
+            app.close_tab(0);
+            assert_eq!(app.tabs.len(), 2);
+            assert_eq!(app.active, Some(1));
+        });
+    }
+
+    #[gpui::test]
+    fn close_active_tab_clamps_index(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, _| {
+            // Active = 2 (last). Closing it clamps active to the new last (1).
+            app.close_tab(2);
+            assert_eq!(app.tabs.len(), 2);
+            assert_eq!(app.active, Some(1));
+            // Close the middle one (which is now also active=1).
+            app.close_tab(1);
+            assert_eq!(app.tabs.len(), 1);
+            assert_eq!(app.active, Some(0));
+            // Close the last remaining -> no active.
+            app.close_tab(0);
+            assert!(app.tabs.is_empty());
+            assert!(app.active.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn close_tab_before_active_shifts_active_down(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, _| {
+            // Make the middle tab active, then close index 0.
+            app.active = Some(1);
+            app.close_tab(0);
+            assert_eq!(app.active, Some(0));
+        });
+    }
+
+    #[gpui::test]
+    fn request_close_clean_tab_closes_immediately(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, cx| {
+            app.request_close_tab(1, cx);
+            assert_eq!(app.tabs.len(), 2);
+            // No confirmation modal for a clean tab.
+            assert!(app.confirm_close.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn request_close_dirty_tab_prompts(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let paths = open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, cx| {
+            // Mark tab 1 dirty, then request close -> confirmation, not removal.
+            app.dirty.insert(paths[1].clone());
+            app.request_close_tab(1, cx);
+            assert_eq!(app.tabs.len(), 3);
+            assert_eq!(app.confirm_close, Some(1));
+        });
+    }
+
+    #[gpui::test]
+    fn tab_menu_open_and_close(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, cx| {
+            app.open_tab_menu(1, gpui::point(px(10.), px(20.)), cx);
+            assert!(app.tab_menu.is_some());
+            assert_eq!(app.tab_menu.map(|(i, _)| i), Some(1));
+            app.close_tab_menu(cx);
+            assert!(app.tab_menu.is_none());
+            // Second close is a no-op (take() returns None).
+            app.close_tab_menu(cx);
+            assert!(app.tab_menu.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn close_others_keeps_only_target(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let paths = open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, cx| {
+            // Emulate the "Close Others" menu action around index 0.
+            app.active = Some(0);
+            app.close_tabs_matching(move |j| j != 0, cx);
+            assert_eq!(app.tabs.len(), 1);
+            assert_eq!(app.tabs[0].path, paths[0]);
+            // The context menu is cleared by the bulk close.
+            assert!(app.tab_menu.is_none());
+            assert_eq!(app.status, "Closed tabs");
+        });
+    }
+
+    #[gpui::test]
+    fn close_to_the_right_drops_higher_indices(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let paths = open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, cx| {
+            app.close_tabs_matching(move |j| j > 0, cx);
+            assert_eq!(app.tabs.len(), 1);
+            assert_eq!(app.tabs[0].path, paths[0]);
+        });
+    }
+
+    #[gpui::test]
+    fn close_saved_keeps_dirty_tabs(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let paths = open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, cx| {
+            // Mark one tab dirty; "Close Saved" (target = all) keeps it open.
+            app.dirty.insert(paths[1].clone());
+            app.close_tabs_matching(|_| true, cx);
+            assert_eq!(app.tabs.len(), 1);
+            assert_eq!(app.tabs[0].path, paths[1]);
+            assert!(app.status.contains("Kept 1 unsaved"));
+        });
+    }
+
+    #[gpui::test]
+    fn copy_tab_path_sets_status_and_closes_menu(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, cx| {
+            app.open_tab_menu(2, gpui::point(px(1.), px(2.)), cx);
+            app.copy_tab_path(2, cx);
+            assert!(app.tab_menu.is_none());
+            assert_eq!(app.status, "Copied path to clipboard");
+        });
+    }
+
+    #[gpui::test]
+    fn copy_tab_path_out_of_bounds_no_status(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, cx| {
+            app.status = "unchanged".into();
+            app.copy_tab_path(99, cx);
+            // No tab at 99 -> status is left as-is (only the menu is cleared).
+            assert_eq!(app.status, "unchanged");
+        });
+    }
+
+    #[gpui::test]
+    fn request_close_all_clean_closes_everything(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, cx| {
+            app.request_close_all(cx);
+            assert!(app.tabs.is_empty());
+            assert!(app.active.is_none());
+            assert!(!app.confirm_close_all);
+            assert_eq!(app.status, "Closed all tabs");
+        });
+    }
+
+    #[gpui::test]
+    fn request_close_all_dirty_prompts(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let paths = open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, cx| {
+            app.dirty.insert(paths[0].clone());
+            app.request_close_all(cx);
+            // A dirty tab forces a confirmation rather than closing.
+            assert!(app.confirm_close_all);
+            assert_eq!(app.tabs.len(), 3);
+        });
+    }
+
+    #[gpui::test]
+    fn force_close_all_clears_dirty(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let paths = open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, cx| {
+            app.dirty.insert(paths[0].clone());
+            app.dirty.insert(paths[2].clone());
+            app.confirm_close_all = true;
+            app.force_close_all(cx);
+            assert!(app.tabs.is_empty());
+            assert!(app.active.is_none());
+            assert!(!app.confirm_close_all);
+            // Dirty entries for the closed tabs are cleared.
+            assert!(!app.dirty.contains(&paths[0]));
+            assert!(!app.dirty.contains(&paths[2]));
+            assert_eq!(app.status, "Closed all tabs");
+        });
+    }
+
+    #[gpui::test]
+    fn overlay_builders_run_without_panicking(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let paths = open_three(&app, &tc.dir, cx);
+        app.update(cx, |app, cx| {
+            // tab_menu_overlay: empty div when no menu, populated card when open.
+            let _empty = app.tab_menu_overlay(cx);
+            app.open_tab_menu(0, gpui::point(px(5.), px(6.)), cx);
+            let _menu = app.tab_menu_overlay(cx);
+
+            // close_confirm_overlay: builds the modal when a dirty tab is pending.
+            app.dirty.insert(paths[1].clone());
+            app.confirm_close = Some(1);
+            let _confirm = app.close_confirm_overlay(cx);
+
+            // close_all_overlay always builds (counts dirty tabs).
+            app.confirm_close_all = true;
+            let _all = app.close_all_overlay(cx);
+        });
+    }
+}

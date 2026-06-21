@@ -425,3 +425,49 @@ impl BruApp {
             .child(content)
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use crate::test_support::app_on_temp;
+
+    // `response_bytes` returns None when the active tab has no response (and when
+    // there is no active tab at all). This exercises the early `None` branch.
+    #[gpui::test]
+    fn response_bytes_none_without_response(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        let bytes = app.update(cx, |app, _cx| app.response_bytes());
+        assert!(bytes.is_none());
+    }
+
+    // `copy_response` with nothing to copy hits the `if let Some(..) = None`
+    // early-out: no clipboard write, no status change, no panic.
+    #[gpui::test]
+    fn copy_response_no_response_is_noop(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.copy_response(cx));
+        let bytes = app.update(cx, |app, _cx| app.response_bytes());
+        assert!(bytes.is_none());
+    }
+
+    // `clear_response` with no active tab takes the `self.active == None` branch
+    // and returns without touching any tab.
+    #[gpui::test]
+    fn clear_response_without_active_tab(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| app.clear_response(cx));
+        let bytes = app.update(cx, |app, _cx| app.response_bytes());
+        assert!(bytes.is_none());
+    }
+
+    // After opening a request there IS an active tab, so `clear_response` takes
+    // the `Some(i)` branch (clearing an already-empty response + status).
+    #[gpui::test]
+    fn clear_response_with_active_tab(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let req = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| app.open_request(req, cx));
+        app.update(cx, |app, cx| app.clear_response(cx));
+        let bytes = app.update(cx, |app, _cx| app.response_bytes());
+        assert!(bytes.is_none());
+    }
+}

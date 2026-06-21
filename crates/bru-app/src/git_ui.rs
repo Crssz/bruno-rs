@@ -165,3 +165,110 @@ impl BruApp {
         .detach();
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use crate::test_support::app_on_temp;
+
+    // open_git sets git_open and clears the discard arm; refresh_git_status is
+    // cfg(test)-guarded so no worker thread is spawned.
+    #[gpui::test]
+    fn open_git_sets_flags(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.git_confirm_discard = true;
+            app.open_git(cx);
+            assert!(app.git_open);
+            assert!(!app.git_confirm_discard);
+        });
+    }
+
+    // close_git resets both flags.
+    #[gpui::test]
+    fn close_git_resets_flags(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.open_git(cx);
+            app.git_confirm_discard = true;
+            app.close_git(cx);
+            assert!(!app.git_open);
+            assert!(!app.git_confirm_discard);
+        });
+    }
+
+    // open then close round-trips git_open.
+    #[gpui::test]
+    fn open_close_git_round_trips(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            assert!(!app.git_open);
+            app.open_git(cx);
+            assert!(app.git_open);
+            app.close_git(cx);
+            assert!(!app.git_open);
+        });
+    }
+
+    // An empty / whitespace commit message takes the early-return branch: it
+    // sets the error output and does NOT spawn a worker thread.
+    #[gpui::test]
+    fn git_commit_empty_message_errors(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.git_msg.update(cx, |ed, cx| ed.set_line("   ", cx));
+            app.git_commit(cx);
+            assert_eq!(app.git_output, "Commit message is empty");
+            assert!(!app.git_busy);
+        });
+    }
+
+    // The first git_discard click only arms the confirm flag (no thread spawn).
+    #[gpui::test]
+    fn git_discard_arms_confirm_on_first_click(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            assert!(!app.git_confirm_discard);
+            app.git_discard(cx);
+            assert!(app.git_confirm_discard);
+            assert!(!app.git_busy);
+        });
+    }
+
+    // open_git clears a previously-armed discard confirm.
+    #[gpui::test]
+    fn open_git_clears_armed_discard(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.git_discard(cx);
+            assert!(app.git_confirm_discard);
+            app.open_git(cx);
+            assert!(!app.git_confirm_discard);
+        });
+    }
+
+    // requests_under(root) collects the collection's requests; the Repository
+    // subfolder contains exactly its one request.
+    #[gpui::test]
+    fn requests_under_collects_paths(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        app.update(cx, |app, _| {
+            let root = app.requests_under(&tc.dir);
+            assert!(!root.is_empty());
+            assert!(root.iter().any(|p| p.ends_with("Repository Info.bru")));
+
+            let sub = app.requests_under(&tc.dir.join("Repository"));
+            assert_eq!(sub.len(), 1);
+            assert!(sub[0].ends_with("Create Issue.bru"));
+        });
+    }
+
+    // requests_under on a path that isn't a folder in the tree returns empty.
+    #[gpui::test]
+    fn requests_under_unknown_dir_is_empty(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        app.update(cx, |app, _| {
+            let none = app.requests_under(&tc.dir.join("does-not-exist"));
+            assert!(none.is_empty());
+        });
+    }
+}

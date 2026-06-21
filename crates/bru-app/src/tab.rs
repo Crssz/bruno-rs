@@ -401,3 +401,560 @@ impl OpenTab {
         self.load_active_tab(cx);
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use crate::test_support::app_on_temp;
+    use crate::*;
+
+    /// Write a `.bru` file into the temp collection dir and return its path.
+    fn write_bru(dir: &std::path::Path, name: &str, src: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, src).expect("write bru");
+        p
+    }
+
+    // ---- title() ---------------------------------------------------------
+
+    #[gpui::test]
+    fn title_uses_meta_name(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = tc.dir.join("Repository Info.bru");
+        app.update(cx, |_app, cx| {
+            let tab = OpenTab::load(path, cx).expect("load");
+            // meta.name is "Repository Info".
+            assert_eq!(tab.title(), "Repository Info");
+        });
+    }
+
+    #[gpui::test]
+    fn title_falls_back_to_file_stem(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        // A request with no meta.name: title should be the file stem.
+        let path = write_bru(
+            &tc.dir,
+            "Stemmed.bru",
+            "get {\n  url: http://x\n  body: none\n  auth: none\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let tab = OpenTab::load(path, cx).expect("load");
+            assert_eq!(tab.title(), "Stemmed");
+        });
+    }
+
+    // ---- load(): method/url parsed into the tab ---------------------------
+
+    #[gpui::test]
+    fn load_sets_method_and_url_editor(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = tc.dir.join("Repository Info.bru");
+        app.update(cx, |_app, cx| {
+            let tab = OpenTab::load(path, cx).expect("load");
+            assert_eq!(tab.method, "GET");
+            assert_eq!(
+                tab.url_input.read(cx).text(),
+                "{{baseUrl}}/repos/usebruno/bruno"
+            );
+            // Fresh load defaults to the Body sub-tab, not dirty yet.
+            assert!(tab.req_tab == ReqTab::Body);
+            assert!(tab.text.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn load_returns_none_for_missing_file(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = tc.dir.join("does-not-exist.bru");
+        app.update(cx, |_app, cx| {
+            assert!(OpenTab::load(path, cx).is_none());
+        });
+    }
+
+    // ---- load_active_tab(): JSON body --------------------------------------
+
+    #[gpui::test]
+    fn body_json_loads_into_editor(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = write_bru(
+            &tc.dir,
+            "JsonBody.bru",
+            "post {\n  url: http://x\n  body: json\n  auth: none\n}\n\nbody:json {\n  {\"a\": 1}\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Body, cx);
+            assert!(matches!(tab.edit_kind, EditKind::Body(ref b) if b.as_str() == "body:json"));
+            assert!(tab.body_editor.read(cx).text().contains("\"a\""));
+        });
+    }
+
+    // ---- load_active_tab(): params + path rows -----------------------------
+
+    #[gpui::test]
+    fn params_tab_builds_kv_and_path_rows(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        // params:query + a :token path param in the URL.
+        let path = write_bru(
+            &tc.dir,
+            "Params.bru",
+            "get {\n  url: http://x/:id?q=brun\n  body: none\n  auth: none\n}\n\nparams:query {\n  q: brun\n  sort: stars\n}\n\nparams:path {\n  id: 42\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Params, cx);
+            assert!(matches!(tab.edit_kind, EditKind::Kv(ref b) if b.as_str() == "params:query"));
+            assert_eq!(tab.kv_rows.len(), 2);
+            assert_eq!(tab.kv_rows[0].name.read(cx).text(), "q");
+            assert_eq!(tab.kv_rows[0].value.read(cx).text(), "brun");
+            assert!(tab.kv_rows[0].enabled);
+            // The :id path param surfaces as a path row.
+            assert_eq!(tab.path_rows.len(), 1);
+            assert_eq!(tab.path_rows[0].0, "id");
+            assert_eq!(tab.path_rows[0].1.read(cx).text(), "42");
+        });
+    }
+
+    // ---- load_active_tab(): headers --------------------------------------
+
+    #[gpui::test]
+    fn headers_tab_builds_kv_rows(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = write_bru(
+            &tc.dir,
+            "Headers.bru",
+            "get {\n  url: http://x\n  body: none\n  auth: none\n}\n\nheaders {\n  Accept: application/json\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Headers, cx);
+            assert!(matches!(tab.edit_kind, EditKind::Kv(ref b) if b.as_str() == "headers"));
+            assert_eq!(tab.kv_rows.len(), 1);
+            assert_eq!(tab.kv_rows[0].name.read(cx).text(), "Accept");
+            // Headers never produce path rows.
+            assert!(tab.path_rows.is_empty());
+        });
+    }
+
+    // ---- load_active_tab(): assert (early-return dict via Kv) --------------
+
+    #[gpui::test]
+    fn assert_tab_builds_kv_rows(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = write_bru(
+            &tc.dir,
+            "Assert.bru",
+            "get {\n  url: http://x\n  body: none\n  auth: none\n}\n\nassert {\n  res.status: eq 200\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Assert, cx);
+            assert!(matches!(tab.edit_kind, EditKind::Kv(ref b) if b.as_str() == "assert"));
+            assert_eq!(tab.kv_rows.len(), 1);
+        });
+    }
+
+    // ---- load_active_tab(): vars (two tables) -----------------------------
+
+    #[gpui::test]
+    fn vars_tab_builds_pre_and_post_rows(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = write_bru(
+            &tc.dir,
+            "Vars.bru",
+            "get {\n  url: http://x\n  body: none\n  auth: none\n}\n\nvars:pre-request {\n  a: 1\n}\n\nvars:post-response {\n  @token: res.body.token\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Vars, cx);
+            assert!(matches!(tab.edit_kind, EditKind::Vars));
+            assert_eq!(tab.var_pre_rows.len(), 1);
+            assert_eq!(tab.var_post_rows.len(), 1);
+            assert_eq!(tab.var_pre_rows[0].name.read(cx).text(), "a");
+            // The @ local flag round-trips on the post-response row.
+            assert!(tab.var_post_rows[0].local);
+            assert!(tab.kv_rows.is_empty());
+        });
+    }
+
+    // ---- load_active_tab(): graphql (two editors) -------------------------
+
+    #[gpui::test]
+    fn graphql_body_loads_query_and_vars(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = write_bru(
+            &tc.dir,
+            "Gql.bru",
+            "post {\n  url: http://x\n  body: graphql\n  auth: none\n}\n\nbody:graphql {\n  { viewer { login } }\n}\n\nbody:graphql:vars {\n  {\"k\": 1}\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Body, cx);
+            assert!(matches!(tab.edit_kind, EditKind::GraphQl));
+            assert!(tab.body_editor.read(cx).text().contains("viewer"));
+            assert!(tab.body_vars_editor.read(cx).text().contains("\"k\""));
+        });
+    }
+
+    // ---- load_active_tab(): structured auth form --------------------------
+
+    #[gpui::test]
+    fn auth_tab_builds_bearer_form(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = write_bru(
+            &tc.dir,
+            "Bearer.bru",
+            "get {\n  url: http://x\n  body: none\n  auth: bearer\n}\n\nauth:bearer {\n  token: secret123\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Auth, cx);
+            assert!(
+                matches!(tab.edit_kind, EditKind::AuthForm(ref b) if b.as_str() == "auth:bearer")
+            );
+            assert_eq!(tab.auth_rows.len(), 1);
+            assert_eq!(tab.auth_rows[0].key, "token");
+            assert_eq!(tab.auth_rows[0].editor.read(cx).text(), "secret123");
+        });
+    }
+
+    #[gpui::test]
+    fn auth_tab_builds_basic_form_two_fields(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = write_bru(
+            &tc.dir,
+            "Basic.bru",
+            "get {\n  url: http://x\n  body: none\n  auth: basic\n}\n\nauth:basic {\n  username: bob\n  password: pw\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Auth, cx);
+            assert_eq!(tab.auth_rows.len(), 2);
+            assert_eq!(tab.auth_rows[0].key, "username");
+            assert_eq!(tab.auth_rows[0].editor.read(cx).text(), "bob");
+            assert_eq!(tab.auth_rows[1].key, "password");
+        });
+    }
+
+    // ---- load_active_tab(): script (pre/post), tests, docs, source --------
+
+    #[gpui::test]
+    fn script_tab_toggles_pre_and_post(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = write_bru(
+            &tc.dir,
+            "Scripts.bru",
+            "get {\n  url: http://x\n  body: none\n  auth: none\n}\n\nscript:pre-request {\n  pre()\n}\n\nscript:post-response {\n  post()\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Script, cx);
+            assert!(matches!(tab.edit_kind, EditKind::Body(ref b) if b.as_str() == "script:pre-request"));
+            assert!(tab.body_editor.read(cx).text().contains("pre()"));
+            // Toggle to post-response.
+            tab.switch_script_tab(true, cx);
+            assert!(tab.script_post);
+            assert!(matches!(tab.edit_kind, EditKind::Body(ref b) if b.as_str() == "script:post-response"));
+            assert!(tab.body_editor.read(cx).text().contains("post()"));
+            // Switching to the same sub-tab is a no-op (early return).
+            tab.switch_script_tab(true, cx);
+            assert!(tab.script_post);
+        });
+    }
+
+    #[gpui::test]
+    fn tests_and_docs_and_source_tabs_load(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = write_bru(
+            &tc.dir,
+            "Misc.bru",
+            "get {\n  url: http://x\n  body: none\n  auth: none\n}\n\ntests {\n  test('ok', () => {})\n}\n\ndocs {\n  Hello docs\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Tests, cx);
+            assert!(matches!(tab.edit_kind, EditKind::Body(ref b) if b.as_str() == "tests"));
+            assert!(tab.body_editor.read(cx).text().contains("test("));
+
+            tab.switch_tab(ReqTab::Docs, cx);
+            assert!(matches!(tab.edit_kind, EditKind::Body(ref b) if b.as_str() == "docs"));
+            assert!(tab.body_editor.read(cx).text().contains("Hello docs"));
+
+            tab.switch_tab(ReqTab::Source, cx);
+            assert!(matches!(tab.edit_kind, EditKind::Source));
+            // Source view serializes the whole file.
+            assert!(tab.body_editor.read(cx).text().contains("get {"));
+        });
+    }
+
+    // ---- load_active_tab(): form-urlencoded body (Kv via early return) ----
+
+    #[gpui::test]
+    fn form_urlencoded_body_uses_kv_grid(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = write_bru(
+            &tc.dir,
+            "Form.bru",
+            "post {\n  url: http://x\n  body: formUrlEncoded\n  auth: none\n}\n\nbody:form-urlencoded {\n  a: 1\n  b: 2\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Body, cx);
+            assert!(
+                matches!(tab.edit_kind, EditKind::Kv(ref b) if b.as_str() == "body:form-urlencoded")
+            );
+            assert_eq!(tab.kv_rows.len(), 2);
+        });
+    }
+
+    // ---- load_active_tab(): body mode "none" with no body block -----------
+
+    #[gpui::test]
+    fn body_none_yields_empty_editor(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = tc.dir.join("Repository Info.bru"); // body: none, no body block
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Body, cx);
+            assert!(matches!(tab.edit_kind, EditKind::None));
+            assert!(tab.body_editor.read(cx).text().is_empty());
+        });
+    }
+
+    // ---- apply_edits(): body edit folds back into the file ----------------
+
+    #[gpui::test]
+    fn apply_edits_persists_body_text(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = write_bru(
+            &tc.dir,
+            "EditBody.bru",
+            "post {\n  url: http://x\n  body: json\n  auth: none\n}\n\nbody:json {\n  {\"a\": 1}\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Body, cx);
+            tab.body_editor.update(cx, |ed, cx| {
+                ed.set_text("{\"changed\": true}", Lang::Json, cx)
+            });
+            tab.apply_edits(cx);
+            // The in-memory file now reflects the edited body.
+            assert!(crate::edit::text_block(&tab.file, "body:json").contains("changed"));
+        });
+    }
+
+    #[gpui::test]
+    fn apply_edits_creates_block_on_first_edit(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        // No docs block present; editing the Docs tab should create one.
+        let path = write_bru(
+            &tc.dir,
+            "NoDocs.bru",
+            "get {\n  url: http://x\n  body: none\n  auth: none\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Docs, cx);
+            assert!(tab.file.block("docs").is_none());
+            tab.body_editor
+                .update(cx, |ed, cx| ed.set_text("brand new docs", Lang::Plain, cx));
+            tab.apply_edits(cx);
+            assert_eq!(crate::edit::text_block(&tab.file, "docs"), "brand new docs");
+        });
+    }
+
+    #[gpui::test]
+    fn apply_edits_persists_url_change(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = tc.dir.join("Repository Info.bru");
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.url_input
+                .update(cx, |ed, cx| ed.set_line("http://new.example/path", cx));
+            tab.apply_edits(cx);
+            assert_eq!(
+                crate::edit::method_field(&tab.file, "url").as_deref(),
+                Some("http://new.example/path")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn apply_edits_kv_block_persists_grid(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = write_bru(
+            &tc.dir,
+            "EditHeaders.bru",
+            "get {\n  url: http://x\n  body: none\n  auth: none\n}\n\nheaders {\n  Accept: text/plain\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Headers, cx);
+            // Edit the existing header value via its grid editor.
+            tab.kv_rows[0]
+                .value
+                .update(cx, |ed, cx| ed.set_line("application/json", cx));
+            tab.apply_edits(cx);
+            let rows = crate::edit::kv_block_rows(&tab.file, "headers");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].1, "application/json");
+        });
+    }
+
+    #[gpui::test]
+    fn apply_edits_vars_block_persists(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = write_bru(
+            &tc.dir,
+            "EditVars.bru",
+            "get {\n  url: http://x\n  body: none\n  auth: none\n}\n\nvars:pre-request {\n  a: 1\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Vars, cx);
+            tab.var_pre_rows[0]
+                .value
+                .update(cx, |ed, cx| ed.set_line("99", cx));
+            tab.apply_edits(cx);
+            let rows = crate::edit::var_block_rows(&tab.file, "vars:pre-request");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].1, "99");
+        });
+    }
+
+    #[gpui::test]
+    fn apply_edits_graphql_persists_both_blocks(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = write_bru(
+            &tc.dir,
+            "EditGql.bru",
+            "post {\n  url: http://x\n  body: graphql\n  auth: none\n}\n\nbody:graphql {\n  { a }\n}\n\nbody:graphql:vars {\n  {}\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Body, cx);
+            tab.body_editor
+                .update(cx, |ed, cx| ed.set_text("{ b }", Lang::Plain, cx));
+            tab.body_vars_editor
+                .update(cx, |ed, cx| ed.set_text("{\"v\":2}", Lang::Json, cx));
+            tab.apply_edits(cx);
+            assert!(crate::edit::text_block(&tab.file, "body:graphql").contains("{ b }"));
+            assert!(crate::edit::text_block(&tab.file, "body:graphql:vars").contains("\"v\""));
+        });
+    }
+
+    #[gpui::test]
+    fn apply_edits_auth_form_persists(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = write_bru(
+            &tc.dir,
+            "EditBearer.bru",
+            "get {\n  url: http://x\n  body: none\n  auth: bearer\n}\n\nauth:bearer {\n  token: old\n}\n",
+        );
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Auth, cx);
+            tab.auth_rows[0]
+                .editor
+                .update(cx, |ed, cx| ed.set_line("newtoken", cx));
+            tab.apply_edits(cx);
+            assert_eq!(
+                crate::edit::kv_block_rows(&tab.file, "auth:bearer")[0].1,
+                "newtoken"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn apply_edits_source_reparses_file(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let path = tc.dir.join("Repository Info.bru");
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            tab.switch_tab(ReqTab::Source, cx);
+            // Replace the whole source with a different request.
+            let new_src = "meta {\n  name: Renamed\n}\n\nget {\n  url: http://reparsed\n  body: none\n  auth: none\n}\n";
+            tab.body_editor
+                .update(cx, |ed, cx| ed.set_text(new_src, Lang::Plain, cx));
+            tab.apply_edits(cx);
+            // The reparse replaced the in-memory file (meta survives untouched by
+            // the later set_active_url, which only rewrites the URL).
+            assert_eq!(tab.file.request_name(), Some("Renamed"));
+            // After the reparse, apply_edits still folds the (unchanged) URL bar
+            // back in, so the url reflects the url_input value, not the source's.
+            assert_eq!(
+                crate::edit::method_field(&tab.file, "url").as_deref(),
+                Some("{{baseUrl}}/repos/usebruno/bruno")
+            );
+        });
+    }
+
+    // ---- load_text(): plain-text tabs -------------------------------------
+
+    #[gpui::test]
+    fn load_text_js_file_into_single_editor(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let p = tc.dir.join("helper.js");
+        std::fs::write(&p, "module.exports = 1;\n").expect("write js");
+        app.update(cx, |_app, cx| {
+            let tab = OpenTab::load_text(p.clone(), cx).expect("load_text");
+            assert!(tab.text.is_some());
+            assert_eq!(
+                tab.text.as_ref().unwrap().read(cx).text(),
+                "module.exports = 1;\n"
+            );
+            // The file stem drives the title for a text tab.
+            assert_eq!(tab.title(), "helper");
+        });
+    }
+
+    #[gpui::test]
+    fn load_text_json_file(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let p = tc.dir.join("data.json");
+        std::fs::write(&p, "{\"x\": 1}").expect("write json");
+        app.update(cx, |_app, cx| {
+            let tab = OpenTab::load_text(p, cx).expect("load_text");
+            assert!(tab.text.is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn load_text_returns_none_for_missing(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let p = tc.dir.join("nope.js");
+        app.update(cx, |_app, cx| {
+            assert!(OpenTab::load_text(p, cx).is_none());
+        });
+    }
+
+    // ---- apply_edits(): no-op for text tabs --------------------------------
+
+    #[gpui::test]
+    fn apply_edits_noop_for_text_tab(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let p = tc.dir.join("noop.js");
+        std::fs::write(&p, "const a = 1;\n").expect("write js");
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load_text(p, cx).expect("load_text");
+            // apply_edits returns early (file stays the empty placeholder).
+            tab.apply_edits(cx);
+            assert!(tab.file.blocks.is_empty());
+        });
+    }
+
+    // ---- switch_tab cycles through every ReqTab without panicking ---------
+
+    #[gpui::test]
+    fn switch_through_all_req_tabs(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        // A rich file so several branches actually populate.
+        let path = tc.dir.join("Repository").join("Create Issue.bru");
+        app.update(cx, |_app, cx| {
+            let mut tab = OpenTab::load(path, cx).expect("load");
+            for t in ReqTab::ALL {
+                tab.switch_tab(t, cx);
+                assert!(tab.req_tab == t);
+            }
+        });
+    }
+}

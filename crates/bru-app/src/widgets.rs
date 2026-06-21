@@ -189,3 +189,95 @@ mod tests {
         assert_eq!(status_color(0), theme::red());
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use super::*;
+
+    // Each widget builder below is a pure `Div`-builder: calling it runs the
+    // whole construction body (and the `theme::*` / `icons::icon` / `short_method`
+    // / `method_color` calls nested inside). `Div` has no useful equality or
+    // Debug, so we exercise the builders for coverage and discard the element.
+    // The existing `mod tests` already covers the `status_color` buckets; here we
+    // add the remaining builders plus both branches of each `when(..)` toggle.
+
+    #[test]
+    fn chip_builds() {
+        let _ = chip("Save");
+        let _ = chip("");
+    }
+
+    #[test]
+    fn icon_chip_builds() {
+        let _ = icon_chip("GET");
+        let _ = icon_chip("");
+    }
+
+    #[test]
+    fn svg_chip_builds() {
+        // Goes through `icons::icon(name)` for a known and an unknown name.
+        let _ = svg_chip("folder");
+        let _ = svg_chip("chevron-down");
+        let _ = svg_chip("does-not-exist");
+    }
+
+    #[test]
+    fn req_row_active_and_inactive() {
+        // active=true takes the `.when(active, ..)` bg branch; active=false takes
+        // the `.when(!active, ..)` hover branch. depth feeds the pl() math and
+        // method feeds short_method/method_color.
+        let _ = req_row("GET", "List users", true, 0);
+        let _ = req_row("POST", "Create user", false, 2);
+        let _ = req_row("DELETE", "Remove", false, 1);
+        let _ = req_row("", "No method", true, 3);
+    }
+
+    #[test]
+    fn folder_row_collapsed_and_expanded() {
+        // collapsed=true -> "chevron-right", collapsed=false -> "chevron-down".
+        let _ = folder_row("api", 0, true);
+        let _ = folder_row("nested", 2, false);
+    }
+
+    #[test]
+    fn check_box_on_and_off() {
+        // on=true takes the `.when(on, ..)` filled-checkmark branch; off skips it.
+        let _ = check_box(true);
+        let _ = check_box(false);
+    }
+
+    #[test]
+    fn ghost_btn_builds() {
+        let _ = ghost_btn("Cancel");
+        let _ = ghost_btn("");
+    }
+
+    #[test]
+    fn solid_btn_builds() {
+        let _ = solid_btn("Send");
+        let _ = solid_btn("");
+    }
+
+    #[test]
+    fn tab_chip_active_and_inactive() {
+        // active=true -> text color + underline branch; active=false -> muted +
+        // hover branch.
+        let _ = tab_chip("Body", true);
+        let _ = tab_chip("Headers", false);
+    }
+
+    #[test]
+    fn status_color_boundary_values() {
+        // Boundaries of each bucket, complementing the existing mid-range test.
+        assert_eq!(status_color(200), theme::green());
+        assert_eq!(status_color(299), theme::green());
+        assert_eq!(status_color(300), theme::blue());
+        assert_eq!(status_color(399), theme::blue());
+        assert_eq!(status_color(400), theme::orange());
+        assert_eq!(status_color(499), theme::orange());
+        // Below 200 and at/above 500 fall through to red.
+        assert_eq!(status_color(199), theme::red());
+        assert_eq!(status_color(500), theme::red());
+        assert_eq!(status_color(u16::MAX), theme::red());
+    }
+}

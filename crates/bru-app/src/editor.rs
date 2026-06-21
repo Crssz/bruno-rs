@@ -2097,7 +2097,10 @@ mod tests {
         let ed = cx.new(|cx| super::CodeEditor::new(cx, "hello"));
         assert_eq!(ed.update(cx, |ed, _| ed.text().to_string()), "hello");
         ed.update(cx, |ed, cx| ed.set_text("world\nsecond", Lang::Plain, cx));
-        assert_eq!(ed.update(cx, |ed, _| ed.text().to_string()), "world\nsecond");
+        assert_eq!(
+            ed.update(cx, |ed, _| ed.text().to_string()),
+            "world\nsecond"
+        );
     }
 
     #[test]
@@ -2258,5 +2261,558 @@ mod tests {
         assert_eq!(hits.len(), 2);
         // 'é' is 2 bytes, so "au" after it starts at byte 6, not 5.
         assert_eq!(hits[0], 6..8);
+    }
+}
+
+#[cfg(test)]
+mod cov_tests {
+    use super::*;
+    use gpui::AppContext;
+
+    // ── constructors / flags ─────────────────────────────────────────────────
+    #[gpui::test]
+    fn new_defaults_are_plain_editable(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "hello"));
+        e.update(cx, |e, _| {
+            assert_eq!(e.text(), "hello");
+            assert!(!e.single_line);
+            assert!(!e.masked);
+            assert!(!e.read_only);
+            assert!(e.lang == Lang::Plain);
+        });
+    }
+
+    #[gpui::test]
+    fn single_line_sets_flag(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::single_line(cx, "u"));
+        e.update(cx, |e, _| {
+            assert!(e.single_line);
+            assert!(!e.masked);
+        });
+    }
+
+    #[gpui::test]
+    fn masked_line_sets_both_flags(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::masked_line(cx, "secret"));
+        e.update(cx, |e, _| {
+            assert!(e.single_line);
+            assert!(e.masked);
+            assert_eq!(e.text(), "secret");
+        });
+    }
+
+    #[gpui::test]
+    fn read_only_ctor_sets_flag(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::read_only(cx, "resp"));
+        e.update(cx, |e, _| assert!(e.read_only));
+    }
+
+    #[gpui::test]
+    fn set_masked_toggles(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::single_line(cx, "x"));
+        e.update(cx, |e, cx| e.set_masked(true, cx));
+        e.update(cx, |e, _| assert!(e.masked));
+        // No-op branch (already true) is also exercised.
+        e.update(cx, |e, cx| e.set_masked(true, cx));
+        e.update(cx, |e, cx| e.set_masked(false, cx));
+        e.update(cx, |e, _| assert!(!e.masked));
+    }
+
+    // ── set_text / set_line / highlight ──────────────────────────────────────
+    #[gpui::test]
+    fn set_text_json_populates_spans_and_resets_selection(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, ""));
+        e.update(cx, |e, cx| e.set_text("{\"a\": 1}", Lang::Json, cx));
+        e.update(cx, |e, _| {
+            assert_eq!(e.text(), "{\"a\": 1}");
+            assert!(e.lang == Lang::Json);
+            assert!(!e.spans.is_empty(), "json should highlight");
+            assert_eq!(e.selected_range, 0..0);
+            assert!(e.undo_stack.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn set_text_javascript_populates_spans(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, ""));
+        e.update(cx, |e, cx| e.set_text("const x = 1;", Lang::JavaScript, cx));
+        e.update(cx, |e, _| {
+            assert!(e.lang == Lang::JavaScript);
+            assert!(!e.spans.is_empty(), "js should highlight");
+        });
+    }
+
+    #[gpui::test]
+    fn set_text_plain_clears_spans(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, ""));
+        e.update(cx, |e, cx| e.set_text("const x = 1;", Lang::JavaScript, cx));
+        e.update(cx, |e, cx| e.set_text("plain again", Lang::Plain, cx));
+        e.update(cx, |e, _| assert!(e.spans.is_empty()));
+    }
+
+    #[gpui::test]
+    fn set_line_keeps_plain(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::single_line(cx, "a"));
+        e.update(cx, |e, cx| e.set_line("https://x", cx));
+        e.update(cx, |e, _| {
+            assert_eq!(e.text(), "https://x");
+            assert!(e.lang == Lang::Plain);
+        });
+    }
+
+    // ── selection helpers ────────────────────────────────────────────────────
+    #[gpui::test]
+    fn do_select_all_spans_whole_buffer(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "abcde"));
+        e.update(cx, |e, cx| e.do_select_all(cx));
+        e.update(cx, |e, _| {
+            assert_eq!(e.selected_range, 0..5);
+            assert!(!e.selection_reversed);
+        });
+    }
+
+    #[gpui::test]
+    fn select_byte_range_clamps_to_len(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "abc"));
+        e.update(cx, |e, cx| e.select_byte_range(1..99, cx));
+        e.update(cx, |e, _| assert_eq!(e.selected_range, 1..3));
+    }
+
+    #[gpui::test]
+    fn move_to_and_cursor(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "abcdef"));
+        e.update(cx, |e, cx| e.move_to(3, cx));
+        e.update(cx, |e, _| {
+            assert_eq!(e.cursor(), 3);
+            assert_eq!(e.selected_range, 3..3);
+        });
+    }
+
+    #[gpui::test]
+    fn select_to_then_reverse(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "abcdef"));
+        e.update(cx, |e, cx| e.move_to(3, cx));
+        // Extend forward, then back past the anchor to flip `selection_reversed`.
+        e.update(cx, |e, cx| e.select_to(5, cx));
+        e.update(cx, |e, _| {
+            assert_eq!(e.selected_range, 3..5);
+            assert!(!e.selection_reversed);
+            assert_eq!(e.cursor(), 5);
+        });
+        e.update(cx, |e, cx| e.select_to(1, cx));
+        e.update(cx, |e, _| {
+            assert_eq!(e.selected_range, 1..3);
+            assert!(e.selection_reversed);
+            assert_eq!(e.cursor(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn set_selection_head_no_notify(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "abcdef"));
+        e.update(cx, |e, cx| e.move_to(2, cx));
+        e.update(cx, |e, _| {
+            e.set_selection_head(4);
+            assert_eq!(e.selected_range, 2..4);
+            // Move head before the anchor -> reversed.
+            e.set_selection_head(0);
+            assert!(e.selection_reversed);
+            assert_eq!(e.selected_range, 0..2);
+        });
+    }
+
+    // ── line / offset math ───────────────────────────────────────────────────
+    #[gpui::test]
+    fn line_math(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "ab\ncde\nf"));
+        e.update(cx, |e, _| {
+            assert_eq!(e.line_starts(), vec![0, 3, 7]);
+            assert_eq!(e.line_of(0), 0);
+            assert_eq!(e.line_of(4), 1);
+            assert_eq!(e.line_of(8), 2);
+            assert_eq!(e.line_start(5), 3);
+            assert_eq!(e.line_end(3), 6); // end of "cde"
+            assert_eq!(e.line_end(7), 8); // last line, no newline -> len
+        });
+    }
+
+    #[gpui::test]
+    fn grapheme_steps(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "abc"));
+        e.update(cx, |e, _| {
+            assert_eq!(e.next_grapheme(0), 1);
+            assert_eq!(e.next_grapheme(3), 3); // at end clamps
+            assert_eq!(e.prev_grapheme(2), 1);
+            assert_eq!(e.prev_grapheme(0), 0); // at start clamps
+        });
+    }
+
+    #[gpui::test]
+    fn word_steps_via_methods(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "foo bar"));
+        e.update(cx, |e, _| {
+            assert_eq!(e.next_word(0), 3);
+            assert_eq!(e.prev_word(7), 4);
+        });
+    }
+
+    #[gpui::test]
+    fn vertical_keeps_column(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "abcd\nef\nghij"));
+        e.update(cx, |e, cx| e.move_to(2, cx)); // col 2 on line 0
+        e.update(cx, |e, _| {
+            // Down to line 1 ("ef", len 2) clamps col to line end.
+            assert_eq!(e.vertical(1), 7);
+        });
+        e.update(cx, |e, cx| e.move_to(2, cx));
+        e.update(cx, |e, _| {
+            // Up from line 0 clamps to line 0.
+            assert_eq!(e.vertical(-1), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn clamp_snaps_to_char_boundaries(cx: &mut gpui::TestAppContext) {
+        // 'é' is 2 bytes at offset 0..2.
+        let e = cx.new(|cx| CodeEditor::new(cx, "é-x"));
+        e.update(cx, |e, _| {
+            // Mid-char start snaps back to 0, end stays valid.
+            let r = e.clamp(1..3);
+            assert!(e.text().is_char_boundary(r.start));
+            assert!(e.text().is_char_boundary(r.end));
+            // Out-of-range end clamps to len.
+            let r2 = e.clamp(0..999);
+            assert_eq!(r2.end, e.text().len());
+        });
+    }
+
+    // ── editing via replace / undo state ─────────────────────────────────────
+    #[gpui::test]
+    fn replace_inserts_and_tracks_undo(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "abc"));
+        e.update(cx, |e, cx| e.move_to(3, cx));
+        // A newline insert is not a coalescing single-insert -> pushes undo.
+        e.update(cx, |e, cx| e.replace("\n", cx));
+        e.update(cx, |e, _| {
+            assert_eq!(e.text(), "abc\n");
+            assert_eq!(e.undo_stack.len(), 1);
+            assert!(e.coalesce_pos.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn replace_coalesces_single_chars(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, ""));
+        e.update(cx, |e, cx| {
+            e.replace("a", cx);
+            e.replace("b", cx);
+            e.replace("c", cx);
+        });
+        e.update(cx, |e, _| {
+            assert_eq!(e.text(), "abc");
+            // Contiguous single inserts collapse into one undo entry.
+            assert_eq!(e.undo_stack.len(), 1);
+            assert_eq!(e.coalesce_pos, Some(3));
+        });
+    }
+
+    #[gpui::test]
+    fn replace_single_line_strips_newlines(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::single_line(cx, ""));
+        e.update(cx, |e, cx| e.replace("a\nb\nc", cx));
+        e.update(cx, |e, _| assert_eq!(e.text(), "a b c"));
+    }
+
+    #[gpui::test]
+    fn replace_noop_on_read_only(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::read_only(cx, "fixed"));
+        e.update(cx, |e, cx| e.replace("x", cx));
+        e.update(cx, |e, _| assert_eq!(e.text(), "fixed"));
+    }
+
+    #[gpui::test]
+    fn restore_clamps_selection(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "original"));
+        e.update(cx, |e, cx| e.restore("hi".to_string(), 5..9, cx));
+        e.update(cx, |e, _| {
+            assert_eq!(e.text(), "hi");
+            assert_eq!(e.selected_range, 2..2); // clamped to new len
+        });
+    }
+
+    // ── clipboard ────────────────────────────────────────────────────────────
+    #[gpui::test]
+    fn copy_then_paste_roundtrips(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "hello world"));
+        e.update(cx, |e, cx| e.select_byte_range(0..5, cx));
+        e.update(cx, |e, cx| e.do_copy(cx));
+        // Paste over the rest of the selection-free buffer.
+        e.update(cx, |e, cx| e.move_to(11, cx));
+        e.update(cx, |e, cx| e.do_paste(cx));
+        e.update(cx, |e, _| assert_eq!(e.text(), "hello worldhello"));
+    }
+
+    #[gpui::test]
+    fn cut_removes_and_copies(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "abcdef"));
+        e.update(cx, |e, cx| e.select_byte_range(2..4, cx));
+        e.update(cx, |e, cx| e.do_cut(cx));
+        e.update(cx, |e, _| assert_eq!(e.text(), "abef"));
+        // The cut text is now on the clipboard -> paste it back.
+        e.update(cx, |e, cx| e.do_paste(cx));
+        e.update(cx, |e, _| assert_eq!(e.text(), "abcdef"));
+    }
+
+    #[gpui::test]
+    fn copy_empty_selection_is_noop(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "abc"));
+        // Empty selection -> nothing written; no panic.
+        e.update(cx, |e, cx| e.do_copy(cx));
+        e.update(cx, |e, cx| e.do_cut(cx));
+        e.update(cx, |e, _| assert_eq!(e.text(), "abc"));
+    }
+
+    // ── format ───────────────────────────────────────────────────────────────
+    #[gpui::test]
+    fn do_format_json_ok(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, ""));
+        e.update(cx, |e, cx| e.set_text("{\"a\":1}", Lang::Json, cx));
+        let r = e.update(cx, |e, cx| e.do_format(cx));
+        assert!(r.is_ok());
+        e.update(cx, |e, _| assert!(e.text().contains("  \"a\": 1")));
+    }
+
+    #[gpui::test]
+    fn do_format_js_ok(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, ""));
+        e.update(cx, |e, cx| e.set_text("const x=1", Lang::JavaScript, cx));
+        let r = e.update(cx, |e, cx| e.do_format(cx));
+        assert!(r.is_ok());
+    }
+
+    #[gpui::test]
+    fn do_format_plain_err(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "plain"));
+        let r = e.update(cx, |e, cx| e.do_format(cx));
+        assert!(r.is_err());
+    }
+
+    #[gpui::test]
+    fn do_format_invalid_json_err_keeps_buffer(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, ""));
+        e.update(cx, |e, cx| e.set_text("{not json", Lang::Json, cx));
+        let r = e.update(cx, |e, cx| e.do_format(cx));
+        assert!(r.is_err());
+        e.update(cx, |e, _| assert_eq!(e.text(), "{not json"));
+    }
+
+    #[gpui::test]
+    fn do_format_read_only_err(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::read_only(cx, "x"));
+        let r = e.update(cx, |e, cx| e.do_format(cx));
+        assert!(r.is_err());
+    }
+
+    // ── find state (window-free paths) ───────────────────────────────────────
+    #[gpui::test]
+    fn find_open_false_when_unopened(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "abc"));
+        e.update(cx, |e, _| assert!(!e.find_open()));
+    }
+
+    #[gpui::test]
+    fn close_find_noop_when_none(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "abc"));
+        // Find was never opened -> the `_ => return` branch, no panic.
+        e.update(cx, |e, cx| e.close_find(cx));
+        e.update(cx, |e, _| assert!(!e.find_open()));
+    }
+
+    #[gpui::test]
+    fn set_find_scroll_stores_handle(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "abc"));
+        e.update(cx, |e, _| {
+            e.set_find_scroll(ScrollHandle::new());
+            assert!(e.find_scroll.is_some());
+        });
+    }
+
+    // ── goto target detection ────────────────────────────────────────────────
+    #[gpui::test]
+    fn goto_target_var(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "GET {{baseUrl}}/x"));
+        e.update(cx, |e, _| {
+            // Offset inside {{baseUrl}}.
+            match e.goto_target_at(6) {
+                Some(GotoTarget::Var(n)) => assert_eq!(n, "baseUrl"),
+                _ => panic!("expected Var target"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn goto_target_module_require(cx: &mut gpui::TestAppContext) {
+        let src = "const h = require('./helper.js');";
+        let e = cx.new(|cx| CodeEditor::new(cx, ""));
+        e.update(cx, |e, cx| e.set_text(src, Lang::JavaScript, cx));
+        let off = src.find("./helper").unwrap() + 1;
+        e.update(cx, |e, _| match e.goto_target_at(off) {
+            Some(GotoTarget::Module { spec, symbol }) => {
+                assert_eq!(spec, "./helper.js");
+                assert!(symbol.is_none());
+            }
+            _ => panic!("expected Module target"),
+        });
+    }
+
+    #[gpui::test]
+    fn goto_target_imported_symbol(cx: &mut gpui::TestAppContext) {
+        let src = "const { hook } = require('./hook')\nhook();";
+        let e = cx.new(|cx| CodeEditor::new(cx, ""));
+        e.update(cx, |e, cx| e.set_text(src, Lang::JavaScript, cx));
+        // Offset on the `hook()` call usage (an imported identifier).
+        let off = src.rfind("hook").unwrap() + 1;
+        e.update(cx, |e, _| match e.goto_target_at(off) {
+            Some(GotoTarget::Module { spec, symbol }) => {
+                assert_eq!(spec, "./hook");
+                assert_eq!(symbol.as_deref(), Some("hook"));
+            }
+            _ => panic!("expected Module target for imported symbol"),
+        });
+    }
+
+    #[gpui::test]
+    fn goto_target_none_on_plain_word(cx: &mut gpui::TestAppContext) {
+        // Plain lang, no var/require -> the JS branch returns early -> None.
+        let e = cx.new(|cx| CodeEditor::new(cx, "just some words"));
+        e.update(cx, |e, _| assert!(e.goto_target_at(2).is_none()));
+    }
+
+    #[gpui::test]
+    fn word_at_recognises_identifiers(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "foo + _bar"));
+        e.update(cx, |e, _| {
+            assert_eq!(e.word_at(1).as_deref(), Some("foo"));
+            assert_eq!(e.word_at(7).as_deref(), Some("_bar"));
+            // On the '+' (not an identifier start) -> None.
+            assert!(e.word_at(4).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn var_at_method(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "a {{id}} b"));
+        e.update(cx, |e, _| {
+            assert_eq!(e.var_at(4).as_deref(), Some("id"));
+            assert!(e.var_at(0).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn require_spec_at_method(cx: &mut gpui::TestAppContext) {
+        let src = "const a = require('./m.js')";
+        let e = cx.new(|cx| CodeEditor::new(cx, src));
+        let off = src.find("./m").unwrap() + 1;
+        e.update(cx, |e, _| {
+            assert_eq!(e.require_spec_at(off).as_deref(), Some("./m.js"));
+            assert!(e.require_spec_at(0).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn word_range_at_method(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "const fooBar = 2"));
+        e.update(cx, |e, _| {
+            let r = e.word_range_at(8);
+            assert_eq!(&e.text()[r], "fooBar");
+        });
+    }
+
+    // ── index_for_position with no layout cache ──────────────────────────────
+    #[gpui::test]
+    fn index_for_position_without_layout_is_zero(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "abc"));
+        // No paint has happened -> bounds is None / line_layouts empty -> 0.
+        e.update(cx, |e, _| {
+            assert_eq!(e.index_for_position(point(px(10.), px(5.))), 0)
+        });
+    }
+
+    // ── auto_scroll_tick guards ──────────────────────────────────────────────
+    #[gpui::test]
+    fn auto_scroll_tick_false_for_multiline(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::new(cx, "abc"));
+        // Multi-line editor -> early return false.
+        e.update(cx, |e, _| assert!(!e.auto_scroll_tick()));
+    }
+
+    #[gpui::test]
+    fn auto_scroll_tick_false_without_bounds(cx: &mut gpui::TestAppContext) {
+        let e = cx.new(|cx| CodeEditor::single_line(cx, "abcdef"));
+        // Single-line but no painted bounds/drag_pos -> returns false.
+        e.update(cx, |e, _| assert!(!e.auto_scroll_tick()));
+    }
+
+    // ── free-fn helpers not covered by the existing `tests` module ───────────
+    #[test]
+    fn mask_str_preserves_byte_lengths() {
+        // ASCII -> '*', newline passes through, 2-byte 'é' -> 2-byte middle dot.
+        let out = mask_str("ab\né");
+        assert_eq!(out.chars().filter(|c| *c == '*').count(), 2);
+        assert!(out.contains('\n'));
+        // Every masked char keeps the original UTF-8 length so byte offsets stay valid.
+        assert_eq!(out.len(), "ab\né".len());
+    }
+
+    #[test]
+    fn build_line_runs_empty_line() {
+        let font = gpui::Font {
+            family: "monospace".into(),
+            features: gpui::FontFeatures::default(),
+            fallbacks: None,
+            weight: gpui::FontWeight::default(),
+            style: gpui::FontStyle::default(),
+        };
+        let runs = build_line_runs("", 0, &[], &font, gpui::black());
+        assert!(runs.is_empty());
+    }
+
+    #[test]
+    fn build_line_runs_default_color_no_spans() {
+        let font = gpui::Font {
+            family: "monospace".into(),
+            features: gpui::FontFeatures::default(),
+            fallbacks: None,
+            weight: gpui::FontWeight::default(),
+            style: gpui::FontStyle::default(),
+        };
+        // No spans -> a single run covering the whole line in `default`.
+        let runs = build_line_runs("hello", 0, &[], &font, gpui::black());
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].len, 5);
+    }
+
+    #[test]
+    fn binds_identifier_word_boundaries() {
+        assert!(binds_identifier("const { hook }", "hook"));
+        assert!(binds_identifier("const hook ", "hook"));
+        // A substring inside a larger identifier must not bind.
+        assert!(!binds_identifier("const hooker", "hook"));
+    }
+
+    #[test]
+    fn require_spec_in_line_variants() {
+        assert_eq!(
+            require_spec_in_line(" = require('./a')").as_deref(),
+            Some("./a")
+        );
+        assert_eq!(
+            require_spec_in_line(" = require(\"./b\")").as_deref(),
+            Some("./b")
+        );
+        // No require call.
+        assert_eq!(require_spec_in_line(" = foo()"), None);
+        // require( followed by a non-quote.
+        assert_eq!(require_spec_in_line(" = require(x)"), None);
     }
 }

@@ -612,3 +612,384 @@ mod block_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use super::*;
+
+    // ---- url / method on the active verb block ------------------------------
+
+    #[test]
+    fn set_active_url_updates_existing_entry() {
+        let mut file = bru_lang::parse("get {\n  url: https://old\n}\n").expect("parse");
+        set_active_url(&mut file, "  https://new  ");
+        // The value is trimmed.
+        assert_eq!(file.dict_value("get", "url"), Some("https://new"));
+    }
+
+    #[test]
+    fn set_active_url_inserts_when_absent() {
+        let mut file = bru_lang::parse("get {\n  body: none\n}\n").expect("parse");
+        set_active_url(&mut file, "https://x");
+        assert_eq!(file.dict_value("get", "url"), Some("https://x"));
+    }
+
+    #[test]
+    fn set_active_url_noop_without_method_block() {
+        let mut file = bru_lang::parse("meta {\n  name: x\n}\n").expect("parse");
+        set_active_url(&mut file, "https://x");
+        assert!(file.block("params:path").is_none());
+        // No method block means no url entry materialized anywhere.
+        assert!(file.block("get").is_none());
+    }
+
+    #[test]
+    fn set_method_renames_verb_block() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        set_method(&mut file, "POST");
+        assert!(file.block("post").is_some());
+        assert!(file.block("get").is_none());
+    }
+
+    #[test]
+    fn set_method_ignores_non_standard_verb() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        set_method(&mut file, "frobnicate");
+        // Unknown verb: block name is unchanged.
+        assert!(file.block("get").is_some());
+    }
+
+    #[test]
+    fn set_method_noop_without_method_block() {
+        let mut file = bru_lang::parse("meta {\n  name: x\n}\n").expect("parse");
+        set_method(&mut file, "post");
+        assert!(file.block("post").is_none());
+        assert!(file.block("get").is_none());
+    }
+
+    // ---- method field round trip --------------------------------------------
+
+    #[test]
+    fn set_and_read_method_field() {
+        let mut file = bru_lang::parse("post {\n  url: https://x\n}\n").expect("parse");
+        assert_eq!(method_field(&file, "body"), None);
+        set_method_field(&mut file, "body", "json");
+        assert_eq!(method_field(&file, "body"), Some("json".to_string()));
+        // Updating an existing entry preserves it (set_inline_entry update branch).
+        set_method_field(&mut file, "body", "text");
+        assert_eq!(method_field(&file, "body"), Some("text".to_string()));
+    }
+
+    #[test]
+    fn set_method_field_noop_without_method_block() {
+        let mut file = bru_lang::parse("meta {\n  name: x\n}\n").expect("parse");
+        set_method_field(&mut file, "body", "json");
+        assert_eq!(method_field(&file, "body"), None);
+    }
+
+    #[test]
+    fn method_field_none_when_missing() {
+        let file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        assert_eq!(method_field(&file, "auth"), None);
+    }
+
+    // ---- path params ---------------------------------------------------------
+
+    #[test]
+    fn sync_path_params_adds_tokens_and_skips_ports() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        // :8080 is a port (numeric) and must be skipped; :id and :userId are params.
+        sync_path_params(&mut file, "https://h:8080/u/:userId/p/:id");
+        let rows = kv_block_rows(&file, "params:path");
+        let names: Vec<&str> = rows.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["userId", "id"]);
+        // New tokens get empty values.
+        assert!(rows.iter().all(|(_, v, _)| v.is_empty()));
+    }
+
+    #[test]
+    fn sync_path_params_keeps_existing_value_and_drops_removed() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        sync_path_params(&mut file, "https://h/:a/:b");
+        apply_path_values(
+            &mut file,
+            &[
+                ("a".to_string(), "av".to_string()),
+                ("b".to_string(), "bv".to_string()),
+            ],
+        );
+        // Now drop :b, keep :a, add :c.
+        sync_path_params(&mut file, "https://h/:a/:c");
+        let rows = kv_block_rows(&file, "params:path");
+        let names: Vec<&str> = rows.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["a", "c"]);
+        // Existing value for :a survives reconciliation.
+        let a = rows.iter().find(|(n, _, _)| n == "a").expect("a row");
+        assert_eq!(a.1, "av");
+    }
+
+    #[test]
+    fn sync_path_params_removes_block_when_no_tokens() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        sync_path_params(&mut file, "https://h/:a");
+        assert!(file.block("params:path").is_some());
+        // URL with no tokens -> the now-empty block is removed.
+        sync_path_params(&mut file, "https://h/plain");
+        assert!(file.block("params:path").is_none());
+    }
+
+    #[test]
+    fn sync_path_params_noop_when_no_tokens_and_no_block() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        sync_path_params(&mut file, "https://h/plain");
+        assert!(file.block("params:path").is_none());
+    }
+
+    #[test]
+    fn sync_path_params_ignores_query_segment() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        // Tokens after `?` (the query) must not be treated as path params.
+        sync_path_params(&mut file, "https://h/:a?x=:b");
+        let rows = kv_block_rows(&file, "params:path");
+        let names: Vec<&str> = rows.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["a"]);
+    }
+
+    #[test]
+    fn sync_path_params_dedupes_repeated_token() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        sync_path_params(&mut file, "https://h/:a/:a");
+        let rows = kv_block_rows(&file, "params:path");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "a");
+    }
+
+    #[test]
+    fn apply_path_values_noop_without_block() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        // No params:path block: nothing to write to, must not panic or create.
+        apply_path_values(&mut file, &[("a".to_string(), "v".to_string())]);
+        assert!(file.block("params:path").is_none());
+    }
+
+    #[test]
+    fn apply_path_values_ignores_unknown_names() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        sync_path_params(&mut file, "https://h/:a");
+        // "zzz" doesn't match an entry: the existing "a" entry is left empty.
+        apply_path_values(&mut file, &[("zzz".to_string(), "v".to_string())]);
+        let rows = kv_block_rows(&file, "params:path");
+        assert_eq!(rows[0].0, "a");
+        assert_eq!(rows[0].1, "");
+    }
+
+    // ---- kv block (headers/params: no local flag) ---------------------------
+
+    #[test]
+    fn kv_block_rows_reads_enabled_flag() {
+        let src = "headers {\n  Accept: application/json\n  ~X-Skip: 1\n}\n";
+        let file = bru_lang::parse(src).expect("parse");
+        let rows = kv_block_rows(&file, "headers");
+        assert_eq!(rows[0], ("Accept".into(), "application/json".into(), true));
+        assert_eq!(rows[1], ("X-Skip".into(), "1".into(), false));
+    }
+
+    #[test]
+    fn kv_block_rows_empty_for_absent_or_non_dict() {
+        let file = bru_lang::parse("body:json {\n  {}\n}\n").expect("parse");
+        // Absent block.
+        assert!(kv_block_rows(&file, "headers").is_empty());
+        // Present but Text content, not Dict.
+        assert!(kv_block_rows(&file, "body:json").is_empty());
+    }
+
+    #[test]
+    fn set_kv_block_creates_and_drops_blank_names() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        set_kv_block(
+            &mut file,
+            "headers",
+            &[
+                ("Accept".into(), "text/plain".into(), true),
+                ("   ".into(), "dropme".into(), true),
+            ],
+        );
+        let rows = kv_block_rows(&file, "headers");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "Accept");
+    }
+
+    #[test]
+    fn set_kv_block_empty_removes_block() {
+        let mut file = bru_lang::parse("headers {\n  Accept: x\n}\n").expect("parse");
+        set_kv_block(&mut file, "headers", &[]);
+        assert!(file.block("headers").is_none());
+    }
+
+    #[test]
+    fn set_kv_block_merges_onto_existing_disabled_state() {
+        let mut file = bru_lang::parse("headers {\n  Accept: json\n}\n").expect("parse");
+        // Flip Accept to disabled and change its value (merge update branch).
+        set_kv_block(
+            &mut file,
+            "headers",
+            &[("Accept".into(), "xml".into(), false)],
+        );
+        let rows = kv_block_rows(&file, "headers");
+        assert_eq!(rows[0], ("Accept".into(), "xml".into(), false));
+    }
+
+    #[test]
+    fn set_kv_block_replaces_existing_block_content() {
+        let mut file = bru_lang::parse("headers {\n  Old: 1\n}\n").expect("parse");
+        // New name entirely -> None branch in merge builds a fresh entry; the
+        // block already exists so the Some(b) replace branch runs.
+        set_kv_block(&mut file, "headers", &[("New".into(), "2".into(), true)]);
+        let rows = kv_block_rows(&file, "headers");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "New");
+    }
+
+    // ---- vars block: local flag is always false through set_kv_block --------
+
+    #[test]
+    fn set_kv_block_never_sets_local() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        set_kv_block(&mut file, "params:query", &[("q".into(), "1".into(), true)]);
+        let rows = var_block_rows(&file, "params:query");
+        // local flag (4th element) must be false.
+        assert!(!rows[0].3);
+    }
+
+    // ---- meta name / seq -----------------------------------------------------
+
+    #[test]
+    fn set_meta_name_updates_existing_meta() {
+        let mut file = bru_lang::parse("meta {\n  name: Old\n  seq: 1\n}\n").expect("parse");
+        set_meta_name(&mut file, "New");
+        assert_eq!(file.dict_value("meta", "name"), Some("New"));
+    }
+
+    #[test]
+    fn set_meta_name_inserts_when_absent() {
+        let mut file = bru_lang::parse("meta {\n  seq: 1\n}\n").expect("parse");
+        set_meta_name(&mut file, "Added");
+        assert_eq!(file.dict_value("meta", "name"), Some("Added"));
+    }
+
+    #[test]
+    fn set_meta_name_noop_without_meta_block() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        set_meta_name(&mut file, "x");
+        assert!(file.block("meta").is_none());
+    }
+
+    #[test]
+    fn set_meta_seq_writes_number_as_string() {
+        let mut file = bru_lang::parse("meta {\n  name: X\n  seq: 1\n}\n").expect("parse");
+        set_meta_seq(&mut file, 42);
+        assert_eq!(file.dict_value("meta", "seq"), Some("42"));
+        assert_eq!(file.seq(), Some(42));
+    }
+
+    #[test]
+    fn set_meta_seq_noop_without_meta_block() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        set_meta_seq(&mut file, 7);
+        assert!(file.block("meta").is_none());
+    }
+
+    // ---- dict <-> editable lines round trip ---------------------------------
+
+    #[test]
+    fn dict_to_lines_renders_disabled_prefix() {
+        let src = "headers {\n  Accept: json\n  ~X-Skip: 1\n}\n";
+        let file = bru_lang::parse(src).expect("parse");
+        let lines = dict_to_lines(&file, "headers");
+        assert_eq!(lines, "Accept: json\n~X-Skip: 1");
+    }
+
+    #[test]
+    fn dict_to_lines_empty_for_absent_or_non_dict() {
+        let file = bru_lang::parse("body:json {\n  raw\n}\n").expect("parse");
+        assert_eq!(dict_to_lines(&file, "headers"), "");
+        assert_eq!(dict_to_lines(&file, "body:json"), "");
+    }
+
+    #[test]
+    fn lines_to_dict_parses_enabled_disabled_and_missing_colon() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        // Three lines: a normal pair, a disabled pair, a key with no colon
+        // (value becomes empty), plus a blank line that is filtered out.
+        lines_to_dict(&mut file, "headers", "A: 1\n~B: 2\n\nC");
+        let rows = kv_block_rows(&file, "headers");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], ("A".into(), "1".into(), true));
+        assert_eq!(rows[1], ("B".into(), "2".into(), false));
+        // "C" with no colon -> empty value, enabled.
+        assert_eq!(rows[2], ("C".into(), "".into(), true));
+    }
+
+    #[test]
+    fn lines_to_dict_empty_removes_block() {
+        let mut file = bru_lang::parse("headers {\n  A: 1\n}\n").expect("parse");
+        // Only blank/whitespace lines -> block removed.
+        lines_to_dict(&mut file, "headers", "   \n\n  ");
+        assert!(file.block("headers").is_none());
+    }
+
+    #[test]
+    fn lines_to_dict_creates_block_when_absent() {
+        let mut file = bru_lang::parse("get {\n  url: https://x\n}\n").expect("parse");
+        lines_to_dict(&mut file, "params:query", "q: 1");
+        let rows = kv_block_rows(&file, "params:query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "q");
+    }
+
+    #[test]
+    fn lines_to_dict_replaces_existing_block() {
+        let mut file = bru_lang::parse("headers {\n  Old: 1\n}\n").expect("parse");
+        lines_to_dict(&mut file, "headers", "New: 2");
+        let rows = kv_block_rows(&file, "headers");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], ("New".into(), "2".into(), true));
+    }
+
+    // ---- BODY_MODES / AUTH_MODES constants ----------------------------------
+
+    #[test]
+    fn mode_constants_have_expected_membership() {
+        assert!(BODY_MODES.contains(&"none"));
+        assert!(BODY_MODES.contains(&"formUrlEncoded"));
+        assert!(AUTH_MODES.contains(&"inherit"));
+        assert!(AUTH_MODES.contains(&"awsv4"));
+        // Every concrete body mode (except none) has a block name.
+        for m in BODY_MODES.iter().filter(|m| **m != "none") {
+            assert!(body_block_name(m).is_some(), "no block name for {m:?}");
+        }
+        // Every concrete auth mode (except none/inherit) has a block name.
+        for m in AUTH_MODES
+            .iter()
+            .filter(|m| **m != "none" && **m != "inherit")
+        {
+            assert!(auth_block_name(m).is_some(), "no block name for {m:?}");
+        }
+    }
+
+    #[test]
+    fn auth_fields_apikey_and_awsv4_and_digest_shapes() {
+        // digest shares the basic shape.
+        let digest = auth_fields("digest");
+        assert_eq!(digest.len(), 2);
+        assert_eq!(digest[0].1, "username");
+        let apikey = auth_fields("apikey");
+        assert_eq!(apikey.len(), 3);
+        assert_eq!(apikey[2].1, "placement");
+        let aws = auth_fields("awsv4");
+        assert_eq!(aws.len(), 6);
+        assert_eq!(aws[0].1, "accessKeyId");
+        // unknown mode -> empty
+        assert!(auth_fields("inherit").is_empty());
+    }
+}

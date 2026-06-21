@@ -1136,3 +1136,912 @@ mod tests {
             .unwrap();
     }
 }
+
+// Windowed render coverage for the git overlay (statusbar::git_overlay, driven
+// by git_ui::open_git). Lives in main.rs because `BruApp::new` is private here.
+#[cfg(test)]
+mod git_ui_render_cov_tests {
+    use super::*;
+
+    // Render the git overlay in a real window: open_git flips git_open so the
+    // render tree builds git_overlay. Seed a status with staged / unstaged /
+    // untracked entries to drive the per-file color branches and the
+    // ahead/behind summary.
+    #[gpui::test]
+    fn renders_git_overlay_with_status(cx: &mut gpui::TestAppContext) {
+        let tc = crate::test_support::temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_window, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _window, cx| {
+                app.git_status = Some(git::Status {
+                    branch: "main".into(),
+                    ahead: 2,
+                    behind: 1,
+                    files: vec![
+                        git::FileEntry {
+                            code: " M".into(),
+                            path: "src/a.rs".into(),
+                        },
+                        git::FileEntry {
+                            code: "A ".into(),
+                            path: "src/b.rs".into(),
+                        },
+                        git::FileEntry {
+                            code: "??".into(),
+                            path: "new.txt".into(),
+                        },
+                    ],
+                });
+                app.open_git(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _window, _cx| assert!(app.git_open))
+            .unwrap();
+    }
+
+    // Render the git overlay with a clean tree (status present, no files): hits
+    // the "Working tree clean." empty-list branch.
+    #[gpui::test]
+    fn renders_git_overlay_clean_tree(cx: &mut gpui::TestAppContext) {
+        let tc = crate::test_support::temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_window, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _window, cx| {
+                app.git_status = Some(git::Status::default());
+                app.open_git(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _window, _cx| assert!(app.git_open))
+            .unwrap();
+    }
+
+    // Render the git overlay when status couldn't be read (git_status = None)
+    // and the discard action is armed: exercises the "Could not read git
+    // status" / "Status unavailable" branch plus the "Confirm discard" label
+    // and the busy output-color branch.
+    #[gpui::test]
+    fn renders_git_overlay_without_status_confirm_armed(cx: &mut gpui::TestAppContext) {
+        let tc = crate::test_support::temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_window, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _window, cx| {
+                app.git_status = None;
+                app.open_git(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // open_git resets git_confirm_discard, so arm it after opening and
+        // re-park to rebuild the overlay with the "Confirm discard" label.
+        window
+            .update(cx, |app, _window, cx| {
+                app.git_confirm_discard = true;
+                app.git_busy = true;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _window, _cx| {
+                assert!(app.git_open);
+                assert!(app.git_confirm_discard);
+            })
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cov_tests_response {
+    use super::*;
+    use crate::test_support::temp_collection;
+
+    // A full JSON HttpResponse (content-type json) with headers + body so the
+    // pretty-print / JSONPath / hex / raw branches all have something to chew on.
+    fn json_http() -> bru_http::HttpResponse {
+        bru_http::HttpResponse {
+            status: 200,
+            status_text: "OK".into(),
+            headers: vec![
+                ("content-type".into(), "application/json".into()),
+                ("x-test".into(), "v".into()),
+            ],
+            body: br#"{"name":"hi","n":1}"#.to_vec(),
+            duration_ms: 12,
+        }
+    }
+
+    // A non-JSON response so the Response tab takes the plain/raw branch.
+    fn text_http() -> bru_http::HttpResponse {
+        bru_http::HttpResponse {
+            status: 404,
+            status_text: "Not Found".into(),
+            headers: vec![("content-type".into(), "text/plain".into())],
+            body: b"hello world".to_vec(),
+            duration_ms: 3,
+        }
+    }
+
+    // A RunOutcome carrying the given response, plus one passing assertion and
+    // one failing test (drives the Tests tab + the header/test count badges).
+    fn outcome_with(resp: Option<bru_http::HttpResponse>) -> bru_engine::RunOutcome {
+        bru_engine::RunOutcome {
+            name: "t".into(),
+            method: "GET".into(),
+            url: "https://example.test/x".into(),
+            response: resp,
+            assertions: vec![bru_core::AssertOutcome {
+                expr: "res.status".into(),
+                operator: "eq".into(),
+                expected: "200".into(),
+                actual: "200".into(),
+                passed: true,
+            }],
+            tests: vec![bru_engine::TestResult {
+                name: "is ok".into(),
+                passed: false,
+                error: Some("boom".into()),
+            }],
+            console: Vec::new(),
+            vars_set: Vec::new(),
+            error: None,
+        }
+    }
+
+    // Open a window with one request tab; returns the window for further driving.
+    fn windowed(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        gpui::WindowHandle<BruApp>,
+        crate::test_support::TempCollection,
+    ) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_window, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _window, cx| {
+                app.open_request(tc.dir.join("Repository Info.bru"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        (window, tc)
+    }
+
+    // Set per-tab + per-app response state, then re-park so render() (and thus
+    // response_pane) runs against the new state.
+    fn drive(
+        cx: &mut gpui::TestAppContext,
+        window: &gpui::WindowHandle<BruApp>,
+        resp_tab: RespTab,
+        outcome: bru_engine::RunOutcome,
+        raw: bool,
+        hex: bool,
+        filter: &str,
+    ) {
+        let filter = filter.to_string();
+        window
+            .update(cx, |app, _window, cx| {
+                app.resp_raw = raw;
+                app.resp_hex = hex;
+                app.resp_filter_query = filter;
+                if let Some(i) = app.active {
+                    app.tabs[i].resp_tab = resp_tab;
+                    app.tabs[i].response = Some(outcome);
+                }
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    // RespTab::Response, JSON content-type, no filter -> pretty-printed JSON path.
+    #[gpui::test]
+    fn renders_response_pretty_json(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        drive(
+            cx,
+            &window,
+            RespTab::Response,
+            outcome_with(Some(json_http())),
+            false,
+            false,
+            "",
+        );
+        window
+            .update(cx, |app, _window, _cx| {
+                assert!(app.response_bytes().is_some());
+            })
+            .unwrap();
+    }
+
+    // JSONPath filter that matches -> the `Some(val)` pretty branch.
+    #[gpui::test]
+    fn renders_response_jsonpath_match(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        drive(
+            cx,
+            &window,
+            RespTab::Response,
+            outcome_with(Some(json_http())),
+            false,
+            false,
+            "$.name",
+        );
+    }
+
+    // JSONPath filter that matches nothing -> the `(no match)` branch.
+    #[gpui::test]
+    fn renders_response_jsonpath_no_match(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        drive(
+            cx,
+            &window,
+            RespTab::Response,
+            outcome_with(Some(json_http())),
+            false,
+            false,
+            "$.nope",
+        );
+    }
+
+    // resp_raw == true -> the raw (un-prettified) branch even for JSON bodies.
+    #[gpui::test]
+    fn renders_response_raw(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        drive(
+            cx,
+            &window,
+            RespTab::Response,
+            outcome_with(Some(json_http())),
+            true,
+            false,
+            "",
+        );
+    }
+
+    // resp_hex == true -> hex_dump branch.
+    #[gpui::test]
+    fn renders_response_hex(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        drive(
+            cx,
+            &window,
+            RespTab::Response,
+            outcome_with(Some(json_http())),
+            false,
+            true,
+            "",
+        );
+    }
+
+    // A non-JSON content-type -> the plain (raw) branch on the Response tab.
+    #[gpui::test]
+    fn renders_response_plain_text(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        drive(
+            cx,
+            &window,
+            RespTab::Response,
+            outcome_with(Some(text_http())),
+            false,
+            false,
+            "",
+        );
+    }
+
+    // An outcome with NO HttpResponse -> the `None => format_outcome(o)` branch
+    // on the Response tab, and the "(no response)" Headers branch.
+    #[gpui::test]
+    fn renders_response_format_outcome_when_no_http(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        drive(
+            cx,
+            &window,
+            RespTab::Response,
+            outcome_with(None),
+            false,
+            false,
+            "",
+        );
+        // Now flip to Headers with the same no-response outcome to hit the
+        // "(no response)" placeholder branch.
+        drive(
+            cx,
+            &window,
+            RespTab::Headers,
+            outcome_with(None),
+            false,
+            false,
+            "",
+        );
+    }
+
+    // Headers tab with a real HttpResponse -> the row-per-header loop (incl. the
+    // odd/even striping) and the "Headers (n)" count badge in the strip.
+    #[gpui::test]
+    fn renders_headers_with_rows(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        drive(
+            cx,
+            &window,
+            RespTab::Headers,
+            outcome_with(Some(json_http())),
+            false,
+            false,
+            "",
+        );
+    }
+
+    // Timeline tab -> request line + request-header lines (via dict_to_lines on
+    // the opened request's file) + response status/headers + timing/size.
+    #[gpui::test]
+    fn renders_timeline(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        drive(
+            cx,
+            &window,
+            RespTab::Timeline,
+            outcome_with(Some(json_http())),
+            false,
+            false,
+            "",
+        );
+    }
+
+    // Tests tab -> one passing assertion (check mark) + one failing test (cross),
+    // plus the "Tests passed/total" badge in the strip.
+    #[gpui::test]
+    fn renders_tests_tab(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        drive(
+            cx,
+            &window,
+            RespTab::Tests,
+            outcome_with(Some(json_http())),
+            false,
+            false,
+            "",
+        );
+    }
+
+    // Tests tab with an outcome that has NO assertions/tests -> the
+    // "No assertions or tests." empty branch, and the plain "Tests" label.
+    #[gpui::test]
+    fn renders_tests_tab_empty(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        let mut o = outcome_with(Some(json_http()));
+        o.assertions.clear();
+        o.tests.clear();
+        drive(cx, &window, RespTab::Tests, o, false, false, "");
+    }
+
+    // With a real response set, response_bytes returns the body, copy_response
+    // copies it (setting the status), and clear_response then wipes it.
+    #[gpui::test]
+    fn response_bytes_copy_and_clear_with_data(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _window, _cx| {
+                if let Some(i) = app.active {
+                    app.tabs[i].response = Some(outcome_with(Some(json_http())));
+                }
+            })
+            .unwrap();
+        window
+            .update(cx, |app, _window, _cx| {
+                let bytes = app.response_bytes().expect("body present");
+                assert!(bytes == br#"{"name":"hi","n":1}"#.to_vec());
+            })
+            .unwrap();
+        window
+            .update(cx, |app, _window, cx| {
+                app.copy_response(cx);
+                assert!(app.status == "Copied response to clipboard");
+            })
+            .unwrap();
+        window
+            .update(cx, |app, _window, cx| {
+                app.clear_response(cx);
+                assert!(app.response_bytes().is_none());
+            })
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod chrome_cov_tests {
+    //! Coverage for `chrome.rs`'s view builders (top_bar / collection_header /
+    //! sidebar / push_folder / url_bar). Lives in `main.rs` so it can drive the
+    //! private `BruApp`/`OpenTab` fields the chrome branches key off of
+    //! (`search_query`, `collapsed`, `home`, `dirty`, the open tab's `method`).
+    //! Each test renders in a headless window (template 3) so the builder methods
+    //! actually run; a second `run_until_parked` re-draws after the state change.
+    use super::*;
+    use crate::test_support::temp_collection;
+
+    /// Path of the bundled `Repository` sub-folder inside the loaded tree (so we
+    /// drive the real path the sidebar stores in `collapsed`, not a guessed one).
+    fn repo_folder_path(app: &BruApp) -> std::path::PathBuf {
+        app.collection
+            .as_ref()
+            .and_then(|c| c.root.folders.iter().find(|f| f.name == "Repository"))
+            .map(|f| f.path.clone())
+            .expect("sample collection has a Repository folder")
+    }
+
+    /// Default render with a loaded collection: exercises `top_bar` (collection
+    /// name present), `collection_header` (full toolbar, no env -> muted pill),
+    /// and `sidebar`/`push_folder` over the real tree.
+    #[gpui::test]
+    fn renders_chrome_with_collection(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, _cx| {
+                assert!(app.collection.is_some());
+                // top_bar reads the collection name for the switcher label.
+                let name = app.collection.as_ref().map(|c| c.name.clone()).unwrap();
+                assert!(!name.is_empty());
+            })
+            .unwrap();
+    }
+
+    /// `top_bar` / `sidebar` "no collection" branches: with no collection the
+    /// switcher shows "No collection" and the sidebar shows the empty placeholder
+    /// row. `home_screen` also takes over the content area. Force `collection`
+    /// to `None` after construction and re-park so render takes those branches.
+    #[gpui::test]
+    fn renders_chrome_without_collection(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.collection = None;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked(); // render: top_bar/sidebar "no collection" branches
+        window
+            .update(cx, |app, _w, _cx| {
+                assert!(app.collection.is_none());
+            })
+            .unwrap();
+    }
+
+    /// `collection_header` early-return branch: when `home` is set the header
+    /// renders an empty `div()` and `home_screen` fills the content.
+    #[gpui::test]
+    fn collection_header_home_returns_empty(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.go_home(cx); // home = true
+                assert!(app.home);
+            })
+            .unwrap();
+        cx.run_until_parked(); // re-render -> header early-returns, home_screen runs
+        window
+            .update(cx, |app, _w, cx| {
+                app.go_home(cx); // toggle back off
+                assert!(!app.home);
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// `collection_header`'s env pill in its "has environment" state (green dot +
+    /// text color), driven via the pub(crate) `select_env`.
+    #[gpui::test]
+    fn collection_header_with_selected_env(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.select_env(Some("New Environment".to_string()), cx);
+                assert_eq!(app.selected_env.as_deref(), Some("New Environment"));
+            })
+            .unwrap();
+        cx.run_until_parked(); // env_has = true path in collection_header
+        window
+            .update(cx, |app, _w, cx| {
+                app.select_env(None, cx); // back to "No Environment" / muted
+                assert!(app.selected_env.is_none());
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// `sidebar`/`push_folder` with an active search query: forces every branch
+    /// open and filters folders + requests by name (`folder_matches` / the
+    /// request-name `contains` check).
+    #[gpui::test]
+    fn sidebar_search_filters_rows(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        // A query that matches the Repository folder + its request, hiding others.
+        window
+            .update(cx, |app, _w, _cx| {
+                app.search_query = "repository".to_string();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // A query that matches nothing: every folder/request row is skipped.
+        window
+            .update(cx, |app, _w, _cx| {
+                app.search_query = "zzz-no-such-request".to_string();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // Clear the query: back to the full tree (collapsed honored again).
+        window
+            .update(cx, |app, _w, _cx| {
+                app.search_query.clear();
+                assert!(app.search_query.is_empty());
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// `push_folder`'s collapsed branch: a collapsed folder hides its children
+    /// (no recursion) and renders a chevron-right row. Toggling re-expands it.
+    #[gpui::test]
+    fn sidebar_collapsed_folder(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        let repo = window
+            .update(cx, |app, _w, _cx| repo_folder_path(app))
+            .unwrap();
+        // Collapse via the real sidebar handler.
+        window
+            .update(cx, |app, _w, cx| {
+                app.toggle_folder(repo.clone(), cx);
+                assert!(app.collapsed.contains(&repo));
+            })
+            .unwrap();
+        cx.run_until_parked(); // render: collapsed == true branch, no recursion
+                               // Expand again (toggle removes it).
+        window
+            .update(cx, |app, _w, cx| {
+                app.toggle_folder(repo.clone(), cx);
+                assert!(!app.collapsed.contains(&repo));
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+}
+
+#[cfg(test)]
+mod actions_cov_tests {
+    //! Coverage for `actions.rs`: the app key-action handlers (save / escape /
+    //! palette), `close_topmost_overlay`'s priority ladder, and `palette_overlay`'s
+    //! builder. Placed in `main.rs` so the tests can read `BruApp`'s private
+    //! overlay-state fields (they aren't `pub(crate)`). The `on_*` handlers take a
+    //! real `&mut Window`, so those use the windowed harness (template 3); the
+    //! window-free helpers use the entity harness (template 2).
+    //!
+    //! NOTE: `on_send_action` is intentionally untested — it calls `send()`, which
+    //! spawns a raw OS thread that panics the deterministic test scheduler.
+    use super::*;
+    use crate::test_support::{app_on_temp, temp_collection};
+
+    /// Esc with the command palette open closes it (the first rung of the ladder).
+    #[gpui::test]
+    fn escape_closes_palette(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, window, cx| {
+                app.on_palette_action(&OpenPalette, window, cx);
+                assert!(app.palette_open);
+                app.on_escape_action(&CloseOverlay, window, cx);
+                assert!(!app.palette_open);
+            })
+            .unwrap();
+    }
+
+    /// `on_palette_action` opens the palette and (with a window present) focuses
+    /// the palette input without panicking.
+    #[gpui::test]
+    fn palette_action_opens(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, window, cx| {
+                assert!(!app.palette_open);
+                app.on_palette_action(&OpenPalette, window, cx);
+                assert!(app.palette_open);
+            })
+            .unwrap();
+    }
+
+    /// `on_save_action` saves the active request tab to disk and sets the status.
+    #[gpui::test]
+    fn save_action_saves_active_tab(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let req = tc.dir.join("Repository Info.bru");
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, window, cx| {
+                app.open_request(req.clone(), cx);
+                assert_eq!(app.active, Some(0));
+                app.on_save_action(&SaveTab, window, cx);
+                assert_eq!(app.status, "Saved");
+            })
+            .unwrap();
+        // The serialized request was written back over the temp copy.
+        assert!(req.exists());
+    }
+
+    /// `on_save_action` is a no-op (no panic, status unchanged) with no active tab.
+    #[gpui::test]
+    fn save_action_no_active_tab(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, window, cx| {
+                assert!(app.active.is_none());
+                app.on_save_action(&SaveTab, window, cx);
+                // `save` early-returns without an active tab, so status stays empty.
+                assert!(app.status.is_empty());
+            })
+            .unwrap();
+    }
+
+    /// Esc with no overlay open is a harmless no-op (the ladder's `else { return }`).
+    #[gpui::test]
+    fn escape_with_nothing_open_is_noop(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, window, cx| {
+                app.on_escape_action(&CloseOverlay, window, cx);
+                assert!(!app.palette_open);
+                assert!(!app.vault_open);
+                assert!(!app.git_open);
+            })
+            .unwrap();
+    }
+
+    /// Esc closes the curl-import overlay via the ladder's `curl_open` rung.
+    #[gpui::test]
+    fn escape_closes_curl_overlay(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, window, cx| {
+                app.open_curl(cx);
+                assert!(app.curl_open);
+                app.on_escape_action(&CloseOverlay, window, cx);
+                assert!(!app.curl_open);
+            })
+            .unwrap();
+    }
+
+    /// Esc closes the secrets-vault overlay.
+    #[gpui::test]
+    fn escape_closes_vault_overlay(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, window, cx| {
+                app.open_vault(cx);
+                assert!(app.vault_open);
+                app.on_escape_action(&CloseOverlay, window, cx);
+                assert!(!app.vault_open);
+            })
+            .unwrap();
+    }
+
+    /// Esc closes the git overlay (and clears the discard-arm flag along with it).
+    #[gpui::test]
+    fn escape_closes_git_overlay(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, window, cx| {
+                app.open_git(cx);
+                assert!(app.git_open);
+                app.on_escape_action(&CloseOverlay, window, cx);
+                assert!(!app.git_open);
+                assert!(!app.git_confirm_discard);
+            })
+            .unwrap();
+    }
+
+    /// `close_topmost_overlay` (driven directly, no window) walks its priority
+    /// ladder: with both the palette and curl open, palette closes first; a second
+    /// call then closes curl.
+    #[gpui::test]
+    fn close_topmost_overlay_priority_order(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.open_curl(cx);
+            app.palette_open = true;
+            // Palette outranks curl: first call closes the palette only.
+            app.close_topmost_overlay(cx);
+            assert!(!app.palette_open);
+            assert!(app.curl_open);
+            // Second call drops to the curl rung.
+            app.close_topmost_overlay(cx);
+            assert!(!app.curl_open);
+        });
+    }
+
+    /// `close_topmost_overlay` closes the lightweight popover group (here the
+    /// method-picker dropdown) in a single call.
+    #[gpui::test]
+    fn close_topmost_overlay_closes_popover(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.method_menu = Some(gpui::point(px(0.), px(0.)));
+            app.close_topmost_overlay(cx);
+            assert!(app.method_menu.is_none());
+        });
+    }
+
+    /// `close_topmost_overlay` with nothing open returns without touching state.
+    #[gpui::test]
+    fn close_topmost_overlay_noop_when_empty(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.close_topmost_overlay(cx);
+            assert!(!app.palette_open);
+            assert!(!app.curl_open);
+            assert!(!app.runner_open);
+        });
+    }
+
+    /// `palette_overlay` builds its card without a window. With a query that
+    /// matches nothing the filtered list is empty; an empty query lists requests
+    /// from the loaded collection. Driving both exercises the filter closure and
+    /// the per-row builder.
+    #[gpui::test]
+    fn palette_overlay_builds_filtered_and_unfiltered(cx: &mut gpui::TestAppContext) {
+        // Rendered in a window so the palette card (which clones the palette-input
+        // editor entity into the view tree) is consumed by the renderer instead of
+        // leaking a handle. Re-parking after each query change rebuilds the
+        // overlay, exercising the filter closure (empty + no-match) and the
+        // per-row builder.
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        // Unfiltered: builds a row per flattened request (collection is loaded).
+        window
+            .update(cx, |app, window, cx| {
+                app.palette_query = String::new();
+                app.on_palette_action(&OpenPalette, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // Filtered to a string that won't match any request name/path.
+        window
+            .update(cx, |app, _w, cx| {
+                app.palette_query = "zzz-no-such-request-zzz".into();
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, _cx| assert!(app.palette_open))
+            .unwrap();
+    }
+
+    /// `push_folder`'s active-request highlight branch: with a request open, its
+    /// sidebar row renders in the active state (`active == true`).
+    #[gpui::test]
+    fn sidebar_marks_active_request(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        let req = tc.dir.join("Repository Info.bru");
+        window
+            .update(cx, |app, _w, cx| {
+                app.open_request(req.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked(); // sidebar re-render: active row path matches the tab
+        window
+            .update(cx, |app, _w, _cx| {
+                assert_eq!(app.active_tab().map(|t| t.path.clone()), Some(req.clone()));
+            })
+            .unwrap();
+    }
+
+    /// `url_bar` with a GET request: method uppercases, not-dirty (no draft dot),
+    /// not sending ("Send" label). Exercises the URL-bar builder via render.
+    #[gpui::test]
+    fn url_bar_clean_get(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.open_request(tc.dir.join("Repository Info.bru"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked(); // url_bar runs in render for the active tab
+        window
+            .update(cx, |app, _w, _cx| {
+                let p = app.active_tab().map(|t| t.path.clone()).unwrap();
+                assert!(!app.dirty.contains(&p)); // clean -> no draft dot branch
+            })
+            .unwrap();
+    }
+
+    /// `url_bar`'s dirty + sending + empty-method branches: mark the tab dirty
+    /// (draft dot), clear its method (empty -> defaults to "GET"), and flag it
+    /// sending ("Sending\u{2026}" label). All three are private `OpenTab`/`BruApp`
+    /// fields reachable from this in-module test.
+    #[gpui::test]
+    fn url_bar_dirty_and_sending(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.open_request(tc.dir.join("Repository Info.bru"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, _cx| {
+                let i = app.active.expect("a tab is open");
+                let p = app.tabs[i].path.clone();
+                app.dirty.insert(p); // draft-dot branch in url_bar
+                app.tabs[i].method = String::new(); // empty -> "GET" branch
+                app.tabs[i].sending = true; // "Sending" label branch
+            })
+            .unwrap();
+        cx.run_until_parked(); // re-render url_bar with dirty + sending + empty method
+        window
+            .update(cx, |app, _w, _cx| {
+                let i = app.active.unwrap();
+                assert!(app.tabs[i].sending);
+                assert!(app.tabs[i].method.is_empty());
+                assert!(app.dirty.contains(&app.tabs[i].path));
+            })
+            .unwrap();
+    }
+}

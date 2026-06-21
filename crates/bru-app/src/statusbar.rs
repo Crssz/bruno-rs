@@ -492,3 +492,216 @@ impl BruApp {
         b
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use super::*;
+    use crate::test_support::{app_on_temp, temp_collection};
+
+    /// A `git::Status` with the given branch/ahead/behind and a set of changed
+    /// files (each `(code, path)`), to drive the chip + overlay render branches
+    /// without touching a real repo.
+    fn fake_status(branch: &str, ahead: u32, behind: u32, files: &[(&str, &str)]) -> git::Status {
+        git::Status {
+            branch: branch.to_string(),
+            ahead,
+            behind,
+            files: files
+                .iter()
+                .map(|(c, p)| git::FileEntry {
+                    code: c.to_string(),
+                    path: p.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    // ── git_chip ──────────────────────────────────────────────────────────
+
+    /// Not a git repo → no chip (the early `return None`).
+    #[gpui::test]
+    fn git_chip_none_when_not_a_repo(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.git_repo = false;
+            app.git_status = None;
+            assert!(app.git_chip(cx).is_none());
+        });
+    }
+
+    /// A repo with no parsed status still shows a chip (the "git" fallback label).
+    #[gpui::test]
+    fn git_chip_some_with_fallback_label(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.git_repo = true;
+            app.git_status = None;
+            assert!(app.git_chip(cx).is_some());
+        });
+    }
+
+    /// A repo with a parsed, clean status on a named branch yields a chip
+    /// (covers the `Some(st)` label arm with ahead/behind/dirty all zero).
+    #[gpui::test]
+    fn git_chip_clean_branch(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.git_repo = true;
+            app.git_status = Some(fake_status("main", 0, 0, &[]));
+            assert!(app.git_chip(cx).is_some());
+        });
+    }
+
+    /// Ahead + behind + dirty all set exercises every `push_str` branch in the
+    /// chip label builder.
+    #[gpui::test]
+    fn git_chip_ahead_behind_dirty(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.git_repo = true;
+            app.git_status = Some(fake_status("feature", 2, 3, &[(" M", "a.bru")]));
+            // is_dirty() is true because files is non-empty.
+            assert!(app.git_status.as_ref().unwrap().is_dirty());
+            assert!(app.git_chip(cx).is_some());
+        });
+    }
+
+    // ── git_overlay ───────────────────────────────────────────────────────
+    //
+    // git_overlay() embeds entity handles (the commit-message editor + output
+    // viewer), so it must be exercised through a real render pass (template 3);
+    // calling it directly and dropping the returned Div leaks those handles and
+    // trips gpui's deterministic test scheduler.
+
+    /// Overlay with a parsed status, ahead/behind set, and one of each file
+    /// status code so all three color branches (untracked `?`, unstaged leading
+    /// space, staged) are taken.
+    #[gpui::test]
+    fn git_overlay_with_status_and_files(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.git_repo = true;
+                app.git_status = Some(fake_status(
+                    "main",
+                    1,
+                    1,
+                    &[
+                        ("??", "new.bru"),
+                        (" M", "changed.bru"),
+                        ("M ", "staged.bru"),
+                    ],
+                ));
+                app.git_busy = false;
+                app.git_confirm_discard = false;
+                app.open_git(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, _cx| assert!(app.git_open))
+            .unwrap();
+    }
+
+    /// Overlay with no parsed status takes the "Could not read git status" /
+    /// "Status unavailable." branches.
+    #[gpui::test]
+    fn git_overlay_without_status(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.git_repo = true;
+                app.git_status = None;
+                app.git_busy = false;
+                app.open_git(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, _cx| assert!(app.git_open))
+            .unwrap();
+    }
+
+    /// Busy + armed-discard exercises the dimmed `git_btn` path, the
+    /// "Confirm discard" label, and the busy-colored output region.
+    #[gpui::test]
+    fn git_overlay_busy_and_confirm_discard(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.git_repo = true;
+                app.git_status = Some(fake_status("main", 0, 0, &[]));
+                app.open_git(cx);
+            })
+            .unwrap();
+        // open_git resets git_confirm_discard, so arm it + busy after opening,
+        // then re-park to rebuild the overlay with those branches.
+        window
+            .update(cx, |app, _w, cx| {
+                app.git_busy = true;
+                app.git_confirm_discard = true;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, _cx| {
+                assert!(app.git_open);
+                assert!(app.git_confirm_discard);
+            })
+            .unwrap();
+    }
+
+    // ── status_bar / tab_strip / home_screen via a real window ────────────
+
+    /// Drive the full status bar through render with the git chip open: set a
+    /// repo+status, open a request (populates `status`), open the git overlay,
+    /// and re-park so every status-bar/overlay builder runs.
+    #[gpui::test]
+    fn status_bar_and_overlay_render_in_window(cx: &mut gpui::TestAppContext) {
+        let tc = temp_collection();
+        let dir = tc.dir.clone();
+        let req = tc.dir.join("Repository Info.bru");
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.open_request(req, cx);
+                app.git_repo = true;
+                app.git_status = Some(fake_status(
+                    "main",
+                    1,
+                    0,
+                    &[("??", "x.bru"), (" M", "y.bru")],
+                ));
+                app.git_open = true;
+            })
+            .unwrap();
+        // Re-park so render rebuilds: status_bar + git_chip(Some) + git_overlay.
+        cx.run_until_parked();
+    }
+
+    /// The tab strip with an active, dirty tab renders the draft dot + underline
+    /// branches; the home screen with recents renders its recent list.
+    #[gpui::test]
+    fn tab_strip_active_dirty_branches(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let req = tc.dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| {
+            app.open_request(req.clone(), cx);
+            app.active = Some(0);
+            app.dirty.insert(req);
+            // Both the active-underline and dirty-dot branches now apply.
+            let _ = app.tab_strip(cx);
+        });
+    }
+}

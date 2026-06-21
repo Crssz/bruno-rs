@@ -1062,3 +1062,454 @@ impl BruApp {
             .child(card)
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use super::*;
+    use gpui::AppContext;
+
+    /// Open a windowed BruApp on a throwaway copy of the sample collection, with a
+    /// request open so the overlays render over a populated app. Returns the window
+    /// and the temp collection (keep the latter alive for the test's duration).
+    ///
+    /// The overlay builder methods (`vault_overlay`, `env_overlay`, …) are NOT
+    /// called directly: a detached element tree built outside a real paint cycle
+    /// leaks the entity clones it holds (the gpui test harness flags this at
+    /// teardown). Instead each test sets the open flag + state and re-parks, so the
+    /// app's real `render` drives the builder and gpui releases it cleanly.
+    fn windowed(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        gpui::WindowHandle<BruApp>,
+        crate::test_support::TempCollection,
+    ) {
+        let tc = crate::test_support::temp_collection();
+        let dir = tc.dir.clone();
+        let window = cx.add_window(|_w, cx| BruApp::new(cx, dir));
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.open_request(tc.dir.join("Repository Info.bru"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        (window, tc)
+    }
+
+    // ── vault overlay ──────────────────────────────────────────────────────
+
+    #[gpui::test]
+    fn vault_overlay_locked_branch(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _w, cx| {
+                app.open_vault(cx);
+                // Locked: vault is None, so the "Unlock" prompt body renders.
+                assert!(app.vault.is_none());
+            })
+            .unwrap();
+        // Re-park: the now-open overlay builder runs through `render`.
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn vault_overlay_unlocked_with_rows(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _w, cx| {
+                // Inject an unlocked vault directly (no disk / no real password) so
+                // the unlocked-branch table + row cells render. vault_pw stays None
+                // so any later save is a no-op on disk.
+                let mut map = std::collections::HashMap::new();
+                map.insert("token".to_string(), "secret".to_string());
+                app.vault = Some(map);
+                app.vault_pw = None;
+                app.vault_rows = vec![(
+                    cx.new(|cx| CodeEditor::single_line(cx, "token")),
+                    cx.new(|cx| CodeEditor::single_line(cx, "secret")),
+                )];
+                app.open_vault(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // reveal-secrets path inside the header
+        window
+            .update(cx, |app, _w, cx| {
+                app.reveal_secrets = true;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // an error line renders too
+        window
+            .update(cx, |app, _w, cx| {
+                app.vault_error = Some("bad password".to_string());
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn vault_row_ops(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _w, cx| {
+                app.open_vault(cx);
+                app.vault_add_row(cx);
+                app.vault_add_row(cx);
+                assert!(app.vault_rows.len() == 2);
+                app.vault_remove_row(0, cx);
+                assert!(app.vault_rows.len() == 1);
+                // out-of-range remove is a no-op
+                app.vault_remove_row(99, cx);
+                assert!(app.vault_rows.len() == 1);
+                // vault_pw is None, so save touches no disk.
+                app.vault_save(cx);
+                app.toggle_reveal_secrets(cx);
+                app.vault_lock(cx);
+                assert!(app.vault.is_none());
+                app.close_vault(cx);
+                assert!(!app.vault_open);
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    // ── devtools overlay ───────────────────────────────────────────────────
+
+    #[gpui::test]
+    fn devtools_overlay_empty_console(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _w, cx| {
+                app.toggle_devtools(cx);
+                assert!(app.devtools_open);
+                app.devtools_net = false;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn devtools_overlay_empty_network(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _w, cx| {
+                app.toggle_devtools(cx);
+                app.devtools_net = true;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn devtools_overlay_populated(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _w, cx| {
+                app.toggle_devtools(cx);
+                app.console = vec!["a log line".to_string(), "another".to_string()];
+                app.network = vec![
+                    NetEntry {
+                        method: "GET".to_string(),
+                        url: "https://example.com/ok".to_string(),
+                        status: 200,
+                        ms: 12,
+                        size: 1024,
+                        ok: true,
+                    },
+                    NetEntry {
+                        method: "POST".to_string(),
+                        url: "https://example.com/err".to_string(),
+                        status: 0,
+                        ms: 5,
+                        size: 0,
+                        ok: false,
+                    },
+                ];
+                // Console branch (entries present)
+                app.devtools_net = false;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // Network branch (entries present, both ok and err rows)
+        window
+            .update(cx, |app, _w, cx| {
+                app.devtools_net = true;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.clear_devtools(cx);
+                assert!(app.console.is_empty() && app.network.is_empty());
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    // ── prefs overlay ──────────────────────────────────────────────────────
+
+    #[gpui::test]
+    fn prefs_overlay_and_toggles(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _w, cx| {
+                app.prefs_open = true;
+                cx.notify();
+                assert!(app.prefs_open);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // both checkboxes flipped exercise the checked render path
+        window
+            .update(cx, |app, _w, cx| {
+                let before_insecure = app.pref_insecure;
+                app.toggle_insecure(cx);
+                assert!(app.pref_insecure != before_insecure);
+                let before_dev = app.pref_developer;
+                app.toggle_developer(cx);
+                assert!(app.pref_developer != before_dev);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.close_prefs(cx);
+                assert!(!app.prefs_open);
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    // ── curl overlay ───────────────────────────────────────────────────────
+
+    #[gpui::test]
+    fn curl_overlay_renders(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _w, cx| {
+                app.open_curl(cx);
+                assert!(app.curl_open);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.close_curl(cx);
+                assert!(!app.curl_open);
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    // ── cookies overlay ────────────────────────────────────────────────────
+
+    #[gpui::test]
+    fn cookies_overlay_empty(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _w, cx| {
+                app.open_cookies(cx);
+                assert!(app.cookies_open);
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn cookies_overlay_populated_and_ops(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _w, cx| {
+                app.open_cookies(cx);
+                app.cookies = vec![
+                    CookieEntry {
+                        domain: "a.com".to_string(),
+                        path: "/".to_string(),
+                        name: "sid".to_string(),
+                        value: "1".to_string(),
+                    },
+                    CookieEntry {
+                        domain: "b.com".to_string(),
+                        path: "/x".to_string(),
+                        name: "tok".to_string(),
+                        value: "2".to_string(),
+                    },
+                ];
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.delete_cookie(0, cx);
+                assert!(app.cookies.len() == 1);
+                app.delete_cookie(50, cx); // out of range, no-op
+                assert!(app.cookies.len() == 1);
+                app.clear_cookies(cx);
+                assert!(app.cookies.is_empty());
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    // ── runner overlay ─────────────────────────────────────────────────────
+
+    #[gpui::test]
+    fn runner_overlay_running_empty(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _w, cx| {
+                app.runner_open = true;
+                app.runner_running = true;
+                app.runner_title = "Smoke".to_string();
+                app.runner_results.clear();
+                // running + empty results -> "Running requests…" placeholder + the
+                // "running…" status text + accent status color.
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn runner_overlay_results_pass_and_fail(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _w, cx| {
+                app.runner_open = true;
+                app.runner_running = false;
+                app.runner_title = "Suite".to_string();
+                app.runner_results = vec![
+                    RunResult {
+                        name: "passing".to_string(),
+                        passed: true,
+                        status: 200,
+                        ms: 7,
+                        error: None,
+                    },
+                    RunResult {
+                        name: "failing".to_string(),
+                        passed: false,
+                        status: 500,
+                        ms: 9,
+                        error: Some("assertion failed".to_string()),
+                    },
+                ];
+                // mixed pass/fail -> red status color + both row marks + the error
+                // detail branch and the status/ms detail branch.
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // all-pass -> green status color path
+        window
+            .update(cx, |app, _w, cx| {
+                app.runner_results[1].passed = true;
+                app.runner_results[1].error = None;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    // ── env overlay ────────────────────────────────────────────────────────
+
+    #[gpui::test]
+    fn env_overlay_collection_scope(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _w, cx| {
+                app.env_open(cx);
+                assert!(app.env.is_some());
+                // Sample has one environment, so `selected` is non-empty: the right
+                // pane renders the rename row + variables table + Save.
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // reveal-secrets header eye path
+        window
+            .update(cx, |app, _w, cx| {
+                app.reveal_secrets = true;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.env_close(cx);
+                assert!(app.env.is_none());
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn env_overlay_global_scope_empty_selection(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _w, cx| {
+                app.env_open(cx);
+                // Switch to global scope. globals_root() typically has no envs in a
+                // fresh test home, so `selected` becomes empty -> the right pane
+                // renders the "Select or create an environment." placeholder.
+                app.env_set_scope(true, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // back to collection scope
+        window
+            .update(cx, |app, _w, cx| {
+                app.env_set_scope(false, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn env_overlay_with_rows_and_error(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _w, cx| {
+                app.env_open(cx);
+                app.env_add_row(cx);
+                app.env_add_row(cx);
+                // toggle row flags to exercise the secret/enabled checkbox branches
+                app.env_toggle_enabled(0, cx);
+                app.env_toggle_secret(0, cx);
+                // inject an error so the error line in the right pane renders
+                if let Some(ed) = &mut app.env {
+                    ed.error = Some("name clash".to_string());
+                }
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |app, _w, cx| {
+                app.env_remove_row(0, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn env_overlay_multiple_envs_list(cx: &mut gpui::TestAppContext) {
+        let (window, _tc) = windowed(cx);
+        window
+            .update(cx, |app, _w, cx| {
+                app.env_open(cx);
+                // Create a second env so the list-row loop renders an inactive +
+                // active row (active highlight branch), with dup/delete affordances.
+                app.env_new(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+}

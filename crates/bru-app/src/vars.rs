@@ -495,3 +495,413 @@ mod tests {
         assert!(resolve_module_file(&d.path.join("nope.js")).is_none());
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use super::*;
+    use crate::test_support::{app_on_temp, temp_collection};
+    use std::collections::HashMap;
+
+    // ── small helpers ─────────────────────────────────────────────────────────
+
+    /// Open `Repository Info.bru` from the temp collection as the active tab.
+    fn open_repo_info(
+        app: &gpui::Entity<BruApp>,
+        dir: &std::path::Path,
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let p = dir.join("Repository Info.bru");
+        app.update(cx, |app, cx| app.open_request(p, cx));
+    }
+
+    /// Write a populated collection environment into the temp copy so the Env
+    /// scope has something real to resolve. Returns the env name (file stem).
+    fn write_env(dir: &std::path::Path, name: &str, rows: &[(&str, &str)]) -> String {
+        let rows: Vec<crate::envfs::EnvRow> = rows
+            .iter()
+            .map(|(k, v)| crate::envfs::EnvRow {
+                name: (*k).to_string(),
+                value: (*v).to_string(),
+                enabled: true,
+                secret: false,
+            })
+            .collect();
+        crate::envfs::save_env(dir, name, &rows).unwrap();
+        name.to_string()
+    }
+
+    // ── vault_vars / send_globals ─────────────────────────────────────────────
+
+    #[gpui::test]
+    fn vault_vars_is_empty_when_locked_and_reflects_unlocked_map(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        // Locked vault → empty base vars.
+        app.update(cx, |app, _| assert!(app.vault_vars().is_empty()));
+        // Unlocked (in-memory only — never saved to disk) → returns a clone.
+        app.update(cx, |app, _| {
+            let mut m = HashMap::new();
+            m.insert("apiKey".to_string(), "sekret".to_string());
+            app.vault = Some(m);
+        });
+        app.update(cx, |app, _| {
+            let v = app.vault_vars();
+            assert_eq!(v.get("apiKey").map(String::as_str), Some("sekret"));
+        });
+    }
+
+    #[gpui::test]
+    fn send_globals_with_no_global_env_is_just_the_vault(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, _| {
+            let mut m = HashMap::new();
+            m.insert("base".to_string(), "v".to_string());
+            app.vault = Some(m);
+            app.selected_global_env = None;
+        });
+        app.update(cx, |app, _| {
+            let g = app.send_globals();
+            assert_eq!(g.get("base").map(String::as_str), Some("v"));
+            assert_eq!(g.len(), 1);
+        });
+    }
+
+    // ── refresh_vars + resolve_var, per scope ─────────────────────────────────
+
+    #[gpui::test]
+    fn refresh_vars_picks_up_vault_scope(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            let mut m = HashMap::new();
+            m.insert("vaultVar".to_string(), "vaultVal".to_string());
+            app.vault = Some(m);
+            app.refresh_vars();
+            let (scope, val, secret) = app.resolve_var("vaultVar", cx);
+            assert!(scope == Some(VarScope::Vault));
+            assert_eq!(val, "vaultVal");
+            assert!(secret); // vault vars are always flagged secret
+        });
+    }
+
+    #[gpui::test]
+    fn refresh_vars_picks_up_collection_scope(cx: &mut gpui::TestAppContext) {
+        // The sample collection.bru defines `baseUrl` as a collection pre-request var.
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.refresh_vars();
+            let (scope, val, secret) = app.resolve_var("baseUrl", cx);
+            assert!(scope == Some(VarScope::Collection));
+            assert_eq!(val, "https://api.github.com");
+            assert!(!secret);
+        });
+    }
+
+    #[gpui::test]
+    fn refresh_vars_picks_up_env_scope(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let env = write_env(&tc.dir, "CovEnv", &[("host", "example.test")]);
+        // select_env sets selected_env and calls refresh_vars for us.
+        app.update(cx, |app, cx| app.select_env(Some(env), cx));
+        app.update(cx, |app, cx| {
+            let (scope, val, _secret) = app.resolve_var("host", cx);
+            assert!(scope == Some(VarScope::Env));
+            assert_eq!(val, "example.test");
+        });
+    }
+
+    #[gpui::test]
+    fn env_scope_overrides_collection_scope(cx: &mut gpui::TestAppContext) {
+        // An env var named `baseUrl` must win over the collection's `baseUrl`,
+        // mirroring send precedence (Env > Collection).
+        let (app, tc) = app_on_temp(cx);
+        let env = write_env(&tc.dir, "Override", &[("baseUrl", "https://override.test")]);
+        app.update(cx, |app, cx| app.select_env(Some(env), cx));
+        app.update(cx, |app, cx| {
+            let (scope, val, _secret) = app.resolve_var("baseUrl", cx);
+            assert!(scope == Some(VarScope::Env));
+            assert_eq!(val, "https://override.test");
+        });
+    }
+
+    #[gpui::test]
+    fn refresh_vars_skips_secret_env_vars(cx: &mut gpui::TestAppContext) {
+        // Secret collection-env vars are NOT applied in the send path, so they must
+        // not shadow a lower scope. Here there's no lower scope, so it resolves None.
+        let (app, tc) = app_on_temp(cx);
+        let rows = vec![crate::envfs::EnvRow {
+            name: "secretOnly".into(),
+            value: "hidden".into(),
+            enabled: true,
+            secret: true,
+        }];
+        crate::envfs::save_env(&tc.dir, "SecretEnv", &rows).unwrap();
+        app.update(cx, |app, cx| {
+            app.select_env(Some("SecretEnv".to_string()), cx)
+        });
+        app.update(cx, |app, cx| {
+            let (scope, _val, _secret) = app.resolve_var("secretOnly", cx);
+            assert!(scope.is_none());
+        });
+    }
+
+    // ── resolve_var: dynamic / unset / request scopes ─────────────────────────
+
+    #[gpui::test]
+    fn resolve_var_dynamic_branch(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            let (scope, val, secret) = app.resolve_var("$guid", cx);
+            assert!(scope == Some(VarScope::Dynamic));
+            assert_eq!(val, "(generated per request)");
+            assert!(!secret);
+        });
+    }
+
+    #[gpui::test]
+    fn resolve_var_unset_returns_none(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            let (scope, val, secret) = app.resolve_var("definitelyNotDefined", cx);
+            assert!(scope.is_none());
+            assert_eq!(val, String::new());
+            assert!(!secret);
+        });
+    }
+
+    #[gpui::test]
+    fn resolve_var_request_scope_from_file_when_grid_empty(cx: &mut gpui::TestAppContext) {
+        // With no Vars-tab grid open (var_pre_rows empty), request vars are read
+        // from the file's `vars:pre-request` block. Write one into the active tab's
+        // file on disk and re-open so OpenTab::load picks it up.
+        let (app, tc) = app_on_temp(cx);
+        let path = tc.dir.join("Repository Info.bru");
+        let mut src = std::fs::read_to_string(&path).unwrap();
+        src.push_str("\nvars:pre-request {\n  reqVar: reqVal\n}\n");
+        std::fs::write(&path, src).unwrap();
+        open_repo_info(&app, &tc.dir, cx);
+        app.update(cx, |app, cx| {
+            assert!(app.active_tab().is_some());
+            let (scope, val, _secret) = app.resolve_var("reqVar", cx);
+            assert!(scope == Some(VarScope::Request));
+            assert_eq!(val, "reqVal");
+        });
+    }
+
+    #[gpui::test]
+    fn resolve_var_request_scope_from_live_grid(cx: &mut gpui::TestAppContext) {
+        // When the Vars tab grid is populated (var_pre_rows non-empty) the grid
+        // cells are the source of truth, overriding the file.
+        let (app, tc) = app_on_temp(cx);
+        open_repo_info(&app, &tc.dir, cx);
+        // Add a live grid row and fill its name/value editors.
+        app.update(cx, |app, cx| app.var_add_row(false, cx));
+        app.update(cx, |app, cx| {
+            let i = app.active.unwrap();
+            let row = &app.tabs[i].var_pre_rows[0];
+            row.name.update(cx, |ed, cx| ed.set_line("gridVar", cx));
+            row.value.update(cx, |ed, cx| ed.set_line("gridVal", cx));
+        });
+        app.update(cx, |app, cx| {
+            let (scope, val, _secret) = app.resolve_var("gridVar", cx);
+            assert!(scope == Some(VarScope::Request));
+            assert_eq!(val, "gridVal");
+        });
+    }
+
+    #[gpui::test]
+    fn resolve_var_live_grid_ignores_disabled_rows(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        open_repo_info(&app, &tc.dir, cx);
+        app.update(cx, |app, cx| app.var_add_row(false, cx));
+        app.update(cx, |app, cx| {
+            let i = app.active.unwrap();
+            let row = &mut app.tabs[i].var_pre_rows[0];
+            row.enabled = false;
+            row.name.update(cx, |ed, cx| ed.set_line("offVar", cx));
+            row.value.update(cx, |ed, cx| ed.set_line("offVal", cx));
+        });
+        app.update(cx, |app, cx| {
+            // Disabled grid row contributes nothing → falls through to scope map.
+            let (scope, _val, _secret) = app.resolve_var("offVar", cx);
+            assert!(scope.is_none());
+        });
+    }
+
+    // ── on_hover_var ──────────────────────────────────────────────────────────
+
+    #[gpui::test]
+    fn on_hover_var_some_opens_popup_with_resolved_scope(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, _| app.refresh_vars()); // baseUrl → Collection
+        app.update(cx, |app, cx| {
+            let ev = editor::HoverVar {
+                name: Some("baseUrl".to_string()),
+                pos: gpui::point(px(10.), px(20.)),
+            };
+            app.on_hover_var(&ev, cx);
+        });
+        app.update(cx, |app, _| {
+            let p = app.var_popup.as_ref().expect("popup should be open");
+            assert_eq!(p.name, "baseUrl");
+            assert!(p.scope == Some(VarScope::Collection));
+            assert_eq!(p.value, "https://api.github.com");
+            assert!(!app.var_popup_hovered);
+        });
+    }
+
+    #[gpui::test]
+    fn on_hover_var_unset_marks_popup_unresolved(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            let ev = editor::HoverVar {
+                name: Some("nope".to_string()),
+                pos: gpui::point(px(1.), px(2.)),
+            };
+            app.on_hover_var(&ev, cx);
+        });
+        app.update(cx, |app, _| {
+            let p = app.var_popup.as_ref().unwrap();
+            assert!(p.scope.is_none());
+            assert_eq!(p.value, String::new());
+        });
+    }
+
+    #[gpui::test]
+    fn on_hover_var_none_schedules_dismiss_without_immediate_close(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        // Open a popup first.
+        app.update(cx, |app, cx| {
+            let ev = editor::HoverVar {
+                name: Some("baseUrl".to_string()),
+                pos: gpui::point(px(0.), px(0.)),
+            };
+            app.on_hover_var(&ev, cx);
+        });
+        let gen_before = app.update(cx, |app, _| app.var_popup_gen);
+        // Pointer left the {{var}}: schedules a *delayed* dismiss, popup stays for now.
+        app.update(cx, |app, cx| {
+            let ev = editor::HoverVar {
+                name: None,
+                pos: gpui::point(px(0.), px(0.)),
+            };
+            app.on_hover_var(&ev, cx);
+        });
+        app.update(cx, |app, _| {
+            assert!(app.var_popup.is_some()); // not closed synchronously
+            assert!(app.var_popup_gen > gen_before); // generation bumped
+        });
+    }
+
+    // ── on_goto_definition / goto_var_definition ──────────────────────────────
+
+    #[gpui::test]
+    fn goto_var_definition_request_scope_switches_to_vars_tab(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        open_repo_info(&app, &tc.dir, cx);
+        // Populate a live request var so it resolves to the Request scope.
+        app.update(cx, |app, cx| app.var_add_row(false, cx));
+        app.update(cx, |app, cx| {
+            let i = app.active.unwrap();
+            let row = &app.tabs[i].var_pre_rows[0];
+            row.name.update(cx, |ed, cx| ed.set_line("reqv", cx));
+            row.value.update(cx, |ed, cx| ed.set_line("x", cx));
+        });
+        app.update(cx, |app, cx| {
+            app.on_goto_definition(&editor::GotoTarget::Var("reqv".to_string()), cx);
+        });
+        app.update(cx, |app, _| {
+            let i = app.active.unwrap();
+            assert!(app.tabs[i].req_tab == ReqTab::Vars);
+            assert!(app.status.contains("request variable"));
+        });
+    }
+
+    #[gpui::test]
+    fn goto_var_definition_collection_scope_opens_settings(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, _| app.refresh_vars());
+        app.update(cx, |app, cx| {
+            app.on_goto_definition(&editor::GotoTarget::Var("baseUrl".to_string()), cx);
+        });
+        app.update(cx, |app, _| {
+            assert!(app.status.contains("collection settings"))
+        });
+    }
+
+    #[gpui::test]
+    fn goto_var_definition_env_scope_opens_env_manager(cx: &mut gpui::TestAppContext) {
+        let (app, tc) = app_on_temp(cx);
+        let env = write_env(&tc.dir, "GotoEnv", &[("envv", "e")]);
+        app.update(cx, |app, cx| app.select_env(Some(env), cx));
+        app.update(cx, |app, cx| {
+            app.on_goto_definition(&editor::GotoTarget::Var("envv".to_string()), cx);
+        });
+        app.update(cx, |app, _| {
+            assert!(app.env.is_some()); // env manager overlay opened
+            assert!(app.status.contains("active environment"));
+        });
+    }
+
+    #[gpui::test]
+    fn goto_var_definition_vault_scope_opens_vault(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, _| {
+            let mut m = HashMap::new();
+            m.insert("vk".to_string(), "vv".to_string());
+            app.vault = Some(m);
+            app.refresh_vars();
+        });
+        app.update(cx, |app, cx| {
+            app.on_goto_definition(&editor::GotoTarget::Var("vk".to_string()), cx);
+        });
+        app.update(cx, |app, _| {
+            assert!(app.vault_open);
+            assert!(app.status.contains("secrets vault"));
+        });
+    }
+
+    #[gpui::test]
+    fn goto_var_definition_dynamic_and_unset_set_status(cx: &mut gpui::TestAppContext) {
+        let (app, _tc) = app_on_temp(cx);
+        app.update(cx, |app, cx| {
+            app.on_goto_definition(&editor::GotoTarget::Var("$timestamp".to_string()), cx);
+        });
+        app.update(cx, |app, _| {
+            assert!(app.status.contains("dynamic variable"))
+        });
+        app.update(cx, |app, cx| {
+            app.on_goto_definition(&editor::GotoTarget::Var("missing".to_string()), cx);
+        });
+        app.update(cx, |app, _| {
+            assert!(app.status.contains("not defined in any scope"))
+        });
+    }
+
+    #[gpui::test]
+    fn on_goto_definition_local_missing_symbol_sets_status(cx: &mut gpui::TestAppContext) {
+        // A request tab uses its body_editor (no `text` editor). A Local target for
+        // a symbol that isn't in the (empty) body should report "No local definition".
+        let (app, tc) = app_on_temp(cx);
+        open_repo_info(&app, &tc.dir, cx);
+        app.update(cx, |app, cx| {
+            app.on_goto_definition(&editor::GotoTarget::Local("nonexistentFn".to_string()), cx);
+        });
+        app.update(cx, |app, _| {
+            assert!(app.status.contains("No local definition"))
+        });
+    }
+
+    #[gpui::test]
+    fn on_goto_definition_local_no_active_tab_is_noop(cx: &mut gpui::TestAppContext) {
+        // No request open → goto_local early-returns without touching status.
+        let tc = temp_collection();
+        let app = crate::test_support::build_app(cx, tc.dir.clone());
+        app.update(cx, |app, _| assert!(app.active.is_none()));
+        app.update(cx, |app, cx| {
+            app.on_goto_definition(&editor::GotoTarget::Local("whatever".to_string()), cx);
+        });
+        // Status unchanged (still the construction-time default).
+        app.update(cx, |app, _| {
+            assert!(!app.status.contains("No local definition"))
+        });
+    }
+}

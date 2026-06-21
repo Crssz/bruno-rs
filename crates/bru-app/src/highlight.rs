@@ -270,3 +270,226 @@ mod tests {
         assert!(super::js_symbol_range(src, "nope").is_none());
     }
 }
+
+#[cfg(test)]
+mod cov_tests {
+    use super::*;
+
+    /// Run `f` with the theme pinned to `dark`, restoring the previous mode after.
+    /// The active palette is a process-global flag, so tests that flip it must put
+    /// it back to avoid leaking into other tests in the same binary.
+    fn with_theme<R>(dark: bool, f: impl FnOnce() -> R) -> R {
+        let prev = theme::is_dark();
+        theme::set_dark(dark);
+        let out = f();
+        theme::set_dark(prev);
+        out
+    }
+
+    // ---- color(idx) / color_for(name) ----
+
+    #[test]
+    fn color_out_of_range_index_is_none() {
+        // Past the end of NAMES -> NAMES.get(kind)? short-circuits to None.
+        assert!(color(NAMES.len()).is_none());
+        assert!(color(9999).is_none());
+    }
+
+    #[test]
+    fn color_variable_index_is_none() {
+        // `variable` is index 13; color_for returns None so it falls through to
+        // the editor's default text color.
+        let idx = NAMES.iter().position(|&n| n == "variable").unwrap();
+        assert!(color(idx).is_none());
+        assert!(color_for("variable").is_none());
+    }
+
+    #[test]
+    fn color_string_index_is_some() {
+        let idx = NAMES.iter().position(|&n| n == "string").unwrap();
+        assert!(color(idx).is_some());
+    }
+
+    #[test]
+    fn color_for_covers_dark_arms() {
+        with_theme(true, || {
+            // One representative from each distinct dark match arm.
+            for name in [
+                "string.special.key",
+                "property",
+                "string",
+                "string.special",
+                "escape",
+                "number",
+                "constant",
+                "constant.builtin",
+                "keyword",
+                "function",
+                "function.builtin",
+                "function.method",
+                "constructor",
+                "variable.builtin",
+                "operator",
+                "comment",
+                "punctuation.bracket", // hits the `_` catch-all arm
+            ] {
+                assert!(color_for(name).is_some(), "dark color for {name}");
+            }
+        });
+    }
+
+    #[test]
+    fn color_for_covers_light_arms() {
+        with_theme(false, || {
+            for name in [
+                "string.special.key",
+                "property",
+                "string",
+                "string.special",
+                "escape",
+                "number",
+                "constant",
+                "constant.builtin",
+                "keyword",
+                "function",
+                "function.builtin",
+                "function.method",
+                "constructor",
+                "variable.builtin",
+                "operator",
+                "comment",
+                "punctuation.delimiter", // `_` catch-all arm
+            ] {
+                assert!(color_for(name).is_some(), "light color for {name}");
+            }
+            // `variable` is None regardless of theme.
+            assert!(color_for("variable").is_none());
+        });
+    }
+
+    #[test]
+    fn color_for_dark_and_light_differ() {
+        // The dark and light palettes use different hexes for the same capture,
+        // so the resolved color must change with the theme flag.
+        let dark = with_theme(true, || color_for("string").unwrap());
+        let light = with_theme(false, || color_for("string").unwrap());
+        assert!(dark != light, "string should recolor between themes");
+    }
+
+    #[test]
+    fn color_for_unknown_name_falls_to_catchall() {
+        // A name not in any explicit arm still resolves via the `_` branch.
+        assert!(with_theme(true, || color_for("totally.unknown").is_some()));
+        assert!(with_theme(false, || color_for("totally.unknown").is_some()));
+    }
+
+    // ---- json() / javascript() span building ----
+
+    #[test]
+    fn json_highlights_key_and_value_kinds() {
+        let spans = json("{\n  \"name\": \"x\",\n  \"n\": 42,\n  \"ok\": true,\n  \"z\": null\n}");
+        assert!(!spans.is_empty());
+        // Every span's capture index must be addressable by color().
+        for (_range, idx) in &spans {
+            assert!(*idx < NAMES.len(), "capture idx {idx} out of NAMES range");
+        }
+    }
+
+    #[test]
+    fn json_empty_and_whitespace_are_safe() {
+        assert!(json("").is_empty());
+        // Whitespace-only / invalid produce no panics (may be empty).
+        let _ = json("   \n\t");
+        let _ = json("{ this is not valid json ]");
+    }
+
+    #[test]
+    fn javascript_highlights_many_kinds() {
+        let code = "// a comment\n\
+const x = 42;\n\
+function greet(name) { return `hi ${name}`; }\n\
+class C { method() { return this.x; } }\n\
+const re = /ab+c/;\n";
+        let spans = javascript(code);
+        assert!(!spans.is_empty());
+        for (_range, idx) in &spans {
+            assert!(*idx < NAMES.len());
+            // Each span resolves to either a color or the default (None) — both ok.
+            let _ = color(*idx);
+        }
+    }
+
+    #[test]
+    fn javascript_empty_is_safe() {
+        assert!(javascript("").is_empty());
+    }
+
+    // ---- js_symbol_range / def_in_node priorities ----
+
+    #[test]
+    fn js_symbol_range_function_declaration() {
+        let src = "function doThing() { return 1; }";
+        let r = js_symbol_range(src, "doThing").unwrap();
+        assert_eq!(&src[r], "doThing");
+    }
+
+    #[test]
+    fn js_symbol_range_generator_and_class() {
+        let gen = "function* gen() { yield 1; }";
+        assert_eq!(js_symbol_range(gen, "gen").map(|r| &gen[r]), Some("gen"));
+        let cls = "class Widget {}";
+        assert_eq!(
+            js_symbol_range(cls, "Widget").map(|r| &cls[r]),
+            Some("Widget")
+        );
+    }
+
+    #[test]
+    fn js_symbol_range_method_definition() {
+        let src = "class C {\n  doWork() { return 2; }\n}";
+        let r = js_symbol_range(src, "doWork").unwrap();
+        assert_eq!(&src[r], "doWork");
+    }
+
+    #[test]
+    fn js_symbol_range_exports_assignment() {
+        // exports.foo = ... is the assignment_expression / member_expression path
+        // (priority 3). With no higher-priority declaration it should be chosen.
+        let src = "exports.foo = function () { return 1; };";
+        let r = js_symbol_range(src, "foo").unwrap();
+        assert_eq!(&src[r], "foo");
+    }
+
+    #[test]
+    fn js_symbol_range_object_pair_key() {
+        // A `pair` key in an object literal (priority 4).
+        let src = "module.exports = { handler: function () {} };";
+        let r = js_symbol_range(src, "handler").unwrap();
+        assert_eq!(&src[r], "handler");
+    }
+
+    #[test]
+    fn js_symbol_range_prefers_declaration_over_export_shorthand() {
+        // function_declaration (prio 0) must beat the `{ run }` shorthand (prio 4).
+        let src = "function run() { return 7; }\nmodule.exports = { run };";
+        let r = js_symbol_range(src, "run").unwrap();
+        assert_eq!(&src[r.clone()], "run");
+        assert!(r.start < 25, "should land on the decl, not the export line");
+    }
+
+    #[test]
+    fn js_symbol_range_skips_destructuring_and_strings() {
+        // `const { x } = obj` is a destructuring pattern -> the variable_declarator
+        // name is not a plain identifier, so it is skipped. A bare match inside a
+        // string also must not be picked up by the parse-based search.
+        let src = "const { notme } = obj;\nconst s = 'notme appears here too';";
+        assert!(js_symbol_range(src, "notme").is_none());
+        // And a symbol that simply does not exist.
+        assert!(js_symbol_range("const a = 1;", "zzz").is_none());
+    }
+
+    #[test]
+    fn js_symbol_range_empty_source() {
+        assert!(js_symbol_range("", "anything").is_none());
+    }
+}
