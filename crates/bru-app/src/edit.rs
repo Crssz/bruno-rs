@@ -455,23 +455,6 @@ pub fn valid_var_name(name: &str) -> bool {
     name.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
 }
-/// Rows `(key, value, disabled)` of a dictionary block.
-#[allow(dead_code)]
-pub fn dict_rows(b: &bru_core::Block) -> Vec<(String, String, bool)> {
-    match &b.content {
-        BlockContent::Dict(entries) => entries
-            .iter()
-            .map(|e| {
-                (
-                    e.key.name().to_string(),
-                    e.value.as_inline().to_string(),
-                    e.disabled,
-                )
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -627,19 +610,5 @@ mod block_tests {
         for bad in ["my var", "a b", "tok!", "a/b", "a:b", "a$b"] {
             assert!(!valid_var_name(bad), "should be invalid: {bad:?}");
         }
-    }
-
-    #[test]
-    fn dict_rows_reads_entries_with_disabled_flag() {
-        let file = bru_lang::parse("headers {\n  a: 1\n  ~b: 2\n}\n").expect("parse");
-        let block = file.block("headers").expect("headers block");
-        let rows = dict_rows(block);
-        assert_eq!(
-            rows,
-            vec![
-                ("a".to_string(), "1".to_string(), false),
-                ("b".to_string(), "2".to_string(), true),
-            ]
-        );
     }
 }
