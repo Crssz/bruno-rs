@@ -291,6 +291,13 @@ struct BruApp {
     tab_menu: Option<(usize, Point<Pixels>)>,
     /// Hover popup for a `{{var}}` (None = closed).
     var_popup: Option<VarPopup>,
+    /// True while the pointer is over the var popup card. Keeps a scheduled
+    /// dismissal (fired when the pointer leaves the `{{var}}`) from closing the
+    /// popup before a Copy click lands.
+    var_popup_hovered: bool,
+    /// Bumped whenever the popup opens or its hover state changes, so an in-flight
+    /// delayed dismiss only fires for the latest generation (stale ones no-op).
+    var_popup_gen: u64,
     /// Right-click edit menu over a code editor (None = closed).
     editor_menu: Option<EditorMenuState>,
     /// Cached non-request variable scopes (vault/global/collection/env), keyed by
@@ -704,6 +711,8 @@ impl BruApp {
             ctx_menu: None,
             tab_menu: None,
             var_popup: None,
+            var_popup_hovered: false,
+            var_popup_gen: 0,
             editor_menu: None,
             var_scopes: HashMap::new(),
             rename: None,

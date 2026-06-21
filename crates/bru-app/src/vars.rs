@@ -212,8 +212,8 @@ impl BruApp {
         resolve_module_in(&base, rel).or_else(|| resolve_module_in(&self.dir, rel))
     }
 
-    /// React to an editor's hovered-`{{var}}` change: open/switch the popup, or
-    /// (on a click → `None`) dismiss it.
+    /// React to an editor's hovered-`{{var}}` change: open/switch the popup on
+    /// entering a var, or schedule its dismissal on leaving one (or on a click).
     pub(crate) fn on_hover_var(&mut self, ev: &editor::HoverVar, cx: &mut Context<Self>) {
         match &ev.name {
             Some(name) => {
@@ -225,16 +225,51 @@ impl BruApp {
                     secret,
                     pos: ev.pos,
                 });
+                self.var_popup_hovered = false;
+                // A fresh hover cancels any pending dismiss from a prior var.
+                self.var_popup_gen += 1;
+                cx.notify();
             }
-            None => self.var_popup = None,
+            // Pointer left the `{{var}}`: don't close immediately — give it a short
+            // grace to reach the popup (e.g. to click Copy). The popup's own hover
+            // tracking cancels this if the pointer lands on it.
+            None => self.schedule_var_popup_dismiss(cx),
         }
-        cx.notify();
+    }
+
+    /// Dismiss the var popup after a short grace period, unless the pointer has
+    /// since entered the popup (`var_popup_hovered`) or a newer hover superseded
+    /// this one (`var_popup_gen` changed). Bridges the gap between the `{{var}}`
+    /// and the card so moving onto the popup doesn't dismiss it first.
+    fn schedule_var_popup_dismiss(&mut self, cx: &mut Context<Self>) {
+        if self.var_popup.is_none() {
+            return;
+        }
+        self.var_popup_gen += 1;
+        let generation = self.var_popup_gen;
+        cx.spawn(async move |this, cx| {
+            let timer = cx
+                .background_executor()
+                .timer(std::time::Duration::from_millis(200));
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.var_popup_gen == generation && !this.var_popup_hovered {
+                    this.var_popup = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// The `{{var}}` hover popup: name + scope badge + resolved value + Copy.
-    pub(crate) fn var_popup_overlay(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn var_popup_overlay(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<Div> {
         let Some(p) = &self.var_popup else {
-            return div();
+            return div().id("var-popup");
         };
         let resolved = p.scope.is_some();
         let badge = match p.scope {
@@ -260,6 +295,17 @@ impl BruApp {
             raw_top + 18.0
         };
         let mut card = div()
+            .id("var-popup")
+            // Track the pointer over the card so a dismiss scheduled when it left
+            // the `{{var}}` is cancelled here, and so leaving the card dismisses it.
+            .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                this.var_popup_hovered = *hovered;
+                if *hovered {
+                    this.var_popup_gen += 1; // cancel the pending dismiss
+                } else {
+                    this.schedule_var_popup_dismiss(cx);
+                }
+            }))
             .absolute()
             .left(px(left))
             .top(px(top))

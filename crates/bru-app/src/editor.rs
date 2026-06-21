@@ -856,17 +856,17 @@ impl CodeEditor {
             self.select_to(idx, cx);
             return; // no var-hover work mid drag-select
         }
-        // Emit when the hovered `{{var}}` changes; only when entering one (the
-        // parent keeps the popup up over empty text so a Copy click is reachable).
+        // Emit whenever the hovered `{{var}}` changes — `Some` on entering one,
+        // `None` on leaving it. The parent opens the popup on `Some` and dismisses
+        // it on `None` (after a short grace, so the pointer can travel into the
+        // popup to reach Copy).
         let cur = self.var_at(idx);
         if cur != self.hovered_var {
             self.hovered_var = cur.clone();
-            if cur.is_some() {
-                cx.emit(HoverVar {
-                    name: cur,
-                    pos: e.position,
-                });
-            }
+            cx.emit(HoverVar {
+                name: cur,
+                pos: e.position,
+            });
         }
     }
 }
