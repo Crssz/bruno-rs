@@ -198,6 +198,9 @@ pub struct CodeEditor {
     /// When the last edit was a single-char insert, the cursor position right
     /// after it — so the next contiguous keystroke extends the same undo entry.
     coalesce_pos: Option<usize>,
+    /// Latest pointer position during an active drag-select (window coords). Lets
+    /// the auto-scroll tick keep extending the selection while held past an edge.
+    drag_pos: Option<Point<Pixels>>,
 }
 
 impl CodeEditor {
@@ -221,6 +224,7 @@ impl CodeEditor {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             coalesce_pos: None,
+            drag_pos: None,
         };
         ed.recompute_highlight();
         ed
@@ -363,6 +367,14 @@ impl CodeEditor {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.set_selection_head(offset);
+        cx.notify();
+    }
+
+    /// Move the selection's moving end to `offset` without notifying — for use
+    /// during paint (the auto-scroll tick), where the redraw is driven by an
+    /// explicit animation frame instead.
+    fn set_selection_head(&mut self, offset: usize) {
         if self.selection_reversed {
             self.selected_range.start = offset;
         } else {
@@ -372,7 +384,36 @@ impl CodeEditor {
             self.selection_reversed = !self.selection_reversed;
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
-        cx.notify();
+    }
+
+    /// During a drag, if the pointer is held past the left/right edge of a single-
+    /// line box, advance the selection toward that edge so the view keeps scrolling
+    /// while the pointer is held still. Returns true if it moved — the caller then
+    /// schedules another frame to continue. Speed scales with distance past the edge.
+    fn auto_scroll_tick(&mut self) -> bool {
+        if !self.single_line {
+            return false;
+        }
+        let (Some(bounds), Some(pos)) = (self.bounds, self.drag_pos) else {
+            return false;
+        };
+        let cur = self.cursor();
+        let past_right = f32::from(pos.x - (bounds.left() + bounds.size.width));
+        let past_left = f32::from(bounds.left() - pos.x);
+        let new = if past_right > 0.0 {
+            let steps = ((past_right / 8.0) as usize).clamp(1, 40);
+            (0..steps).fold(cur, |o, _| self.next_grapheme(o))
+        } else if past_left > 0.0 {
+            let steps = ((past_left / 8.0) as usize).clamp(1, 40);
+            (0..steps).fold(cur, |o, _| self.prev_grapheme(o))
+        } else {
+            return false;
+        };
+        if new == cur {
+            return false;
+        }
+        self.set_selection_head(new);
+        true
     }
 
     /// Move cursor up/down `delta` lines, keeping the byte column where possible.
@@ -782,6 +823,7 @@ impl CodeEditor {
     }
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.is_selecting = false;
+        self.drag_pos = None;
     }
     /// Right-click: focus, place the caret at the click *unless* it lands inside
     /// the current selection (so Cut/Copy keep acting on it), then ask the parent
@@ -1267,6 +1309,7 @@ impl Element for EditorElement {
                     && e.pressed_button == Some(MouseButton::Left)
                 {
                     editor.update(cx, |ed, cx| {
+                        ed.drag_pos = Some(e.position);
                         let idx = ed.index_for_position(e.position);
                         ed.select_to(idx, cx);
                     });
@@ -1275,9 +1318,17 @@ impl Element for EditorElement {
             let editor = self.editor.clone();
             window.on_mouse_event(move |_e: &MouseUpEvent, phase, _window, cx: &mut App| {
                 if phase == gpui::DispatchPhase::Bubble {
-                    editor.update(cx, |ed, _cx| ed.is_selecting = false);
+                    editor.update(cx, |ed, _cx| {
+                        ed.is_selecting = false;
+                        ed.drag_pos = None;
+                    });
                 }
             });
+            // Keep scrolling while the pointer is held past an edge (no move events
+            // fire then) by ticking once per frame until it stops making progress.
+            if self.editor.update(cx, |ed, _cx| ed.auto_scroll_tick()) {
+                window.request_animation_frame();
+            }
         }
     }
 }
