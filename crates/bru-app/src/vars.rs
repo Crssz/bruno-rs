@@ -98,6 +98,120 @@ impl BruApp {
         }
     }
 
+    // ── Ctrl/Cmd+click "go to definition" ─────────────────────────────────────
+    /// Route a Ctrl+click target: a `{{var}}` to its defining scope, or a
+    /// `require(...)` specifier to the file it resolves to.
+    pub(crate) fn on_goto_definition(&mut self, target: &editor::GotoTarget, cx: &mut Context<Self>) {
+        match target {
+            editor::GotoTarget::Var(name) => self.goto_var_definition(name, cx),
+            editor::GotoTarget::Module { spec, symbol } => {
+                self.goto_module(spec, symbol.as_deref(), cx)
+            }
+            editor::GotoTarget::Local(name) => self.goto_local(name, cx),
+        }
+    }
+
+    /// Jump to a symbol defined in the active editor's own buffer (a local
+    /// function/const/class) — select its declaration and scroll it into view.
+    fn goto_local(&mut self, symbol: &str, cx: &mut Context<Self>) {
+        let Some(i) = self.active else { return };
+        let (editor, scroll) = match &self.tabs[i].text {
+            Some(ed) => (ed.clone(), self.tabs[i].text_scroll.clone()),
+            None => (
+                self.tabs[i].body_editor.clone(),
+                self.tabs[i].body_scroll.clone(),
+            ),
+        };
+        if !reveal_symbol(&editor, &scroll, symbol, cx) {
+            self.status = format!("No local definition for '{symbol}'");
+            cx.notify();
+        }
+    }
+
+    /// Open the editor/modal where `name`'s effective scope defines it.
+    fn goto_var_definition(&mut self, name: &str, cx: &mut Context<Self>) {
+        let (scope, _value, _secret) = self.resolve_var(name, cx);
+        match scope {
+            Some(VarScope::Request) => {
+                if let Some(i) = self.active {
+                    self.tabs[i].switch_tab(ReqTab::Vars, cx);
+                }
+                self.status = format!("'{name}' is a request variable (Vars tab)");
+            }
+            Some(VarScope::Env) => {
+                self.env_open(cx);
+                if let Some(env) = self.selected_env.clone() {
+                    self.env_select(env, cx);
+                }
+                self.status = format!("'{name}' is defined in the active environment");
+            }
+            Some(VarScope::Global) => {
+                self.env_open(cx);
+                self.env_set_scope(true, cx);
+                if let Some(env) = self.selected_global_env.clone() {
+                    self.env_select(env, cx);
+                }
+                self.status = format!("'{name}' is defined in the active global environment");
+            }
+            Some(VarScope::Collection) => {
+                self.open_collection_settings(cx);
+                self.status = format!("'{name}' is defined in collection settings");
+            }
+            Some(VarScope::Vault) => {
+                self.open_vault(cx);
+                self.status = format!("'{name}' is defined in the secrets vault");
+            }
+            Some(VarScope::Dynamic) => {
+                self.status = format!("'{name}' is a dynamic variable (generated per request)");
+            }
+            None => self.status = format!("'{name}' is not defined in any scope"),
+        }
+        cx.notify();
+    }
+
+    /// Resolve a `require(spec)` to a file (relative to the active request's
+    /// folder) and open it in an editable in-app tab. When `symbol` is set (the
+    /// click was on an imported identifier), also scroll to and select that
+    /// symbol's definition via a tree-sitter parse of the opened file.
+    fn goto_module(&mut self, spec: &str, symbol: Option<&str>, cx: &mut Context<Self>) {
+        let Some(p) = self.resolve_module_path(spec) else {
+            let base = self
+                .active_tab()
+                .and_then(|t| t.path.parent().map(|p| p.display().to_string()))
+                .unwrap_or_default();
+            self.status = format!("Cannot find module '{spec}' in {base} or the collection root");
+            cx.notify();
+            return;
+        };
+        self.open_text_file(p, cx);
+        let Some(symbol) = symbol else { return };
+        let Some(i) = self.active else { return };
+        let Some(editor) = self.tabs[i].text.clone() else {
+            return;
+        };
+        let scroll = self.tabs[i].text_scroll.clone();
+        reveal_symbol(&editor, &scroll, symbol, cx);
+        cx.notify();
+    }
+
+    /// Resolve a `require` specifier to a file. Relative specifiers are tried
+    /// against the active request's own folder first (CommonJS), then the
+    /// collection root (where shared scripts are commonly kept). Each base does
+    /// node-style resolution: exact path, then `.js`/`.json`, then `index.js`.
+    /// Bare specifiers (npm packages) return `None` — there's no `node_modules`.
+    fn resolve_module_path(&self, spec: &str) -> Option<PathBuf> {
+        if Path::new(spec).is_absolute() {
+            return resolve_module_file(Path::new(spec));
+        }
+        if !(spec.starts_with("./") || spec.starts_with("../")) {
+            return None;
+        }
+        // Drop a leading `./` so the common case joins to a clean path.
+        let rel = spec.strip_prefix("./").unwrap_or(spec);
+        let base = self.active_tab()?.path.parent()?.to_path_buf();
+        resolve_module_in(&base, rel).or_else(|| resolve_module_in(&self.dir, rel))
+    }
+
     /// React to an editor's hovered-`{{var}}` change: open/switch the popup, or
     /// (on a click → `None`) dismiss it.
     pub(crate) fn on_hover_var(&mut self, ev: &editor::HoverVar, cx: &mut Context<Self>) {
@@ -219,5 +333,109 @@ impl BruApp {
             );
         }
         card
+    }
+}
+
+/// Select `symbol`'s definition in `editor` (located via a tree-sitter parse) and
+/// scroll it into view with `scroll`. Returns false if no definition was found.
+fn reveal_symbol(
+    editor: &Entity<CodeEditor>,
+    scroll: &ScrollHandle,
+    symbol: &str,
+    cx: &mut Context<BruApp>,
+) -> bool {
+    let content = editor.read(cx).text().to_string();
+    let Some(range) = highlight::js_symbol_range(&content, symbol) else {
+        return false;
+    };
+    let line = content[..range.start].matches('\n').count();
+    editor.update(cx, |ed, cx| ed.select_byte_range(range, cx));
+    // Bring the definition near the top, keeping ~2 lines of context above.
+    let y = line.saturating_sub(2) as f32 * 19.0;
+    scroll.set_offset(gpui::point(px(0.), px(-y)));
+    true
+}
+
+/// Node-style resolution of an already-joined module path: the exact file, then
+/// the path with `.js`/`.json` appended, then `index.js` inside it (a directory).
+fn resolve_module_file(joined: &Path) -> Option<PathBuf> {
+    if joined.is_file() {
+        return Some(joined.to_path_buf());
+    }
+    for ext in ["js", "json"] {
+        let mut s = joined.as_os_str().to_os_string();
+        s.push(".");
+        s.push(ext);
+        let p = PathBuf::from(s);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let idx = joined.join("index.js");
+    idx.is_file().then_some(idx)
+}
+
+/// Resolve `rel` (a `./`-stripped relative specifier) against `base`.
+fn resolve_module_in(base: &Path, rel: &str) -> Option<PathBuf> {
+    resolve_module_file(&base.join(rel))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_module_file, resolve_module_in};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static N: AtomicU32 = AtomicU32::new(0);
+
+    struct TempDir {
+        path: PathBuf,
+    }
+    impl TempDir {
+        fn new() -> Self {
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("bru-mod-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&path).unwrap();
+            TempDir { path }
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn resolves_sibling_with_and_without_extension() {
+        let d = TempDir::new();
+        std::fs::write(d.path.join("helper.js"), "module.exports = 1;").unwrap();
+        // Exact name, and bare name with `.js` inferred, both resolve to the file.
+        assert!(resolve_module_in(&d.path, "helper.js").unwrap().is_file());
+        let hit = resolve_module_in(&d.path, "helper").unwrap();
+        assert_eq!(hit.file_name().unwrap(), "helper.js");
+    }
+
+    #[test]
+    fn resolves_json_and_directory_index() {
+        let d = TempDir::new();
+        std::fs::write(d.path.join("data.json"), "{}").unwrap();
+        let pkg = d.path.join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("index.js"), "module.exports = {};").unwrap();
+        assert_eq!(
+            resolve_module_in(&d.path, "data").unwrap().file_name().unwrap(),
+            "data.json"
+        );
+        assert_eq!(
+            resolve_module_in(&d.path, "pkg").unwrap().file_name().unwrap(),
+            "index.js"
+        );
+    }
+
+    #[test]
+    fn missing_file_resolves_to_none() {
+        let d = TempDir::new();
+        assert!(resolve_module_in(&d.path, "nope").is_none());
+        assert!(resolve_module_file(&d.path.join("nope.js")).is_none());
     }
 }

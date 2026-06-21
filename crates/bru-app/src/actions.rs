@@ -143,6 +143,7 @@ impl BruApp {
         if self.palette_open {
             self.palette_open = false;
         } else if self.var_popup.take().is_some()
+            || self.editor_menu.take().is_some()
             || self.confirm_close.take().is_some()
             || std::mem::take(&mut self.confirm_close_all)
             || self.confirm_delete.take().is_some()

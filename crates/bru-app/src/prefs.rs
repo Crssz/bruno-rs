@@ -34,8 +34,8 @@ pub fn globals_root() -> PathBuf {
     home.join(".bruno-rs").join("globals")
 }
 
-/// Load persisted prefs as `(timeout_secs, insecure, light)`.
-pub fn load_prefs() -> (u64, bool, bool) {
+/// Load persisted prefs as `(timeout_secs, insecure, light, developer)`.
+pub fn load_prefs() -> (u64, bool, bool, bool) {
     let v = prefs_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
@@ -44,14 +44,20 @@ pub fn load_prefs() -> (u64, bool, bool) {
             v.get("timeout").and_then(|x| x.as_u64()).unwrap_or(30),
             v.get("insecure").and_then(|x| x.as_bool()).unwrap_or(false),
             v.get("light").and_then(|x| x.as_bool()).unwrap_or(false),
+            v.get("developer").and_then(|x| x.as_bool()).unwrap_or(false),
         ),
-        None => (30, false, false),
+        None => (30, false, false, false),
     }
 }
 
-pub fn save_prefs(timeout: u64, insecure: bool, light: bool) {
+pub fn save_prefs(timeout: u64, insecure: bool, light: bool, developer: bool) {
     if let Some(p) = prefs_path() {
-        let json = serde_json::json!({ "timeout": timeout, "insecure": insecure, "light": light });
+        let json = serde_json::json!({
+            "timeout": timeout,
+            "insecure": insecure,
+            "light": light,
+            "developer": developer,
+        });
         let _ = std::fs::write(p, json.to_string());
     }
 }

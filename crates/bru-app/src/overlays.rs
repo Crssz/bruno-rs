@@ -386,6 +386,34 @@ impl BruApp {
                 div()
                     .flex()
                     .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(check_box(self.pref_developer).on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| this.toggle_developer(cx)),
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(theme::subtext())
+                                    .child("Developer Mode"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(theme::muted())
+                                    .child("Allow scripts to require() local files"),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
                     .justify_end()
                     .gap_2()
                     .child(ghost_btn("Close").on_mouse_up(

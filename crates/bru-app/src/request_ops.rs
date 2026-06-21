@@ -8,6 +8,11 @@ impl BruApp {
     /// runtime) and deliver the result back to the UI via a oneshot + cx.spawn.
     pub(crate) fn send(&mut self, cx: &mut Context<Self>) {
         let Some(i) = self.active else { return };
+        if self.tabs[i].text.is_some() {
+            self.status = "Not a request \u{2014} nothing to send".into();
+            cx.notify();
+            return;
+        }
         self.tabs[i].apply_edits(cx);
         let path = self.tabs[i].path.clone();
         let file = self.tabs[i].file.clone();
@@ -16,11 +21,12 @@ impl BruApp {
         let opts = self.send_options();
         let globals = self.send_globals();
         let env = self.selected_env.clone();
+        let developer = self.pref_developer;
         self.tabs[i].sending = true;
         self.status = "Sending\u{2026}".into();
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_blocking(file, dir, script_dir, opts, globals, env));
+            let _ = tx.send(run_blocking(file, dir, script_dir, opts, globals, env, developer));
         });
         cx.spawn(async move |this, cx| {
             let result = rx.await;
@@ -84,7 +90,12 @@ impl BruApp {
         let Some(i) = self.active else { return };
         self.tabs[i].apply_edits(cx);
         let path = self.tabs[i].path.clone();
-        let ok = std::fs::write(&path, bru_lang::serialize(&self.tabs[i].file)).is_ok();
+        // A plain-text tab writes its editor verbatim; a request serializes its file.
+        let ok = if let Some(ed) = &self.tabs[i].text {
+            std::fs::write(&path, ed.read(cx).text()).is_ok()
+        } else {
+            std::fs::write(&path, bru_lang::serialize(&self.tabs[i].file)).is_ok()
+        };
         if ok {
             self.dirty.remove(&path);
         }
@@ -270,5 +281,25 @@ impl BruApp {
             self.status.clear();
             self.home = false;
         }
+    }
+
+    /// Open a plain-text file (e.g. a `require`d `.js`) in its own editable tab,
+    /// activating it if already open. Used by Ctrl+click "go to" on a module path.
+    pub(crate) fn open_text_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(i) = self.tabs.iter().position(|t| t.path == path) {
+            self.active = Some(i);
+            cx.notify();
+            return;
+        }
+        match OpenTab::load_text(path, cx) {
+            Some(tab) => {
+                self.tabs.push(tab);
+                self.active = Some(self.tabs.len() - 1);
+                self.home = false;
+                self.status.clear();
+            }
+            None => self.status = "Could not open file".into(),
+        }
+        cx.notify();
     }
 }

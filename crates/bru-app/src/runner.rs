@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 /// Run a request to completion on a fresh tokio runtime (called on a worker
 /// thread). Returns the formatted response or an error string.
+#[allow(clippy::too_many_arguments)]
 pub fn run_blocking(
     file: BruFile,
     dir: PathBuf,
@@ -14,6 +15,7 @@ pub fn run_blocking(
     opts: bru_http::SendOptions,
     global_vars: HashMap<String, String>,
     env: Option<String>,
+    developer: bool,
 ) -> bru_engine::RunOutcome {
     let errout = |e: String| bru_engine::RunOutcome::errored("request".to_string(), e);
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -38,6 +40,7 @@ pub fn run_blocking(
             client,
             send_options: opts,
             script_dir,
+            developer_mode: developer,
             ..Default::default()
         };
         bru_engine::run_request(&file, &mut ctx).await
@@ -51,6 +54,7 @@ pub fn run_folder_blocking(
     opts: bru_http::SendOptions,
     global_vars: HashMap<String, String>,
     env: Option<String>,
+    developer: bool,
 ) -> Vec<RunResult> {
     let err_row = |name: &str, e: String| RunResult {
         name: name.to_string(),
@@ -79,6 +83,7 @@ pub fn run_folder_blocking(
             vars,
             client,
             send_options: opts,
+            developer_mode: developer,
             ..Default::default()
         };
         let mut results = Vec::new();

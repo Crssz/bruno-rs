@@ -13,6 +13,7 @@ use std::cell::OnceCell;
 use std::ops::Range;
 
 use gpui::{rgb, Hsla};
+use tree_sitter::{Node, Parser};
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
 use crate::theme;
@@ -157,6 +158,71 @@ pub fn javascript(code: &str) -> Vec<(Range<usize>, usize)> {
     })
 }
 
+/// The byte range of `symbol`'s definition in JavaScript `source`, located by a
+/// real tree-sitter parse (so it ignores matches inside strings/comments and
+/// prefers a declaration over an export reference). Used for "Go to
+/// Implementation" to land on the exact line. `None` if no definition is found.
+pub fn js_symbol_range(source: &str, symbol: &str) -> Option<Range<usize>> {
+    let mut parser = Parser::new();
+    let lang: tree_sitter::Language = tree_sitter_javascript::LANGUAGE.into();
+    parser.set_language(&lang).ok()?;
+    let tree = parser.parse(source, None)?;
+
+    // DFS, keeping the highest-priority (lowest number) candidate.
+    let mut best: Option<(u8, Range<usize>)> = None;
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if let Some((prio, range)) = def_in_node(node, source, symbol) {
+            let better = match &best {
+                Some((bp, _)) => prio < *bp,
+                None => true,
+            };
+            if better {
+                best = Some((prio, range));
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    best.map(|(_, r)| r)
+}
+
+/// If `node` defines `symbol`, return `(priority, name-range)`. Lower priority
+/// wins: a `function`/`class`/`const` declaration beats an `exports.x =` or an
+/// object-property/shorthand export reference.
+fn def_in_node(node: Node, src: &str, symbol: &str) -> Option<(u8, Range<usize>)> {
+    let text = |n: Node| src.get(n.byte_range());
+    let (field, prio): (&str, u8) = match node.kind() {
+        "function_declaration" | "generator_function_declaration" | "class_declaration" => {
+            ("name", 0)
+        }
+        "variable_declarator" => ("name", 1),
+        "method_definition" => ("name", 2),
+        "pair" => ("key", 4),
+        "assignment_expression" => {
+            // exports.x = ... / module.exports.x = ...
+            let left = node.child_by_field_name("left")?;
+            let prop = (left.kind() == "member_expression")
+                .then(|| left.child_by_field_name("property"))
+                .flatten()?;
+            return (text(prop) == Some(symbol)).then(|| (3, prop.byte_range()));
+        }
+        "shorthand_property_identifier" => {
+            // `module.exports = { x }`
+            return (text(node) == Some(symbol)).then(|| (4, node.byte_range()));
+        }
+        _ => return None,
+    };
+    let name = node.child_by_field_name(field)?;
+    // Only plain names — skip destructuring patterns (`const { x } = ...`).
+    if !matches!(name.kind(), "identifier" | "property_identifier") {
+        return None;
+    }
+    (text(name) == Some(symbol)).then(|| (prio, name.byte_range()))
+}
+
 #[cfg(test)]
 mod tests {
     // These guard the `make_config(...).expect(...)` path: a query that fails to
@@ -179,5 +245,24 @@ mod tests {
     fn empty_input_is_safe() {
         assert!(super::json("").is_empty());
         assert!(super::javascript("").is_empty());
+    }
+
+    #[test]
+    fn js_symbol_range_prefers_declaration() {
+        // The function declaration (early) should win over the export shorthand.
+        let src = "async function useOAPISetVar(){ return 1; }\nmodule.exports = { useOAPISetVar };";
+        let r = super::js_symbol_range(src, "useOAPISetVar").unwrap();
+        assert_eq!(&src[r.clone()], "useOAPISetVar");
+        assert!(r.start < 30, "should point at the decl, not the export line");
+    }
+
+    #[test]
+    fn js_symbol_range_const_arrow_and_missing() {
+        let src = "const helper = () => 1;\nmodule.exports = { helper };";
+        assert_eq!(
+            super::js_symbol_range(src, "helper").map(|r| &src[r]),
+            Some("helper")
+        );
+        assert!(super::js_symbol_range(src, "nope").is_none());
     }
 }

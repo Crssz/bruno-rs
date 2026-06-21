@@ -44,10 +44,58 @@ impl OpenTab {
             auth_rows: Vec::new(),
             path_rows: Vec::new(),
             sending: false,
+            script_post: false,
             response: None,
+            text: None,
+            text_scroll: gpui::ScrollHandle::new(),
+            body_scroll: gpui::ScrollHandle::new(),
         };
         tab.load_active_tab(cx);
         Some(tab)
+    }
+
+    /// Build a plain-text file tab (a `require`d `.js`/`.json`, or any text file)
+    /// editable in-app. Highlight is picked from the extension. `None` if the file
+    /// can't be read.
+    pub(crate) fn load_text(path: PathBuf, cx: &mut Context<BruApp>) -> Option<Self> {
+        let content = std::fs::read_to_string(&path).ok()?;
+        let lang = match path.extension().and_then(|e| e.to_str()) {
+            Some("js" | "mjs" | "cjs" | "ts") => Lang::JavaScript,
+            Some("json") => Lang::Json,
+            _ => Lang::Plain,
+        };
+        let editor = cx.new(|cx| CodeEditor::new(cx, ""));
+        editor.update(cx, |ed, cx| ed.set_text(&content, lang, cx));
+        let p = path.clone();
+        cx.subscribe(&editor, move |this, _ed, _ev: &editor::Changed, cx| {
+            this.dirty.insert(p.clone());
+            cx.notify();
+        })
+        .detach();
+        // Gives the text editor the right-click menu + Ctrl+click navigation too.
+        subscribe_hover(&editor, cx);
+        Some(Self {
+            path,
+            method: String::new(),
+            req_tab: ReqTab::Body,
+            resp_tab: RespTab::Response,
+            file: BruFile::default(),
+            body_editor: cx.new(|cx| CodeEditor::new(cx, "")),
+            body_vars_editor: cx.new(|cx| CodeEditor::new(cx, "")),
+            url_input: cx.new(|cx| CodeEditor::single_line(cx, "")),
+            edit_kind: EditKind::None,
+            kv_rows: Vec::new(),
+            var_pre_rows: Vec::new(),
+            var_post_rows: Vec::new(),
+            auth_rows: Vec::new(),
+            path_rows: Vec::new(),
+            sending: false,
+            script_post: false,
+            response: None,
+            text: Some(editor),
+            text_scroll: gpui::ScrollHandle::new(),
+            body_scroll: gpui::ScrollHandle::new(),
+        })
     }
 
     /// Display title: `meta.name`, else the file stem.
@@ -65,8 +113,12 @@ impl OpenTab {
             .unwrap_or_else(|| "Untitled".into())
     }
 
-    /// Fold the editor + URL edits into the in-memory file.
+    /// Fold the editor + URL edits into the in-memory file. No-op for plain-text
+    /// tabs — their editor *is* the document, written straight to disk on save.
     pub(crate) fn apply_edits(&mut self, cx: &mut Context<BruApp>) {
+        if self.text.is_some() {
+            return;
+        }
         let text = self.body_editor.read(cx).text().to_string();
         if let EditKind::Source = self.edit_kind {
             if let Ok(f) = bru_lang::parse(&text) {
@@ -290,19 +342,17 @@ impl OpenTab {
                 }
             }
             ReqTab::Script => {
-                let t = text_block(f, "script:pre-request");
+                // The single "Script" tab holds both scripts; the inner sub-tab
+                // (`script_post`) selects which block is shown/edited.
+                let block = if self.script_post {
+                    "script:post-response"
+                } else {
+                    "script:pre-request"
+                };
                 (
-                    t,
+                    text_block(f, block),
                     Lang::JavaScript,
-                    EditKind::Body("script:pre-request".into()),
-                )
-            }
-            ReqTab::PostScript => {
-                let t = text_block(f, "script:post-response");
-                (
-                    t,
-                    Lang::JavaScript,
-                    EditKind::Body("script:post-response".into()),
+                    EditKind::Body(block.into()),
                 )
             }
             ReqTab::Tests => (
@@ -326,6 +376,17 @@ impl OpenTab {
     pub(crate) fn switch_tab(&mut self, t: ReqTab, cx: &mut Context<BruApp>) {
         self.apply_edits(cx);
         self.req_tab = t;
+        self.load_active_tab(cx);
+    }
+
+    /// Switch the inner Script sub-tab (Pre Request ↔ Post Response), persisting
+    /// the script currently in the editor before loading the other one.
+    pub(crate) fn switch_script_tab(&mut self, post: bool, cx: &mut Context<BruApp>) {
+        if self.script_post == post {
+            return;
+        }
+        self.apply_edits(cx);
+        self.script_post = post;
         self.load_active_tab(cx);
     }
 }

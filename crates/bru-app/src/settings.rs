@@ -35,6 +35,12 @@ impl BruApp {
         self.persist_prefs();
         cx.notify();
     }
+    /// Toggle Developer Mode: enables `require()` of local files in scripts.
+    pub(crate) fn toggle_developer(&mut self, cx: &mut Context<Self>) {
+        self.pref_developer = !self.pref_developer;
+        self.persist_prefs();
+        cx.notify();
+    }
     /// Read the timeout input and commit it (ignored if not a number).
     pub(crate) fn apply_prefs(&mut self, cx: &mut Context<Self>) {
         if let Ok(n) = self.timeout_input.read(cx).text().trim().parse::<u64>() {
@@ -44,9 +50,14 @@ impl BruApp {
         self.persist_prefs();
         cx.notify();
     }
-    /// Write the current prefs (timeout / insecure / theme) to disk.
+    /// Write the current prefs (timeout / insecure / theme / developer) to disk.
     pub(crate) fn persist_prefs(&self) {
-        save_prefs(self.pref_timeout, self.pref_insecure, !theme::is_dark());
+        save_prefs(
+            self.pref_timeout,
+            self.pref_insecure,
+            !theme::is_dark(),
+            self.pref_developer,
+        );
     }
 
     /// Load (or reload) a collection from `dir`, replacing open tabs.

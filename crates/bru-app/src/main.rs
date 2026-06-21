@@ -7,6 +7,7 @@ mod context_menu;
 mod cookies;
 mod edit;
 mod editor;
+mod editor_menu;
 mod env_ui;
 mod envfs;
 mod format;
@@ -153,6 +154,18 @@ struct VarPopup {
     pos: Point<Pixels>,
 }
 
+/// Right-click edit menu over a code editor (Cut/Copy/Paste/Select All),
+/// anchored at `pos` and acting back on `editor`.
+struct EditorMenuState {
+    editor: Entity<CodeEditor>,
+    pos: Point<Pixels>,
+    read_only: bool,
+    has_selection: bool,
+    formattable: bool,
+    /// A `{{var}}` or `require(...)` under the click, for the menu's "Go to" item.
+    goto: Option<editor::GotoTarget>,
+}
+
 /// One labeled field of the structured Auth form (e.g. "Username" â†’ `username`).
 struct AuthFieldRow {
     label: String,
@@ -170,14 +183,13 @@ enum ReqTab {
     Assert,
     Vars,
     Script,
-    PostScript,
     Tests,
     Docs,
     Source,
 }
 
 impl ReqTab {
-    const ALL: [ReqTab; 11] = [
+    const ALL: [ReqTab; 10] = [
         ReqTab::Params,
         ReqTab::Body,
         ReqTab::Headers,
@@ -185,7 +197,6 @@ impl ReqTab {
         ReqTab::Assert,
         ReqTab::Vars,
         ReqTab::Script,
-        ReqTab::PostScript,
         ReqTab::Tests,
         ReqTab::Docs,
         ReqTab::Source,
@@ -199,7 +210,6 @@ impl ReqTab {
             ReqTab::Assert => "Assert",
             ReqTab::Vars => "Vars",
             ReqTab::Script => "Script",
-            ReqTab::PostScript => "Post Script",
             ReqTab::Tests => "Tests",
             ReqTab::Docs => "Docs",
             ReqTab::Source => "Source",
@@ -208,8 +218,8 @@ impl ReqTab {
 }
 use gpui::{
     actions, div, prelude::*, px, size, App, Bounds, Context, Div, Entity, FocusHandle, Focusable,
-    KeyBinding, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, Window, WindowBounds,
-    WindowOptions,
+    KeyBinding, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Window,
+    WindowBounds, WindowOptions,
 };
 use gpui_platform::application;
 
@@ -250,6 +260,9 @@ struct BruApp {
     /// Preferences: request timeout (s) + TLS-insecure.
     pref_timeout: u64,
     pref_insecure: bool,
+    /// Developer Mode: let scripts `require()` local `.js`/`.json` files. Off
+    /// (Safe Mode) by default, matching Bruno's sandboxed-scripts default.
+    pref_developer: bool,
     prefs_open: bool,
     timeout_input: Entity<CodeEditor>,
     /// DevTools: console lines + network log.
@@ -278,6 +291,8 @@ struct BruApp {
     tab_menu: Option<(usize, Point<Pixels>)>,
     /// Hover popup for a `{{var}}` (None = closed).
     var_popup: Option<VarPopup>,
+    /// Right-click edit menu over a code editor (None = closed).
+    editor_menu: Option<EditorMenuState>,
     /// Cached non-request variable scopes (vault/global/collection/env), keyed by
     /// name. Rebuilt by `refresh_vars` on collection/env/vault changes; request
     /// vars are resolved live from the active tab.
@@ -434,8 +449,21 @@ struct OpenTab {
     /// URL-derived path params (name, value editor) shown on the Params tab.
     path_rows: Vec<(String, Entity<CodeEditor>)>,
     sending: bool,
+    /// Script sub-tab: false = Pre Request, true = Post Response. Both scripts
+    /// live under the single "Script" top-level tab (matching Bruno).
+    script_post: bool,
     /// The last response (full outcome, for the response sub-tabs).
     response: Option<bru_engine::RunOutcome>,
+    /// When `Some`, this is a plain-text file tab (e.g. a `require`d `.js`), not a
+    /// `.bru` request: the request UI is bypassed and this single editor fills the
+    /// pane. `file` is then an empty placeholder.
+    text: Option<Entity<CodeEditor>>,
+    /// Scroll position of the text-file editor, so "Go to Implementation" can
+    /// scroll a jumped-to symbol into view.
+    text_scroll: ScrollHandle,
+    /// Scroll position of the shared body/script editor, so local "Go to
+    /// Definition" can scroll a jumped-to symbol into view.
+    body_scroll: ScrollHandle,
 }
 
 /// Build structured grid rows (name/value single-line editors + enabled) from a
@@ -470,10 +498,27 @@ fn subscribe_grid_editor(ed: &Entity<CodeEditor>, path: PathBuf, cx: &mut Contex
     .detach();
 }
 
-/// Subscribe an editor so hovering a `{{var}}` in it shows the value popup.
+/// Subscribe an editor for its `{{var}}` hover popup and its right-click edit
+/// menu (both are parent-rendered overlays anchored at the click point).
 fn subscribe_hover(ed: &Entity<CodeEditor>, cx: &mut Context<BruApp>) {
     cx.subscribe(ed, |this, _ed, ev: &editor::HoverVar, cx| {
         this.on_hover_var(ev, cx)
+    })
+    .detach();
+    cx.subscribe(ed, |this, _ed, ev: &editor::EditorMenu, cx| {
+        this.editor_menu = Some(EditorMenuState {
+            editor: ev.editor.clone(),
+            pos: ev.pos,
+            read_only: ev.read_only,
+            has_selection: ev.has_selection,
+            formattable: ev.formattable,
+            goto: ev.goto.clone(),
+        });
+        cx.notify();
+    })
+    .detach();
+    cx.subscribe(ed, |this, _ed, ev: &editor::GotoDefinition, cx| {
+        this.on_goto_definition(&ev.target, cx)
     })
     .detach();
 }
@@ -596,7 +641,7 @@ impl BruApp {
     fn new(cx: &mut Context<Self>, dir: PathBuf) -> Self {
         let collection = bru_lang::load_collection(&dir).ok();
         // Apply persisted preferences (timeout / insecure-TLS / theme).
-        let (pref_timeout, pref_insecure, light) = load_prefs();
+        let (pref_timeout, pref_insecure, light, pref_developer) = load_prefs();
         theme::set_dark(!light);
         let curl_input = cx.new(|cx| CodeEditor::new(cx, ""));
         let timeout_input = cx.new(|cx| CodeEditor::single_line(cx, &pref_timeout.to_string()));
@@ -638,6 +683,7 @@ impl BruApp {
             curl_input,
             pref_timeout,
             pref_insecure,
+            pref_developer,
             prefs_open: false,
             timeout_input,
             console: Vec::new(),
@@ -658,6 +704,7 @@ impl BruApp {
             ctx_menu: None,
             tab_menu: None,
             var_popup: None,
+            editor_menu: None,
             var_scopes: HashMap::new(),
             rename: None,
             confirm_delete: None,
@@ -703,6 +750,10 @@ impl Render for BruApp {
         let strip = self.tab_strip(cx);
         let content = if self.collection.is_none() || self.home {
             self.home_screen(cx)
+        } else if let Some(i) = self.active.filter(|&i| self.tabs[i].text.is_some()) {
+            // A plain-text file tab (e.g. a `require`d `.js`): one full-pane editor,
+            // no URL bar / sub-tabs / response pane.
+            self.text_pane(&self.tabs[i], cx)
         } else if let Some(i) = self.active {
             let tab = &self.tabs[i];
             // The URL bar spans the full width; below it the request pane (left)
@@ -915,6 +966,9 @@ impl Render for BruApp {
         }
         if self.var_popup.is_some() {
             root = root.child(self.var_popup_overlay(window, cx));
+        }
+        if self.editor_menu.is_some() {
+            root = root.child(self.editor_menu_overlay(cx));
         }
         root
     }

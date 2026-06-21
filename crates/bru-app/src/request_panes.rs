@@ -52,6 +52,53 @@ impl BruApp {
     }
 
     /// The content for the active request sub-tab (the shared editor).
+    /// Full-pane editor for a plain-text file tab (a `require`d module opened via
+    /// Ctrl+click). A path header sits above the editable, scrollable editor.
+    pub(crate) fn text_pane(&self, tab: &OpenTab, _cx: &mut Context<Self>) -> Div {
+        let Some(editor) = tab.text.clone() else {
+            return div();
+        };
+        let rel = tab
+            .path
+            .strip_prefix(&self.dir)
+            .unwrap_or(&tab.path)
+            .to_string_lossy()
+            .into_owned();
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .bg(theme::bg())
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .w_full()
+                    .border_b_1()
+                    .border_color(theme::border1())
+                    .font_family("monospace")
+                    .text_size(px(12.))
+                    .text_color(theme::muted())
+                    .child(rel),
+            )
+            .child(
+                div()
+                    .id("text-file")
+                    .overflow_y_scroll()
+                    .track_scroll(&tab.text_scroll)
+                    .min_h_0()
+                    .flex_1()
+                    .w_full()
+                    .p_3()
+                    .font_family("monospace")
+                    .text_size(px(13.))
+                    .line_height(px(19.))
+                    .child(editor),
+            )
+    }
+
     pub(crate) fn req_content(&self, tab: &OpenTab, cx: &mut Context<Self>) -> Div {
         if matches!(tab.edit_kind, EditKind::Kv(_)) {
             return self.kv_grid(tab, cx);
@@ -99,25 +146,56 @@ impl BruApp {
                 .child(pane("QUERY", "gql-query", tab.body_editor.clone()))
                 .child(pane("VARIABLES", "gql-vars", tab.body_vars_editor.clone()));
         }
+        let body_box = div()
+            .id("body")
+            .overflow_y_scroll()
+            .track_scroll(&tab.body_scroll)
+            .min_h_0()
+            .flex_1()
+            .w_full()
+            .p_3()
+            .font_family("monospace")
+            .text_size(px(13.))
+            .line_height(px(19.))
+            .child(tab.body_editor.clone());
         div()
             .flex()
             .flex_col()
             .flex_1()
             .w_full()
             .bg(theme::bg())
-            .child(
-                div()
-                    .id("body")
-                    .overflow_y_scroll()
-                    .min_h_0()
-                    .flex_1()
-                    .w_full()
-                    .p_3()
-                    .font_family("monospace")
-                    .text_size(px(13.))
-                    .line_height(px(19.))
-                    .child(tab.body_editor.clone()),
+            // The single "Script" tab carries an inner Pre Request / Post Response
+            // sub-tab strip (Bruno's layout); other body tabs render just the editor.
+            .when(tab.req_tab == ReqTab::Script, |d| {
+                d.child(self.script_subtabs(tab, cx))
+            })
+            .child(body_box)
+    }
+
+    /// The inner Pre Request / Post Response strip shown inside the Script tab.
+    fn script_subtabs(&self, tab: &OpenTab, cx: &mut Context<Self>) -> Div {
+        let chip = |label: &'static str, active: bool, post: bool, cx: &mut Context<Self>| {
+            tab_chip(label, active).on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _e: &MouseUpEvent, _w, cx| {
+                    if let Some(i) = this.active {
+                        this.tabs[i].switch_script_tab(post, cx);
+                    }
+                    cx.notify();
+                }),
             )
+        };
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .w_full()
+            .px_2()
+            .bg(theme::bg())
+            .border_b_1()
+            .border_color(theme::border1())
+            .child(chip("Pre Request", !tab.script_post, false, cx))
+            .child(chip("Post Response", tab.script_post, true, cx))
     }
 
     /// The structured params/headers grid (enable toggle + name + value + ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¢).

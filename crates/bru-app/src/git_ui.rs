@@ -137,9 +137,12 @@ impl BruApp {
         let opts = self.send_options();
         let globals = self.send_globals();
         let env = self.selected_env.clone();
+        let developer = self.pref_developer;
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_folder_blocking(files, vars_base, opts, globals, env));
+            let _ = tx.send(run_folder_blocking(
+                files, vars_base, opts, globals, env, developer,
+            ));
         });
         cx.spawn(async move |this, cx| {
             let result = rx.await;
