@@ -348,7 +348,10 @@ impl CodeEditor {
 
     /// Byte offset of the start of the line containing `offset`.
     fn line_start(&self, offset: usize) -> usize {
-        self.content[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0)
+        self.content[..offset]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0)
     }
 
     fn next_word(&self, offset: usize) -> usize {
@@ -828,7 +831,12 @@ impl CodeEditor {
     /// Right-click: focus, place the caret at the click *unless* it lands inside
     /// the current selection (so Cut/Copy keep acting on it), then ask the parent
     /// to open the edit menu. Mirrors Zed's `mouse_right_down`.
-    fn on_right_mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_right_mouse_down(
+        &mut self,
+        e: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         window.focus(&self.focus_handle, cx);
         let idx = self.index_for_position(e.position);
         if !self.selected_range.contains(&idx) {
@@ -1578,7 +1586,7 @@ mod tests {
     fn word_range_on_punctuation_selects_one_char() {
         let s = "a = b";
         assert_eq!(&s[word_range_at_offset(s, 2)], "="); // on '='
-        // Past the end clamps (no panic); here it catches the trailing word.
+                                                         // Past the end clamps (no panic); here it catches the trailing word.
         assert_eq!(&s[word_range_at_offset(s, 99)], "b");
         // End-of-text after a non-word char yields an empty range.
         assert!(word_range_at_offset("a ", 2).is_empty());
@@ -1603,11 +1611,11 @@ mod tests {
         assert_eq!(next_word_boundary(s, 0), 3); // after "foo"
         assert_eq!(next_word_boundary(s, 3), 4); // over the "." run
         assert_eq!(next_word_boundary(s, 4), 7); // after "bar"
-        // Backward from end: start of "baz", then start of "bar"…
+                                                 // Backward from end: start of "baz", then start of "bar"…
         assert_eq!(prev_word_boundary(s, s.len()), 8); // start of "baz"
         assert_eq!(prev_word_boundary(s, 7), 4); // start of "bar"
         assert_eq!(prev_word_boundary(s, 3), 0); // start of "foo"
-        // Clamps at the ends, no panic.
+                                                 // Clamps at the ends, no panic.
         assert_eq!(next_word_boundary(s, s.len()), s.len());
         assert_eq!(prev_word_boundary(s, 0), 0);
     }

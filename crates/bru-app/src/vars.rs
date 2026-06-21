@@ -101,7 +101,11 @@ impl BruApp {
     // ── Ctrl/Cmd+click "go to definition" ─────────────────────────────────────
     /// Route a Ctrl+click target: a `{{var}}` to its defining scope, or a
     /// `require(...)` specifier to the file it resolves to.
-    pub(crate) fn on_goto_definition(&mut self, target: &editor::GotoTarget, cx: &mut Context<Self>) {
+    pub(crate) fn on_goto_definition(
+        &mut self,
+        target: &editor::GotoTarget,
+        cx: &mut Context<Self>,
+    ) {
         match target {
             editor::GotoTarget::Var(name) => self.goto_var_definition(name, cx),
             editor::GotoTarget::Module { spec, symbol } => {
@@ -469,11 +473,17 @@ mod tests {
         std::fs::create_dir_all(&pkg).unwrap();
         std::fs::write(pkg.join("index.js"), "module.exports = {};").unwrap();
         assert_eq!(
-            resolve_module_in(&d.path, "data").unwrap().file_name().unwrap(),
+            resolve_module_in(&d.path, "data")
+                .unwrap()
+                .file_name()
+                .unwrap(),
             "data.json"
         );
         assert_eq!(
-            resolve_module_in(&d.path, "pkg").unwrap().file_name().unwrap(),
+            resolve_module_in(&d.path, "pkg")
+                .unwrap()
+                .file_name()
+                .unwrap(),
             "index.js"
         );
     }

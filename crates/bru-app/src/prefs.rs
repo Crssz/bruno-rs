@@ -44,7 +44,9 @@ pub fn load_prefs() -> (u64, bool, bool, bool) {
             v.get("timeout").and_then(|x| x.as_u64()).unwrap_or(30),
             v.get("insecure").and_then(|x| x.as_bool()).unwrap_or(false),
             v.get("light").and_then(|x| x.as_bool()).unwrap_or(false),
-            v.get("developer").and_then(|x| x.as_bool()).unwrap_or(false),
+            v.get("developer")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
         ),
         None => (30, false, false, false),
     }

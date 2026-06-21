@@ -81,7 +81,9 @@ impl BruApp {
                 .text_size(px(13.))
                 .child(label.to_string());
             if enabled {
-                d = d.text_color(theme::text()).hover(|s| s.bg(theme::surface0()));
+                d = d
+                    .text_color(theme::text())
+                    .hover(|s| s.bg(theme::surface0()));
             } else {
                 d = d.text_color(theme::muted());
             }
@@ -110,14 +112,16 @@ impl BruApp {
                 ))
                 .child(div().my_1().mx_2().h(px(1.)).bg(theme::border2()))
             })
-            .child(item("Cut", editable && has_sel).when(editable && has_sel, |d| {
-                d.on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
-                        this.editor_menu_run(EditAction::Cut, cx)
-                    }),
-                )
-            }))
+            .child(
+                item("Cut", editable && has_sel).when(editable && has_sel, |d| {
+                    d.on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                            this.editor_menu_run(EditAction::Cut, cx)
+                        }),
+                    )
+                }),
+            )
             .child(item("Copy", has_sel).when(has_sel, |d| {
                 d.on_mouse_up(
                     MouseButton::Left,

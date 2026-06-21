@@ -250,10 +250,14 @@ mod tests {
     #[test]
     fn js_symbol_range_prefers_declaration() {
         // The function declaration (early) should win over the export shorthand.
-        let src = "async function useOAPISetVar(){ return 1; }\nmodule.exports = { useOAPISetVar };";
+        let src =
+            "async function useOAPISetVar(){ return 1; }\nmodule.exports = { useOAPISetVar };";
         let r = super::js_symbol_range(src, "useOAPISetVar").unwrap();
         assert_eq!(&src[r.clone()], "useOAPISetVar");
-        assert!(r.start < 30, "should point at the decl, not the export line");
+        assert!(
+            r.start < 30,
+            "should point at the decl, not the export line"
+        );
     }
 
     #[test]

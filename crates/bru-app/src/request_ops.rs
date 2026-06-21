@@ -26,7 +26,9 @@ impl BruApp {
         self.status = "Sending\u{2026}".into();
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(run_blocking(file, dir, script_dir, opts, globals, env, developer));
+            let _ = tx.send(run_blocking(
+                file, dir, script_dir, opts, globals, env, developer,
+            ));
         });
         cx.spawn(async move |this, cx| {
             let result = rx.await;
